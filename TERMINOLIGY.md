@@ -20,5 +20,3 @@ The terms I’d use in the API and UI:
 | **Catalog** | The Git-backed collection of **skills** (reusable procedures), **connectors** (access to tools or services), and **projects** (definitions of the workloads the operator manages). |
 | **Evidence** | The trace the harness saves under the run ID, including tool calls, observed results, and verification. |
 | **Memory entry** | The operator’s readable account of what happened and what matters for future work, linked to the evidence. |
-
-For the first slice, that gives us a precise sentence: **The operator submits a task to the harness. The harness creates a run and launches a worker. The worker calls `write_file` over MCP, the harness verifies the file, and the operator reads the evidence by run ID.**
