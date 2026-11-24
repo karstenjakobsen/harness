@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import httpx
@@ -69,6 +70,35 @@ def test_api_goals_list_uses_configured_url(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [
+            {
+                "id": 7,
+                "status": "draft",
+                "title": "Réviser le guide",
+                "revision": None,
+                "operator": None,
+                "extra": {"tags": ["docs"]},
+            }
+        ],
+    ],
+)
+def test_api_goals_list_json_prints_full_payload(monkeypatch, payload):
+    body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+    def get(url, **_kwargs):
+        return httpx.Response(200, request=httpx.Request("GET", url), content=body)
+
+    monkeypatch.setattr(httpx, "get", get)
+    result = CliRunner().invoke(cli, ["api", "goals", "list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout_bytes == body + b"\n"
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "localhost:8000",
@@ -94,15 +124,17 @@ def test_api_goals_list_rejects_invalid_base_url(monkeypatch, url):
     ("status_code", "body", "message"),
     [(500, {}, "returned HTTP 500"), (200, {}, "returned an invalid goal list")],
 )
+@pytest.mark.parametrize("options", [[], ["--json"]])
 def test_api_goals_list_reports_invalid_responses(
-    monkeypatch, status_code, body, message
+    monkeypatch, status_code, body, message, options
 ):
     def get(url, **_kwargs):
         return httpx.Response(status_code, request=httpx.Request("GET", url), json=body)
 
     monkeypatch.setattr(httpx, "get", get)
-    result = CliRunner().invoke(cli, ["api", "goals", "list"])
+    result = CliRunner().invoke(cli, ["api", "goals", "list", *options])
     assert result.exit_code == 1
+    assert result.stdout == ""
     assert message in result.stderr
 
 

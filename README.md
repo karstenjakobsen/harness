@@ -77,8 +77,10 @@ sign-in.
 
 ```sh
 uv run --package harness-operator harness-operator api goals list
+uv run --package harness-operator harness-operator api goals list --json
 ```
 
+`--json` prints the complete FastAPI response to standard output.
 The command uses `http://127.0.0.1:8000` by default. Use `HARNESS_API_URL` or
 `harness-operator api --url URL goals list` to point it at another instance.
 

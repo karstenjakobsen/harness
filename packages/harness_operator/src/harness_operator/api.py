@@ -50,8 +50,9 @@ def goals() -> None:
 
 
 @goals.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Print the full API response as JSON.")
 @click.pass_obj
-def list_goals(api_url: str) -> None:
+def list_goals(api_url: str, as_json: bool) -> None:
     """List goals from the Harness API."""
     try:
         response = httpx.get(f"{api_url}/goals", timeout=5.0, trust_env=False)
@@ -65,12 +66,17 @@ def list_goals(api_url: str) -> None:
             f"Could not reach the Harness API at {api_url}. Start it with `make api`."
         ) from error
 
+    body = response.content
     try:
-        saved_goals = GOAL_LIST.validate_json(response.content)
+        saved_goals = GOAL_LIST.validate_json(body)
     except ValidationError as error:
         raise click.ClickException(
             "The Harness API returned an invalid goal list."
         ) from error
+
+    if as_json:
+        click.echo(body, nl=not body.endswith(b"\n"))
+        return
 
     if not saved_goals:
         click.echo("No saved goals.")

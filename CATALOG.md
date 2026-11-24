@@ -12,7 +12,7 @@ alias for `harness-operator`.
 | `harness-operator register` | Starts Codex device sign-in and prints a verification link and one-time code. |
 | `harness-operator ask [MESSAGE]` | Sends a message to Codex and prints its reply. |
 | `harness-operator goal create [MESSAGE]` | Saves a draft goal and prints its ID, duration, assessment type, and any clarification question. |
-| `harness-operator api goals list` | Calls FastAPI directly and lists saved goals. No sign-in is required. |
+| `harness-operator api goals list [--json]` | Calls FastAPI directly and lists saved goals. `--json` prints the complete API response. No sign-in is required. |
 
 `ask` and `goal create` use the Codex sign-in. Supply a quoted message, pipe it
 on standard input, or omit it to type at the terminal prompt. Add `--help` to
@@ -30,6 +30,7 @@ The API defaults to `http://127.0.0.1:8000`. Use `HARNESS_API_URL` or set
 
 ```sh
 harness-operator api goals list
+harness-operator api goals list --json
 harness-operator api --url http://127.0.0.1:9000 goals list
 ```
 
