@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import get_args
 
 from harness.client import call, connect
-from harness.evidence import ACTIVE, TASK, Worker
+from harness.evidence import ACTIVE
+from harness.hello_file import FileOutcome
+from harness.launch import Worker
 
 
 async def main() -> int:
@@ -15,6 +17,7 @@ async def main() -> int:
     commands = parser.add_subparsers(dest="action", required=True)
     run = commands.add_parser("run")
     run.add_argument("--worker", choices=get_args(Worker), default="codex")
+    run.add_argument("--content", help="Desired UTF-8 content of result.txt")
     commands.add_parser("get").add_argument("run_id")
     args = parser.parse_args()
     key = Path("/operator/token").read_text().strip()
@@ -22,7 +25,8 @@ async def main() -> int:
         if args.action == "get":
             print(json.dumps(await call(s, "get_run", run_id=args.run_id), indent=2))
             return 0
-        run_id = (await call(s, "start_run", task=TASK, worker=args.worker))["run_id"]
+        task = FileOutcome() if args.content is None else FileOutcome(content=args.content)
+        run_id = (await call(s, "start_run", task=task.model_dump(), worker=args.worker))["run_id"]
         print(f"run_id={run_id}", flush=True)
         while True:
             data = await call(s, "get_run", run_id=run_id, include_trace=False)

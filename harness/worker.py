@@ -1,31 +1,12 @@
 import asyncio
+import base64
 import json
 import os
 import sys
 from pathlib import Path
 
-from harness.client import call, connect
-from harness.evidence import EXPECTED, TASK
 
-
-async def fixture(mode: str):
-    if mode == "fixture-missing":
-        print(json.dumps({"fixture": mode, "action": "exit without writing"}))
-        return
-    content = {"fixture-write": EXPECTED, "fixture-wrong": EXPECTED + "\n"}[mode]
-    async with connect(os.environ["WORKER_MCP_URL"], os.environ["RUN_TOKEN"]) as session:
-        for name, args in [
-            ("write_file", {"path": "result.txt", "content": content}),
-            ("read_file", {"path": "result.txt"}),
-        ]:
-            print(
-                json.dumps(
-                    {"fixture": mode, "tool": name, "result": await call(session, name, **args)}
-                )
-            )
-
-
-def codex():
+def codex(prompt: str):
     home = Path(os.environ["CODEX_HOME"])
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     auth = Path("/run/secrets/codex-auth")
@@ -59,13 +40,17 @@ def codex():
         "mcp_servers.workspace.required=true",
         "-c",
         'mcp_servers.workspace.default_tools_approval_mode="approve"',
-        TASK,
+        "--",
+        prompt,
     ]
     os.execvp(args[0], args)
 
 
 if __name__ == "__main__":
+    task = json.loads(base64.b64decode(os.environ["RUN_TASK_B64"]))
     if sys.argv[1] == "codex":
-        codex()
+        codex(task["prompt"])
     else:
-        asyncio.run(fixture(sys.argv[1]))
+        from harness.hello_file import fixture_worker
+
+        asyncio.run(fixture_worker(sys.argv[1], task["outcome"]))

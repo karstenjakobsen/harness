@@ -1,6 +1,28 @@
 # Codex file harness
 
-The operator is the Python CLI invoked by `make run`. It submits a fixed task over MCP and prints its run ID. The agent in this test is the Codex worker. The prompt explicitly names `write_file`, then `read_file`. A passing trace demonstrates worker launch, tool delivery, evidence capture, and independent verification. Autonomous tool discovery and an agentic operator are separate experiments.
+The operator is the Python CLI invoked by `make run`. It submits a desired outcome over MCP and prints its run ID. The agent in this test is the Codex worker. The hello-file fixture supplies the worker prompt, which explicitly names `write_file`, then `read_file`. A passing trace demonstrates worker launch, tool delivery, evidence capture, and independent verification. Autonomous tool discovery and an agentic operator are separate experiments.
+
+## Operator API
+
+`start_run` accepts the task's desired outcome and returns `{"run_id": "..."}` immediately. The Python CLI submits these MCP arguments for the default run.
+
+```json
+{"task": {"kind": "hello-file", "path": "result.txt", "content": "hello from the harness"}}
+```
+
+The hello-file fixture accepts up to 4096 UTF-8 bytes at that path. The original prompt string and a call with no arguments still select the default proof. For a different expected value, the operator CLI accepts `run --content 'a different value'`. The harness chooses the worker image, grants its run token access to the fixture's file, and sends the resolved task to the worker.
+
+`get_run` takes `run_id` and an optional `include_trace`. The overall `status` and one-line summary retain their original meaning. The two additional fields show why the run received that verdict.
+
+| Worker and file | `execution_status` | `verification_status` | Overall `status` |
+|---|---|---|---|
+| Exit 0, exact bytes and observed read-back | `succeeded` | `passed` | `passed` |
+| Exit 0, missing file or trailing newline | `succeeded` | `failed` | `verification failed` |
+| Nonzero exit, exact bytes and observed read-back | `failed` | `passed` | `worker failed` |
+
+On lookup, the harness derives these fields for older records from their stored exit and verification evidence. The original files stay intact.
+
+The **harness** is the MCP service. Its **engine** supervises each run and persists its evidence. Each **execution backend** accepts a typed launch request, reports identifiers and execution facts, supplies worker logs, and cleans up its own resources. The engine selects the verifier from the stored task outcome and runs it after the worker exits.
 
 ## Run with Nomad
 
@@ -23,7 +45,7 @@ The harness registers a one-task batch job with task restarts and rescheduling d
 
 The local development cluster trusts processes with access to the host loopback RPC port or the Compose control network. For a live worker, file-based sign-in keeps the Codex credential out of the Nomad job spec. If you use the alternative `CODEX_API_KEY` environment setting, Nomad receives the key as task environment in the job spec. The worker receives only its own run token for the MCP file tools.
 
-Run `make smoke BACKEND=nomad` to check the positive and both negative cases. It restarts the harness and compares all three recovered JSON records with their pre-restart copies. For fixture runs the host client can be started with `make nomad-client` alone. To stop the development stack after all runs finish, press Ctrl-C in the client's terminal and run `make down BACKEND=nomad`. Both named data volumes persist.
+Run `make smoke BACKEND=nomad` to check the positive and both negative cases. It also checks a nondefault outcome containing Unicode, a newline, and a literal Nomad variable expression. After allocation cleanup it restarts the harness and compares the recovered JSON records with their pre-restart copies. For fixture runs the host client can be started with `make nomad-client` alone. To stop the development stack after all runs finish, press Ctrl-C in the client's terminal and run `make down BACKEND=nomad`. Both named data volumes persist.
 
 [Nomad client requirements](https://developer.hashicorp.com/nomad/docs/deploy/production/requirements) · [Docker task driver](https://developer.hashicorp.com/nomad/docs/deploy/task-driver/docker) · [Client logs and allocation garbage collection](https://developer.hashicorp.com/nomad/api-docs/client)
 
@@ -33,7 +55,10 @@ On November 24, 2026, the CLI submitted run `61d60eb1-cd4a-467e-9c4f-c11ad29349e
 
 Nomad subsequently returned HTTP 404 for the job and the client allocation filesystem. After restarting the harness, the full JSON trace from `make get` had the same SHA-256 digest as before restart (computed over sorted-key JSON). The missing-file and trailing-newline workers also exited zero, and both received `verification failed`.
 
+After the execution backend and verifier refactor, the CLI repeated the live Codex test in allocation `88408df3-fea2-da6f-3790-dfa17992c59b`. The trace recorded `execution_status=succeeded` and `verification_status=passed`. Its full JSON digest matched after cleanup and a harness restart. Both the new run and the original proof can be inspected by ID.
+
 ```sh
+make get RUN_ID=2773bd39-3983-4b9e-9935-ca82bf42cd51
 make get RUN_ID=61d60eb1-cd4a-467e-9c4f-c11ad29349ea
 ```
 
@@ -81,7 +106,7 @@ In direct Docker mode the harness mounts the Docker socket. The two MCP endpoint
 make smoke
 ```
 
-The smoke test uses real Docker workers and the same MCP endpoints. It checks a correct write, a missing file, and a trailing newline. All three workers exit zero. The latter two must report `verification failed`, and each trace must still be retrievable after container removal. These deterministic workers run without a model credential. To inspect an individual failure, run `make run WORKER=fixture-wrong` and look up its ID.
+The smoke test uses real Docker workers and the same MCP endpoints. It checks a correct write, a missing file, and a trailing newline. Each worker exits zero. The missing-file and trailing-newline cases must report `verification failed`, and each trace must still be retrievable after container removal. These deterministic workers run without a model credential. To inspect an individual failure, run `make run WORKER=fixture-wrong` and look up its ID.
 
 ## Local development
 

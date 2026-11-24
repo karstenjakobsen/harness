@@ -1,15 +1,13 @@
 """Direct Docker execution for the original harness test."""
 
 import asyncio
-import os
 import time
 
 import docker
 from docker.errors import NotFound
 from docker.types import LogConfig, Mount
 
-from harness.evidence import Run
-from harness.launch import worker_env
+from harness.launch import ExecutionRef, LaunchRequest, Progress, Report, WorkerExit
 
 
 class DockerBackend:
@@ -21,23 +19,21 @@ class DockerBackend:
     async def close(self):
         self.docker.close()
 
-    def create_container(self, data: dict, token: str):
-        worker = data["worker"]
-        env, auth_file = worker_env(worker, token)
+    def create_container(self, request: LaunchRequest):
+        auth_file = request.auth_file
         mounts = (
             [Mount("/run/secrets/codex-auth", auth_file, type="bind", read_only=True)]
             if auth_file
             else []
         )
-        uid = int(os.getenv("WORKER_UID", "1000"))
-        launch = data["launch"]
+        uid = request.uid
         return self.docker.containers.create(
-            launch["image"],
-            command=[worker],
-            name=launch["name"],
-            network=launch["network"],
-            labels={"harness.run": data["run_id"]},
-            environment=env,
+            request.image,
+            command=[request.worker],
+            name=request.ref.name,
+            network=request.network,
+            labels={"harness.run": request.ref.run_id},
+            environment=request.worker_env(),
             mounts=mounts,
             user=f"{uid}:{uid}",
             read_only=True,
@@ -53,44 +49,44 @@ class DockerBackend:
             log_config=LogConfig(type="json-file"),
         )
 
-    def locate(self, data: dict):
+    def locate(self, ref: ExecutionRef):
         try:
-            container = self.docker.containers.get(
-                data.get("container_id") or data["launch"]["name"]
-            )
+            container = self.docker.containers.get(ref.ids.get("container_id") or ref.name)
         except NotFound:
             return None
-        if container.labels.get("harness.run") != data["run_id"]:
+        if container.labels.get("harness.run") != ref.run_id:
             raise RuntimeError("Container ownership label does not match the run")
         return container
 
-    async def wait(self, run: Run, token: str, deadline: float) -> dict:
-        data = run.read()
-        container = await asyncio.to_thread(self.locate, data)
+    async def wait(self, request: LaunchRequest, report: Report) -> WorkerExit:
+        container = await asyncio.to_thread(self.locate, request.ref)
         if container is None:
-            if data.get("container_id"):
+            if request.ref.ids.get("container_id"):
                 raise RuntimeError("Recorded worker container is missing")
-            container = await asyncio.to_thread(self.create_container, data, token)
-        run.update(container_id=container.id, image_id=container.attrs["Image"])
+            container = await asyncio.to_thread(self.create_container, request)
+        report(
+            Progress(details={"container_id": container.id, "image_id": container.attrs["Image"]})
+        )
         if container.status == "created":
             await asyncio.to_thread(container.start)
-        run.update(status="running")
+        report(Progress(running=True))
         while True:
             await asyncio.to_thread(container.reload)
             if container.status in {"exited", "dead"}:
-                return container.attrs["State"]
-            if time.time() >= deadline:
-                run.update(timed_out=True)
+                state = container.attrs["State"]
+                return WorkerExit(state["ExitCode"], state["StartedAt"], state["FinishedAt"])
+            if time.time() >= request.deadline:
+                report(Progress(timed_out=True))
                 await asyncio.to_thread(container.kill)
             await asyncio.sleep(0.5)
 
-    async def logs(self, data: dict, stream: str) -> bytes:
-        container = await asyncio.to_thread(self.locate, data)
+    async def logs(self, ref: ExecutionRef, stream: str) -> bytes:
+        container = await asyncio.to_thread(self.locate, ref)
         return await asyncio.to_thread(
             container.logs, stdout=stream == "stdout", stderr=stream == "stderr"
         )
 
-    async def cleanup(self, data: dict):
-        container = await asyncio.to_thread(self.locate, data)
+    async def cleanup(self, ref: ExecutionRef):
+        container = await asyncio.to_thread(self.locate, ref)
         if container is not None:
             await asyncio.to_thread(container.remove)

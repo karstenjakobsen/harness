@@ -12,10 +12,11 @@ operator = ["docker", "compose", "run", "--rm", "--no-deps", "-T", "operator"]
 check = TestCase()
 
 
-def check_run(worker: str, status: str, actual: str | None):
-    result = subprocess.run(
-        [*operator, "run", "--worker", worker], stdout=subprocess.PIPE, text=True
-    )
+def check_run(worker: str, status: str, actual: str | None, *, content: str | None = None):
+    args = [*operator, "run", "--worker", worker]
+    if content is not None:
+        args.extend(["--content", content])
+    result = subprocess.run(args, stdout=subprocess.PIPE, text=True)
     print(result.stdout, end="", flush=True)
     match = re.search(r"^run_id=([0-9a-f-]{36})$", result.stdout, re.MULTILINE)
     check.assertIsNotNone(match, result.stdout)
@@ -37,7 +38,12 @@ def check_run(worker: str, status: str, actual: str | None):
     else:
         check.assertRegex(trace["container_id"], r"^[0-9a-f]{64}$")
     check.assertEqual(trace["exit_code"], 0)
+    check.assertEqual(trace["execution_status"], "succeeded")
+    check.assertEqual(trace["verification_status"], "passed" if status == "passed" else "failed")
     check.assertEqual(trace["verification"]["actual"], actual)
+    if content is not None:
+        check.assertEqual(trace["outcome"]["content"], content)
+        check.assertEqual(trace["verification"]["expected"], content)
     check.assertEqual(trace["verification"]["exact_bytes"], status == "passed")
     check.assertLessEqual(
         datetime.fromisoformat(trace["exited_at"]),
@@ -55,6 +61,8 @@ if __name__ == "__main__":
         check_run("fixture-missing", "verification failed", None),
         check_run("fixture-wrong", "verification failed", "hello from the harness\n"),
     ]
+    custom = 'per-run "café"\n${NOMAD_ALLOC_ID}'
+    traces.append(check_run("fixture-write", "passed", custom, content=custom))
     if os.getenv("BACKEND") == "nomad":
         # Ask the scheduler independently of the harness cleanup field.
         paths = [
@@ -80,4 +88,4 @@ if __name__ == "__main__":
                 ["make", "-s", "--no-print-directory", "get", f"RUN_ID={original['run_id']}"]
             )
             check.assertEqual(json.loads(recovered), original)
-        print("All three traces matched after allocation cleanup and harness restart.")
+        print("All traces matched after allocation cleanup and harness restart.")

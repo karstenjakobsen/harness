@@ -39,12 +39,7 @@ test: setup
 	.venv/bin/python -m unittest discover -s tests -v
 
 build:
-ifeq ($(BACKEND),nomad)
-	docker compose build harness
-	@image=$$(docker compose config --images worker) && { docker image inspect "$$image" >/dev/null 2>&1 || docker compose build worker; }
-else
 	docker compose build harness worker
-endif
 
 up: build
 	docker compose up -d --wait harness

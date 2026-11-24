@@ -13,7 +13,8 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Mount, Route
 
 from harness.engine import Engine
-from harness.evidence import TASK, Run, Worker
+from harness.launch import Worker
+from harness.tasks import TaskInput
 
 
 def create_app(root: Path = Path("/data"), key_file: Path = Path("/operator/token")):
@@ -31,32 +32,27 @@ def create_app(root: Path = Path("/data"), key_file: Path = Path("/operator/toke
     worker = FastMCP("Run workspace", **settings)
 
     @operator.tool()
-    async def start_run(task: str = TASK, worker: Worker = "codex") -> dict[str, str]:
-        """Submit the fixed hello-file task and return its lookup ID immediately."""
-        if task != TASK:
-            raise ValueError("This proof of concept accepts only the fixed hello-file task")
-        return {"run_id": engine.submit(worker)}
+    async def start_run(task: TaskInput = None, worker: Worker = "codex") -> dict[str, str]:
+        """Submit a desired outcome and return its run ID immediately."""
+        return {"run_id": engine.submit(task, worker)}
 
     @operator.tool()
     async def get_run(run_id: str, include_trace: bool = True) -> dict[str, Any]:
-        """Look up a run's launch, tool calls, worker output, exit and verification."""
-        run = Run(root, run_id)
-        if not run.record.exists():
-            raise ValueError("Unknown run ID")
-        return run.read(include_trace)
+        """Read execution status, verification result, and optional evidence for a run."""
+        return engine.get_run(run_id, include_trace)
 
     @worker.tool()
     async def write_file(
         ctx: Context, path: str, content: Annotated[str, Field(max_length=4096)]
     ) -> dict[str, int]:
-        """Write UTF-8 content to result.txt in this run's workspace."""
+        """Write UTF-8 content to an allowed path in this run's workspace."""
         return engine.active[ctx.request_context.request.state.token].file_tool(
             "write_file", path, content
         )
 
     @worker.tool()
     async def read_file(ctx: Context, path: str) -> dict[str, str]:
-        """Read result.txt from this run's workspace."""
+        """Read an allowed path in this run's workspace."""
         return engine.active[ctx.request_context.request.state.token].file_tool("read_file", path)
 
     def protected(mcp: FastMCP):

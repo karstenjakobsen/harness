@@ -10,7 +10,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 from harness.client import call
 from harness.engine import Engine
-from harness.evidence import Run
+from harness.evidence import Run, Workspace
+from harness.hello_file import ORIGINAL_PROMPT, FileOutcome
 from harness.server import create_app
 
 
@@ -25,9 +26,11 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
             operator_key = root / "token"
             operator_key.write_text("operator-secret")
             engine = Engine(root, operator_key.read_text())
-            first = Run.create(root, "codex", "worker", "network")
-            second = Run.create(root, "codex", "worker", "network")
-            engine.active.update({"first": first, "second": second})
+            with patch.object(engine, "watch"):
+                first = Run(root, engine.submit(None, "codex"))
+                second = Run(root, engine.submit(None, "codex"))
+            for token, run in [("first", first), ("second", second)]:
+                engine.active[token] = Workspace(run.workspace, run.calls, FileOutcome().files)
             with patch("harness.server.Engine", return_value=engine):
                 app = create_app(root, operator_key)
             self.enterContext(patch.object(engine, "recover"))
@@ -63,8 +66,8 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
                         session, "write_file", path="result.txt", content="first only"
                     )
                     self.assertEqual(result, {"bytes_written": 10})
-                    self.assertEqual(first.file.read_text(), "first only")
-                    self.assertFalse(second.file.exists())
+                    self.assertEqual((first.workspace / "result.txt").read_text(), "first only")
+                    self.assertFalse((second.workspace / "result.txt").exists())
                     self.assertTrue((await session.call_tool("get_run", {})).isError)
                 engine.active.pop("first")
                 self.assertEqual((await http.post("/worker/mcp")).status_code, 401)
@@ -82,3 +85,17 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
                         record = await call(session, "get_run", run_id=started["run_id"])
                         self.assertEqual(record["run_id"], started["run_id"])
                         self.assertEqual(record["status"], "queued")
+                        outcome = {
+                            "kind": "hello-file",
+                            "path": "result.txt",
+                            "content": "per-run value",
+                        }
+                        submitted = await call(session, "start_run", task=outcome)
+                        custom = await call(session, "get_run", run_id=submitted["run_id"])
+                        self.assertEqual(custom["outcome"], outcome)
+                        self.assertIn("per-run value", custom["task"])
+                        self.assertEqual(custom["verification_status"], "pending")
+                        legacy = await call(session, "start_run", task=ORIGINAL_PROMPT)
+                        self.assertIn("run_id", legacy)
+                        bad = await session.call_tool("start_run", {"task": {"kind": "unknown"}})
+                        self.assertTrue(bad.isError)
