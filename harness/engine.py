@@ -33,7 +33,8 @@ class Engine:
 
     def watch(self, run: Run):
         token = hmac.digest(self.key.encode(), run.path.name.encode(), "sha256").hex()
-        self.active[token] = run
+        if run.read()["status"] in ACTIVE:
+            self.active[token] = run
         job = asyncio.create_task(self.execute(run, token))
         self.jobs.add(job)
         job.add_done_callback(self.jobs.discard)
@@ -71,7 +72,10 @@ class Engine:
             mounts=mounts,
             user=f"{uid}:{uid}",
             read_only=True,
-            tmpfs={"/tmp": "rw,nosuid,nodev,mode=1777"},
+            tmpfs={
+                "/tmp": "rw,nosuid,nodev,mode=1777",
+                "/home/worker": f"rw,nosuid,nodev,mode=0700,uid={uid},gid={uid}",
+            },
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
             init=True,

@@ -2,9 +2,6 @@ SHELL := /bin/sh
 .DEFAULT_GOAL := help
 export UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export WORKER_UID ?= $(shell id -u)
-ifeq ($(CODEX_API_KEY),)
-export CODEX_AUTH_FILE ?= $(wildcard $(HOME)/.codex/auth.json)
-endif
 WORKER ?= codex
 # Pass user-supplied values as quoted shell variables in recipes.
 export WORKER RUN_ID
@@ -42,7 +39,7 @@ run: up
 
 get:
 	@test -n "$$RUN_ID" || { echo 'Usage: make get RUN_ID=<uuid>' >&2; exit 2; }
-	@docker compose up -d --wait harness >&2
+	@docker compose up -d --no-recreate --wait harness >&2
 	@$(OPERATOR) get "$$RUN_ID"
 
 smoke: up setup

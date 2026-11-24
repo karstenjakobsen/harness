@@ -9,7 +9,8 @@ from uuid import UUID, uuid4
 EXPECTED = "hello from the harness"
 TASK = (
     "Create result.txt in your workspace containing hello from the harness, then read it back. "
-    "Use the workspace MCP write_file and read_file tools. Write exactly the specified text "
+    "Your assigned workspace is accessed through MCP. Call workspace.write_file first, then "
+    "workspace.read_file. Write exactly the specified text "
     "with no trailing newline."
 )
 Worker = Literal["codex", "fixture-write", "fixture-missing", "fixture-wrong"]
@@ -122,7 +123,7 @@ class Run:
             "checked_at": now(),
             "path": "result.txt",
             "expected": EXPECTED,
-            "actual": actual.decode("utf-8") if actual is not None else None,
+            "actual": actual.decode("utf-8", errors="replace") if actual is not None else None,
             "file_exists": actual is not None,
             "exact_bytes": matches,
             "observed_write_then_read": read_back,
@@ -134,5 +135,7 @@ class Run:
             exited_at=state["FinishedAt"],
             verification=verification,
             cleanup="pending",
-            summary=f"{self.path.name} | {status} | exit={code} | exact={matches} | read={read_back}",
+            summary=(
+                f"{self.path.name} | {status} | exit={code} | exact={matches} | read={read_back}"
+            ),
         )

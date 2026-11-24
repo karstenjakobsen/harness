@@ -2,7 +2,7 @@ import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -31,14 +31,14 @@ def create_app(root: Path = Path("/data"), key_file: Path = Path("/operator/toke
     worker = FastMCP("Run workspace", **settings)
 
     @operator.tool()
-    async def start_run(task: str = TASK, worker: Worker = "codex") -> dict:
+    async def start_run(task: str = TASK, worker: Worker = "codex") -> dict[str, str]:
         """Submit the fixed hello-file task and return its lookup ID immediately."""
         if task != TASK:
             raise ValueError("This proof of concept accepts only the fixed hello-file task")
         return {"run_id": engine.submit(worker)}
 
     @operator.tool()
-    async def get_run(run_id: str, include_trace: bool = True) -> dict:
+    async def get_run(run_id: str, include_trace: bool = True) -> dict[str, Any]:
         """Look up a run's launch, tool calls, worker output, exit and verification."""
         run = Run(root, run_id)
         if not run.record.exists():
@@ -48,14 +48,14 @@ def create_app(root: Path = Path("/data"), key_file: Path = Path("/operator/toke
     @worker.tool()
     async def write_file(
         ctx: Context, path: str, content: Annotated[str, Field(max_length=4096)]
-    ) -> dict:
+    ) -> dict[str, int]:
         """Write UTF-8 content to result.txt in this run's workspace."""
         return engine.active[ctx.request_context.request.state.token].file_tool(
             "write_file", path, content
         )
 
     @worker.tool()
-    async def read_file(ctx: Context, path: str) -> dict:
+    async def read_file(ctx: Context, path: str) -> dict[str, str]:
         """Read result.txt from this run's workspace."""
         return engine.active[ctx.request_context.request.state.token].file_tool("read_file", path)
 
