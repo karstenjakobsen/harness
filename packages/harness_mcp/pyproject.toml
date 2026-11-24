@@ -1,0 +1,16 @@
+[project]
+name = "harness-mcp"
+version = "0.1.0"
+description = "The local MCP server for saved Harness goals."
+requires-python = ">=3.14,<3.15"
+dependencies = ["harness-api", "mcp>=1.30,<2"]
+
+[project.scripts]
+harness_mcp = "harness_mcp.server:main"
+
+[tool.uv.sources]
+harness-api = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.27,<0.10.0"]
+build-backend = "uv_build"
