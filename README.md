@@ -51,6 +51,8 @@ SQLite allows one open assignment per goal.
 user's goal IDs, statuses, latest revision numbers and titles, and current
 operators. The optional `status` argument accepts `draft`, `active`, `paused`,
 `completed`, or `revoked`. Try `operator ask "List active goals."`
+For questions about a plan, the operator calls `get_goal_tree` with the goal ID
+to read each descendant’s current requirements, status, and completion evidence.
 
 ### Create a draft goal
 
@@ -66,6 +68,28 @@ The command saves a draft, prints its ID, and asks a focused question if it
 needs clarification. Unclear details can stay open. SQLite keeps your original
 request and any question alongside the first revision. View the draft with
 `operator ask "List draft goals."`
+
+### Manage a goal directly
+
+The commands below call the workspace’s Python goal API directly. They work
+with FastAPI stopped. Explicit creation saves an active goal and prints JSON
+with its ID and revision.
+Use the returned IDs in later commands. For example, if the parent ID is 1 and
+the new child ID is 2, the following commands revise and complete the child.
+
+```sh
+operator api goals create --title "Lose 20 lb"
+operator api goals create --parent 1 --title "Track food" --duration-days 7 \
+  --success-criteria "A food entry each day" --measurement-plan "Review the log"
+operator api goals revise 2 --duration-days 14
+operator api goals complete 2 --revision 2 --confirmation "I reviewed all fourteen entries."
+operator api goals show 2 --history
+operator api goals show 1 --tree
+```
+
+Use `--reference REF` to record an owner-supplied app reference. Repeating the
+same completion returns the saved decision. Changing a completed definition
+reopens that goal and keeps the earlier evidence in its revision history.
 
 ## FastAPI
 
@@ -89,7 +113,7 @@ The command uses `http://127.0.0.1:8000` by default. Use `HARNESS_API_URL` or
 | `GET` | `/goals` | List goals, optionally filtered by `status` |
 | `POST` | `/goals` | Create a draft |
 | `GET` | `/goals/{goal_id}` | Read the latest definition |
-| `PATCH` | `/goals/{goal_id}` | Revise the title or desired outcome |
+| `PATCH` | `/goals/{goal_id}` | Revise the title, outcome, timing, success criteria, or verification method |
 | `DELETE` | `/goals/{goal_id}` | Hide the goal and close its current assignment while preserving history |
 
 The `harness_api` package follows MVC. The model owns SQLite and goal rules,
@@ -99,5 +123,7 @@ model. The `api goals list` command reads from FastAPI over HTTP. Start FastAPI
 and run the Codex-backed commands from the same workspace to use the same
 SQLite database.
 
-Use `make test` to run pytest. The model, HTTP, and MCP tests use temporary
-SQLite databases.
+Run `make test` for the offline suite and `make check` for lint and formatting.
+Run `make test-live` separately with Codex signed in. It creates a plan through
+the CLI in a temporary workspace, verifies the MCP call, and checks the reply.
+Test teardown removes the workspace and its database even if an assertion fails.

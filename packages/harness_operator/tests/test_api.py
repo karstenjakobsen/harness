@@ -9,6 +9,50 @@ from harness_api import DATABASE_PATH
 from harness_operator import cli
 
 
+def test_explicit_goal_commands_require_api_prefix(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    def unexpected_codex(*_args, **_kwargs):
+        pytest.fail("Explicit goal commands should not start Codex.")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_codex)
+    for args in (
+        ["create", "--title", "My goal"],
+        ["revise", "1", "--title", "Revised"],
+        ["complete", "1", "--revision", "1", "--confirmation", "Verified"],
+        ["show", "1"],
+    ):
+        assert runner.invoke(cli, ["goal", *args]).exit_code == 2
+    assert not DATABASE_PATH.exists()
+
+    result = runner.invoke(cli, ["api", "goals", "create", "--title", "My goal"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "active"
+    assert DATABASE_PATH.is_file()
+
+
+def test_explicit_api_url_cannot_redirect_a_write_to_local_workspace(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "api",
+            "--url",
+            "http://localhost:9000",
+            "goals",
+            "create",
+            "--title",
+            "My goal",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--url applies to 'goals list'" in result.stderr
+    assert not DATABASE_PATH.exists()
+
+
 def test_api_goals_list_uses_http_without_auth(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HARNESS_API_URL", raising=False)

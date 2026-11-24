@@ -232,12 +232,14 @@ source = { editable = "packages/harness_mcp" }
 dependencies = [
     { name = "harness-api" },
     { name = "mcp" },
+    { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "harness-api", editable = "packages/harness_api" },
     { name = "mcp", specifier = ">=1.30,<2" },
+    { name = "pydantic", specifier = ">=2,<3" },
 ]
 
 [[package]]

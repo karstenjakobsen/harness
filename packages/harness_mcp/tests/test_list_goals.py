@@ -7,7 +7,7 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from harness_api import DATABASE_PATH
+from harness_api import DATABASE_PATH, GoalAPI
 
 
 @pytest.fixture
@@ -33,10 +33,31 @@ async def client(tmp_path):
 @pytest.mark.anyio
 async def test_server_initializes_an_empty_goal_list(client, tmp_path):
     tools = await client.list_tools()
-    assert [tool.name for tool in tools.tools] == ["list_goals"]
+    assert {tool.name for tool in tools.tools} == {"list_goals", "get_goal_tree"}
+    assert all(tool.annotations.readOnlyHint for tool in tools.tools)
     result = await client.call_tool("list_goals", {})
     assert result.structuredContent == {"goals": []}
     assert (tmp_path / DATABASE_PATH).is_file()
+
+
+@pytest.mark.anyio
+async def test_tree_includes_grandchild_and_owner_supplied_evidence(client, tmp_path):
+    api = GoalAPI(tmp_path / DATABASE_PATH)
+    root = api.create_goal("Root")
+    child = api.create_goal("Child", parent_goal_id=root["id"])
+    leaf = api.create_goal("Grandchild", parent_goal_id=child["id"])
+    api.create_goal("Unrelated")
+    decision = api.complete_goal(leaf["id"], 1, reference="app:receipt/7")
+    invalid = await client.call_tool("get_goal_tree", {"goal_id": True})
+    assert invalid.isError
+    result = await client.call_tool("get_goal_tree", {"goal_id": root["id"]})
+    assert not result.isError
+    assert result.structuredContent == {
+        "root_id": root["id"],
+        "goals": [root, child, {**leaf, "status": "completed", "completion": decision}],
+    }
+    api.delete_goal(child["id"])
+    assert api.get_goal_tree(root["id"])["goals"] == [root]
 
 
 @pytest.mark.anyio

@@ -1,25 +1,31 @@
 from .models.goals import (
     DATABASE_PATH,
     AssessmentType,
+    Completion,
     Goal,
     GoalAPI,
     GoalDuration,
     GoalNotFoundError,
+    GoalRevision,
     GoalStatus,
     GoalStorageError,
     GoalSummary,
+    GoalTree,
     GoalValidationError,
 )
 
 __all__ = [
     "DATABASE_PATH",
     "AssessmentType",
+    "Completion",
     "Goal",
     "GoalAPI",
     "GoalDuration",
     "GoalNotFoundError",
+    "GoalRevision",
     "GoalStatus",
     "GoalStorageError",
     "GoalSummary",
+    "GoalTree",
     "GoalValidationError",
 ]

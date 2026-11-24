@@ -71,6 +71,43 @@ def test_http_rejects_invalid_input_and_reports_missing_goals(tmp_path):
         assert client.get("/goals").json() == []
 
 
+def test_http_revises_child_requirements_and_preserves_parent(tmp_path):
+    with TestClient(create_app(tmp_path / "goals.sqlite3")) as client:
+        root = client.post("/goals", json={"title": "Root"}).json()
+        assert (
+            client.post(
+                "/goals", json={"title": "Child", "parent_goal_id": True}
+            ).status_code
+            == 422
+        )
+        child = client.post(
+            "/goals",
+            json={
+                "parent_goal_id": root["id"],
+                "title": "Track food",
+                "duration_days": 7,
+                "measurement_plan": "Review log",
+            },
+        ).json()
+        path = f"/goals/{child['id']}"
+        revised = client.patch(
+            path, json={"duration_days": 14, "success_criteria": "Log daily"}
+        ).json()
+        assert revised == {
+            **child,
+            "revision": 2,
+            "duration_days": 14,
+            "success_criteria": "Log daily",
+        }
+        assert revised["parent_goal_id"] == root["id"]
+        assert client.patch(path, json={"duration_days": 0}).status_code == 422
+        assert (
+            client.patch(path, json={"duration_days": None}).json()["duration_days"]
+            is None
+        )
+        assert client.get(f"/goals/{root['id']}").json() == root
+
+
 def test_http_reports_storage_unavailable(tmp_path):
     database = tmp_path / "goals.sqlite3"
     with TestClient(create_app(database)) as client:

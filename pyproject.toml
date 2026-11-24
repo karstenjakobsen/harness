@@ -5,6 +5,7 @@ dev = ["httpx2>=2.16,<3", "pytest>=9,<10", "ruff>=0.15.11"]
 members = ["packages/harness_api", "packages/harness_mcp", "packages/harness_operator"]
 
 [tool.pytest.ini_options]
+markers = ["live: requires a signed-in Codex session and the real MCP server"]
 testpaths = ["packages/harness_api/tests", "packages/harness_mcp/tests", "packages/harness_operator/tests"]
 
 [tool.ruff]

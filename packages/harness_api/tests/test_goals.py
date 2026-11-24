@@ -1,6 +1,8 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from importlib.resources import files
+from threading import Barrier
 
 import pytest
 
@@ -88,6 +90,10 @@ def test_migrates_existing_database_and_limits_operations_to_local_user(tmp_path
     api = GoalAPI(path)
     assert [goal["id"] for goal in api.list_goals()] == [12]
     assert api.get_goal(12)["title"] == "Saved goal"
+    assert api.get_goal(12)["parent_goal_id"] is None
+    assert api.get_goal(12)["duration_days"] is None
+    with pytest.raises(GoalNotFoundError):
+        api.create_goal("Child", parent_goal_id=13)
     with pytest.raises(GoalNotFoundError):
         api.get_goal(13)
     with pytest.raises(GoalNotFoundError):
@@ -95,10 +101,83 @@ def test_migrates_existing_database_and_limits_operations_to_local_user(tmp_path
     with pytest.raises(GoalNotFoundError):
         api.delete_goal(13)
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
         assert connection.execute(
             "SELECT deleted_at FROM goals WHERE id = 13"
         ).fetchone() == (None,)
+
+
+def test_identical_completion_returns_original_decision(tmp_path):
+    path = tmp_path / "goals.sqlite3"
+    api = GoalAPI(path)
+    goal = api.create_goal("Review notes")
+    ready = Barrier(2, timeout=5)
+
+    def complete():
+        other = GoalAPI(path)
+        ready.wait()
+        return other.complete_goal(goal["id"], 1, confirmation="I reviewed the notes")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, retry = [pool.submit(complete) for _ in range(2)]
+        decision = first.result()
+        assert retry.result() == decision
+    assert (
+        api.complete_goal(goal["id"], 1, confirmation="I reviewed the notes")
+        == decision
+    )
+    with pytest.raises(GoalValidationError, match="different completion"):
+        api.complete_goal(goal["id"], 1, reference="I reviewed the notes")
+    assert api.get_goal(goal["id"])["status"] == "completed"
+    assert decision["recorded_by"] == "local"
+    assert decision["evidence_kind"] == "owner_confirmation"
+    assert decision["recorded_at"] and decision["event_id"]
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM goal_events WHERE kind='completion'"
+        ).fetchone() == (1,)
+
+
+def test_stale_completion_cannot_complete_a_revised_goal(tmp_path):
+    api = GoalAPI(tmp_path / "goals.sqlite3")
+    root = api.create_goal("Root", status="active")
+    child = api.create_goal("Track", parent_goal_id=root["id"], duration_days=7)
+    sibling = api.create_goal("Sibling", parent_goal_id=root["id"])
+    evidence = "tracker-app:entry/123"
+    decision = api.complete_goal(child["id"], 1, reference=evidence)
+    assert decision["evidence_kind"] == "owner_supplied_reference"
+    assert decision["recorded_by"] == "local" and decision["evidence"] == evidence
+    revised = api.update_goal(child["id"], duration_days=14)
+    with pytest.raises(GoalValidationError, match="Stale revision"):
+        api.complete_goal(child["id"], 1, reference=evidence)
+    assert api.get_goal(child["id"]) == revised
+    assert revised["revision"] == 2 and revised["status"] == "active"
+    assert revised["completion"] is None
+    history = api.get_goal_history(child["id"])
+    assert [(r["duration_days"], r["completion"]) for r in history] == [
+        (7, decision),
+        (14, None),
+    ]
+    assert api.get_goal(root["id"]) == root
+    assert api.get_goal(sibling["id"]) == sibling
+
+
+@pytest.mark.parametrize("status", ["paused", "revoked"])
+def test_completion_respects_stored_status(tmp_path, status):
+    path = tmp_path / "goals.sqlite3"
+    api = GoalAPI(path)
+    goal = api.create_goal("Test")
+    with closing(sqlite3.connect(path, autocommit=True)) as connection:
+        connection.execute(
+            "UPDATE goals SET status = ? WHERE id = ?", (status, goal["id"])
+        )
+    if status == "paused":
+        api.complete_goal(goal["id"], 1, confirmation="Verified")
+        assert api.get_goal(goal["id"])["status"] == "completed"
+    else:
+        with pytest.raises(GoalValidationError, match="revoked"):
+            api.complete_goal(goal["id"], 1, confirmation="Verified")
+        assert api.get_goal(goal["id"])["completion"] is None
 
 
 def test_goal_titles_are_validated_across_model_writes(tmp_path):
@@ -110,6 +189,56 @@ def test_goal_titles_are_validated_across_model_writes(tmp_path):
     assert goal["title"] == "Review the handover"
     with pytest.raises(GoalValidationError, match="A goal title is required"):
         api.update_goal(goal["id"], title="\n")
+    assert api.get_goal(goal["id"]) == goal
+
+
+def test_invalid_ids_and_revisions_cannot_select_an_existing_goal(tmp_path):
+    api = GoalAPI(tmp_path / "goals.sqlite3")
+    goal = api.create_goal("Review notes")
+    with pytest.raises(GoalValidationError, match="Revision"):
+        api.complete_goal(goal["id"], True, confirmation="Verified")
+    with pytest.raises(GoalValidationError, match="Goal ID"):
+        api.delete_goal(True)
+    with pytest.raises(GoalValidationError, match="Goal ID"):
+        api.create_goal("Child", parent_goal_id=2**63)
+    with pytest.raises(GoalValidationError, match="Goal ID"):
+        api.get_goal_tree(2**63)
+    assert api.get_goal(goal["id"]) == goal
+    assert len(api.list_goals()) == 1
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"assessment_type": "unknown"},
+        {"duration": "weekly"},
+        {"duration_days": -1},
+    ],
+)
+def test_invalid_definition_returns_validation_error_without_writing(tmp_path, changes):
+    api = GoalAPI(tmp_path / "goals.sqlite3")
+    goal = api.create_goal("Log meals", duration_days=7)
+    with pytest.raises(GoalValidationError):
+        api.create_goal("Invalid", **changes)
+    with pytest.raises(GoalValidationError):
+        api.update_goal(goal["id"], **changes)
+    assert api.get_goal(goal["id"]) == goal
+    assert len(api.list_goals()) == 1
+
+
+def test_failed_status_update_rolls_back_completion_evidence(tmp_path):
+    path = tmp_path / "goals.sqlite3"
+    api = GoalAPI(path)
+    goal = api.create_goal("Review notes")
+    with closing(sqlite3.connect(path, autocommit=True)) as connection:
+        connection.executescript("""
+            CREATE TRIGGER fail_status BEFORE UPDATE OF status ON goals BEGIN
+                SELECT RAISE(ABORT, 'test failure');
+            END;
+            """)
+        with pytest.raises(GoalStorageError):
+            api.complete_goal(goal["id"], 1, reference="notes:review/1")
+        assert connection.execute("SELECT count(*) FROM goal_events").fetchone() == (0,)
     assert api.get_goal(goal["id"]) == goal
 
 

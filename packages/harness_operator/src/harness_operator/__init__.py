@@ -1,8 +1,10 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TextIO
 
 import click
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -11,6 +13,7 @@ from harness_api import (
     AssessmentType,
     GoalAPI,
     GoalDuration,
+    GoalNotFoundError,
     GoalStorageError,
     GoalValidationError,
 )
@@ -20,7 +23,11 @@ from .api import api as api_command
 OPERATOR_INSTRUCTIONS = """\
 You are the user's goal operator. Treat goals as flexible guidelines.
 Read relevant workspace files when helpful and suggest a small next step.
-Use the harness_mcp list_goals tool for questions about saved goals.
+Use the harness_mcp list_goals tool to find saved goal IDs. For questions about a
+plan, its requirements, status, or evidence, call get_goal_tree with the goal ID.
+Use the returned records to answer. List each goal on its own line with its status
+and the relevant timing or evidence. Draft, active, and paused goals are open.
+Attribute owner confirmations and owner-supplied references to the owner.
 If the tool fails, say that you could not retrieve the goals.
 Keep this turn advisory. Describe goal changes as proposals.
 """
@@ -59,7 +66,12 @@ def register_codex() -> int:
 
 
 def _run_codex(
-    message: str, instructions: str, *, schema: Path | None = None
+    message: str,
+    instructions: str,
+    *,
+    schema: Path | None = None,
+    trace: TextIO | None = None,
+    reply_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         "codex",
@@ -78,14 +90,17 @@ def _run_codex(
         "--sandbox",
         "read-only",
         "--ephemeral",
+        "--skip-git-repo-check",
     ]
     if schema is not None:
         command.extend(["--output-schema", str(schema)])
+    if reply_path is not None:
+        command.extend(["--json", "--output-last-message", str(reply_path)])
     result = subprocess.run(
         [*command, "-"],
         input=f"{instructions}\nUser message:\n{message}",
         encoding="utf-8",
-        stdout=subprocess.PIPE if schema is not None else None,
+        stdout=subprocess.PIPE if schema is not None else trace,
         stderr=subprocess.PIPE,
         check=False,
     )
@@ -94,8 +109,24 @@ def _run_codex(
     return result
 
 
-def ask_codex(message: str) -> int:
-    result = _run_codex(message, OPERATOR_INSTRUCTIONS)
+def ask_codex(message: str, trace_file: Path | None = None) -> int:
+    if trace_file is None:
+        return _exit_code(_run_codex(message, OPERATOR_INSTRUCTIONS).returncode)
+    with (
+        open(
+            trace_file,
+            "x",
+            encoding="utf-8",
+            opener=lambda path, flags: os.open(path, flags, 0o600),
+        ) as trace,
+        TemporaryDirectory() as directory,
+    ):
+        reply_path = Path(directory) / "reply.txt"
+        result = _run_codex(
+            message, OPERATOR_INSTRUCTIONS, trace=trace, reply_path=reply_path
+        )
+        if result.returncode == 0:
+            click.echo(reply_path.read_text(encoding="utf-8").rstrip())
     return _exit_code(result.returncode)
 
 
@@ -173,10 +204,15 @@ cli.add_command(api_command)
 
 @cli.command()
 @click.argument("message", required=False)
-def ask(message: str | None) -> None:
+@click.option(
+    "--trace-file",
+    type=click.Path(path_type=Path),
+    help="Save Codex JSON events to a new file.",
+)
+def ask(message: str | None, trace_file: Path | None) -> None:
     """Ask Codex for advice on a goal."""
     click.get_current_context().exit(
-        ask_codex(_read_message(message, "Ask operator: "))
+        ask_codex(_read_message(message, "Ask operator: "), trace_file)
     )
 
 
@@ -194,7 +230,7 @@ def goal() -> None:
 @goal.command()
 @click.argument("message", required=False)
 def create(message: str | None) -> None:
-    """Draft and save a new goal."""
+    """Ask Codex to draft a goal from a message and save it."""
     click.get_current_context().exit(create_goal(_read_message(message, "New goal: ")))
 
 
@@ -204,6 +240,9 @@ def main() -> int:
     except click.ClickException as error:
         error.show()
         return error.exit_code
+    except (GoalNotFoundError, GoalValidationError, GoalStorageError) as error:
+        click.echo(f"operator: {error}", err=True)
+        return 1
     except OSError as error:
         if isinstance(error, FileNotFoundError) and error.filename == "codex":
             click.echo(
