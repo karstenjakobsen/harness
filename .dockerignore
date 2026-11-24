@@ -1,5 +1,0 @@
-**
-!pyproject.toml
-!uv.lock
-!harness/
-!harness/*.py
