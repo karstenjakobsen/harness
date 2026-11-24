@@ -50,7 +50,9 @@ def goals() -> None:
 
 
 @goals.command("list")
-@click.option("--json", "as_json", is_flag=True, help="Print the full API response as JSON.")
+@click.option(
+    "--json", "as_json", is_flag=True, help="Print the full API response as JSON."
+)
 @click.pass_obj
 def list_goals(api_url: str, as_json: bool) -> None:
     """List goals from the Harness API."""
