@@ -35,7 +35,7 @@ class Run:
         self.calls = self.path / "tools.jsonl"
 
     @classmethod
-    def create(cls, root: Path, worker: Worker, image: str, network: str):
+    def create(cls, root: Path, worker: Worker, image: str, network: str, backend: str = "docker"):
         run = cls(root, str(uuid4()))
         run.file.parent.mkdir(parents=True)
         run.calls.touch()
@@ -43,6 +43,7 @@ class Run:
             run_id=run.path.name,
             created_at=now(),
             status="queued",
+            backend=backend,
             worker=worker,
             task=TASK,
             launch={"image": image, "network": network, "name": f"harness-{run.path.name}"},
@@ -93,7 +94,7 @@ class Run:
                 stream.write(json.dumps(event) + "\n")
 
     def finish(self, state: dict, timed_out: bool):
-        # Called only after Docker reports that the process has exited and logs are saved.
+        # The caller has confirmed worker exit and saved both log streams.
         try:
             actual = self.file.read_bytes()
         except FileNotFoundError:

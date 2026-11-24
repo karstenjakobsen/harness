@@ -2,6 +2,14 @@ SHELL := /bin/sh
 .DEFAULT_GOAL := help
 export UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export WORKER_UID ?= $(shell id -u)
+BACKEND ?= docker
+ifeq ($(BACKEND),nomad)
+export COMPOSE_FILE := compose.yaml:compose.nomad.yaml
+endif
+ifneq ($(filter $(BACKEND),docker nomad),$(BACKEND))
+$(error BACKEND must be docker or nomad)
+endif
+export BACKEND
 WORKER ?= codex
 # Pass user-supplied values as quoted shell variables in recipes.
 export WORKER RUN_ID
@@ -10,6 +18,8 @@ OPERATOR = docker compose run --rm --no-deps -T operator
 .PHONY: help setup lint fmt test build up run get smoke down
 help:
 	@echo 'make run                     Build and run the signed-in Codex worker'
+	@echo 'make nomad-client            Start the Linux host client (foreground)'
+	@echo 'make run BACKEND=nomad       Submit the same worker through Nomad'
 	@echo 'make get RUN_ID=<uuid>       Retrieve the persisted trace'
 	@echo 'make smoke                   Exercise real containers with three fixture workers'
 	@echo 'make setup lint test         Set up Python 3.14 and check the code'
@@ -29,7 +39,12 @@ test: setup
 	.venv/bin/python -m unittest discover -s tests -v
 
 build:
+ifeq ($(BACKEND),nomad)
+	docker compose build harness
+	@image=$$(docker compose config --images worker) && { docker image inspect "$$image" >/dev/null 2>&1 || docker compose build worker; }
+else
 	docker compose build harness worker
+endif
 
 up: build
 	docker compose up -d --wait harness
@@ -37,6 +52,7 @@ up: build
 run: up
 	$(OPERATOR) run --worker "$$WORKER"
 
+get: export COMPOSE_IGNORE_ORPHANS = true
 get:
 	@test -n "$$RUN_ID" || { echo 'Usage: make get RUN_ID=<uuid>' >&2; exit 2; }
 	@docker compose up -d --no-recreate --wait harness >&2
@@ -47,3 +63,10 @@ smoke: up setup
 
 down:
 	docker compose down
+
+.PHONY: nomad-server nomad-client
+nomad-server:
+	docker compose -f compose.yaml -f compose.nomad.yaml up -d --wait nomad
+
+nomad-client: nomad-server
+	COMPOSE_FILE=compose.yaml:compose.nomad.yaml python3 nomad/client.py

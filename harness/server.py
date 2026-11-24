@@ -88,7 +88,7 @@ def create_app(root: Path = Path("/data"), key_file: Path = Path("/operator/toke
                 for job in jobs:
                     job.cancel()
                 await asyncio.gather(*jobs, return_exceptions=True)
-                engine.docker.close()
+                await engine.backend.close()
 
     async def health(_request):
         return PlainTextResponse("ready")

@@ -19,7 +19,7 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, WORKER_IMAGE="worker", WORKER_NETWORK="network"),
-            patch("harness.engine.docker.from_env"),
+            patch("harness.docker_backend.docker.from_env"),
         ):
             root = Path(directory)
             operator_key = root / "token"
