@@ -1,0 +1,25 @@
+[project]
+name = "harness-poc"
+version = "0.1.0"
+description = "Run a Codex worker through MCP and verify its output after exit"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "docker>=7.1,<8",
+    "httpx>=0.28,<0.29",
+    "mcp>=1.25,<2",
+    "starlette>=0.49,<2",
+    "uvicorn>=0.35,<1",
+]
+
+[dependency-groups]
+dev = ["ruff>=0.14,<1"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
