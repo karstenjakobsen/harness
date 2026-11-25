@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from .controllers.accounts import operators_router, users_router
 from .controllers.goals import router as goals_router
+from .controllers.runs import router as runs_router
 from .database import DATABASE_PATH, WorkspaceStorageError
 from .models.accounts import (
     AccountConflictError,
@@ -16,6 +17,7 @@ from .models.accounts import (
     OperatorAPI,
     UserAPI,
 )
+from .models.activity import RunNotFoundError
 from .models.goals import (
     GoalAPI,
     GoalConflictError,
@@ -36,11 +38,14 @@ def create_app(database_path: Path | str = DATABASE_PATH) -> FastAPI:
     api.include_router(goals_router)
     api.include_router(users_router)
     api.include_router(operators_router)
+    api.include_router(runs_router)
 
     @api.exception_handler(GoalNotFoundError)
     @api.exception_handler(AccountNotFoundError)
+    @api.exception_handler(RunNotFoundError)
     def not_found(
-        _request: Request, error: GoalNotFoundError | AccountNotFoundError
+        _request: Request,
+        error: GoalNotFoundError | AccountNotFoundError | RunNotFoundError,
     ) -> JSONResponse:
         return JSONResponse(
             status_code=HTTPStatus.NOT_FOUND,

@@ -63,10 +63,10 @@ deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.m
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
 On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Version 8 upgrades version 7 workspaces in place. Existing
-assignments keep their responsible operator and require an explicit grant for
-completion authority. Opening a pre-v7 or unrecognized workspace returns an
-error and leaves the file intact.
+`001_initial.sql`. Version 9 upgrades version 7 and version 8 workspaces in
+place. Existing assignments keep their responsible operator and require an
+explicit grant for completion authority. Opening a pre-v7 or unrecognized
+workspace returns an error and leaves the file intact.
 
 The schema gives each goal a stable ID, an owner, and a status. Goal revisions
 store titles and outcomes. Operator assignments have their own history, and
@@ -186,6 +186,8 @@ curl --fail --silent --show-error http://127.0.0.1:8000/goals
 | `POST` | `/goals/{goal_id}/observations` | Record a confirmation or reference with a retry key and optional reported date. The HTTP caller is unattributed |
 | `GET` | `/goals/{goal_id}/progress` | Assess the optional `revision` with evidence available now |
 | `GET` | `/goals/{goal_id}/history` | Read revision timestamps, submissions and saved completions |
+| `GET` | `/goals/{goal_id}/history?view=activity` | Read the goal timeline and discover related operator runs |
+| `GET` | `/runs/{run_id}` | Read the run identity, timing, outcome and ordered tool calls |
 | `POST` | `/goals/{goal_id}/completion` | Complete the current `revision` with a confirmation or reference and optional `evidence_ids` |
 | `DELETE` | `/goals/{goal_id}` | Soft-delete a leaf and close its assignment. A parent with visible children returns HTTP 409 |
 
@@ -194,6 +196,47 @@ Reusing a saved report’s key with different content returns 409. Submitting a 
 observation dated after today in UTC returns 422 and leaves its retry key available.
 A stale completion revision, conflicting completion retry, or citation from
 another goal returns 422.
+
+### Operator activity
+
+Start with `GET /goals/{goal_id}/history?view=activity`. Its `timeline` contains
+`revision`, `observation`, `decision` and `call` entries ordered by UTC `at`.
+Calls use their start time. Timestamps can include fractional seconds. Entries
+with equal timestamps sort by revision, observation, call, and decision, then
+by their stable IDs. Each call gives its
+`run_id`, `sequence`, `tool`, `outcome` and `relationship` to the goal. The
+relationship is `listed`, `descendant`, `requested`, or `completion_target`.
+The revision list remains available at `/goals/{goal_id}/history`.
+
+Follow a `run_id` to `GET /runs/{run_id}`. An advisory run has null operator and
+grant fields. A delegated run identifies the registered operator, exact grant
+and granted goal. The run outcome is `succeeded`, `failed`, or `unfinished`.
+A launch error, such as an existing trace file, marks the run `failed`.
+Calls are ordered by `sequence` and retain their requested goal and revision
+when supplied. The call outcome is `returned`, `denied`, `failed`, or
+`unfinished`. A successful empty result has `returned_goals: []`. Calls without
+a returned result have `returned_goals: null`.
+
+Each result reference retains its goal ID, revision and any returned status. `observation_ids`
+identifies observation records returned by a progress call. A result's `decision`
+identifies the event and its citations, including the statement evidence ID when
+present. For completion, follow `committed_event_id` from the call to the timeline's
+decision and its `committing_call`. An identical authorized retry uses
+`retrieved_event_id`. The decision records the rationale, operator, and grant.
+The observation entries resolve each evidence ID to its submitter and timestamp.
+
+`operator goal history GOAL_ID` and `operator run show RUN_ID` return the same
+records through `GoalAPI.get_goal_activity` and `GoalAPI.get_run`. Audit capture
+covers Harness MCP calls during `operator ask`. It stores typed references and
+outcomes. Prompt text, raw tool arguments and results, and credentials are
+excluded. Direct CLI and HTTP reads fall outside capture. Owner reports entered
+through the CLI appear in the timeline with their original attribution.
+
+A read reference is saved before MCP hands the response to the transport.
+Receipt by the assistant can remain unknown if the connection drops. The
+completion transaction saves its committing call even if the call remains
+`unfinished` after an interruption. Older decisions and direct owner completions
+have `committing_call: null`.
 
 The `harness_api` package follows MVC. `GoalAPI`, `UserAPI`, and `OperatorAPI`
 own persistence and business rules. The FastAPI controllers call those models,

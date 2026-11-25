@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TextIO
@@ -82,8 +83,11 @@ def _run_codex(
     trace: TextIO | None = None,
     reply_path: Path | None = None,
     completion_grant_id: int | None = None,
+    run_id: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     mcp_args = ["-P", "-m", "harness_mcp.server"]
+    if run_id is not None:
+        mcp_args.extend(["--run-id", str(run_id)])
     if completion_grant_id is not None:
         mcp_args.extend(["--completion-grant", str(completion_grant_id)])
     command = [
@@ -135,37 +139,43 @@ def ask_codex(
     *,
     completion_grant_id: int | None = None,
 ) -> int:
-    instructions = OPERATOR_INSTRUCTIONS
-    if completion_grant_id is None:
-        instructions += ADVISORY_INSTRUCTIONS
-    else:
-        grant = GoalAPI().get_completion_grant(completion_grant_id)
-        instructions += DELEGATED_INSTRUCTIONS.format(goal_id=grant["goal_id"])
-    if trace_file is None:
-        return exit_code(
-            _run_codex(
-                message, instructions, completion_grant_id=completion_grant_id
-            ).returncode
-        )
-    with (
-        open(
-            trace_file,
-            "x",
-            encoding="utf-8",
-            opener=lambda path, flags: os.open(path, flags, 0o600),
-        ) as trace,
-        TemporaryDirectory() as directory,
-    ):
-        reply_path = Path(directory) / "reply.txt"
-        result = _run_codex(
-            message,
-            instructions,
-            trace=trace,
-            reply_path=reply_path,
-            completion_grant_id=completion_grant_id,
-        )
-        if result.returncode == 0:
-            print(reply_path.read_text(encoding="utf-8").rstrip())
+    api = GoalAPI()
+    run = api.start_run(completion_grant_id)
+    instructions = OPERATOR_INSTRUCTIONS + (
+        ADVISORY_INSTRUCTIONS
+        if run["mode"] == "advisory"
+        else DELEGATED_INSTRUCTIONS.format(goal_id=run["granted_goal_id"])
+    )
+    try:
+        with ExitStack() as stack:
+            trace = None
+            reply_path = None
+            if trace_file is not None:
+                trace = stack.enter_context(
+                    open(
+                        trace_file,
+                        "x",
+                        encoding="utf-8",
+                        opener=lambda path, flags: os.open(path, flags, 0o600),
+                    )
+                )
+                reply_path = (
+                    Path(stack.enter_context(TemporaryDirectory())) / "reply.txt"
+                )
+            result = _run_codex(
+                message,
+                instructions,
+                trace=trace,
+                reply_path=reply_path,
+                completion_grant_id=completion_grant_id,
+                run_id=run["id"],
+            )
+            if reply_path is not None and result.returncode == 0:
+                print(reply_path.read_text(encoding="utf-8").rstrip())
+    except Exception, KeyboardInterrupt:
+        api.finish_run(run["id"], "failed")
+        raise
+    api.finish_run(run["id"], "succeeded" if result.returncode == 0 else "failed")
     return exit_code(result.returncode)
 
 

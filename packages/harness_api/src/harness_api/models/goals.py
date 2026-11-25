@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
 from typing import Literal, TypedDict, Unpack, get_args, overload
@@ -11,6 +11,20 @@ from ..database import (
     DATABASE_PATH,
     WorkspaceDatabase,
     WorkspaceStorageError,
+    utc_timestamp,
+)
+from . import GoalStatus
+from .activity import (
+    CallActivity,
+    CallReference,
+    GoalResultReference,
+    HarnessTool,
+    OperatorRun,
+    related_calls,
+    run_calls,
+    run_record,
+    run_row,
+    save_result_references,
 )
 from .evidence import (
     DateAssessment,
@@ -59,7 +73,6 @@ LEFT JOIN operators AS operator
 WHERE goal.owner_user_id = :owner AND goal.deleted_at IS NULL
 """
 
-type GoalStatus = Literal["draft", "active", "paused", "completed", "revoked"]
 type GoalCreationStatus = Literal["draft", "active"]
 type GoalDuration = Literal["one_time", "standing"]
 type AssessmentType = Literal["objective", "judgment", "mixed"]
@@ -137,12 +150,44 @@ class GoalTree(TypedDict):
     goals: list[Goal]
 
 
-class GoalRevision(GoalDefinition):
+class RevisionDefinition(GoalDefinition):
     created_at: str
-    evidence: list[Evidence]
     revision: int
     title: str
+
+
+class GoalRevision(RevisionDefinition):
+    evidence: list[Evidence]
     completion: Completion | DelegatedCompletion | None
+
+
+class RevisionActivity(TypedDict):
+    kind: Literal["revision"]
+    at: str
+    definition: RevisionDefinition
+
+
+class ObservationActivity(TypedDict):
+    kind: Literal["observation"]
+    at: str
+    observation: Evidence
+
+
+class DecisionActivity(TypedDict):
+    kind: Literal["decision"]
+    at: str
+    decision: Completion | DelegatedCompletion
+    committing_call: CallReference | None
+
+
+type ActivityEntry = (
+    RevisionActivity | ObservationActivity | DecisionActivity | CallActivity
+)
+
+
+class GoalActivity(TypedDict):
+    goal_id: int
+    timeline: list[ActivityEntry]
 
 
 class GoalNotFoundError(LookupError):
@@ -276,7 +321,7 @@ def _completion(row: sqlite3.Row) -> Completion | DelegatedCompletion | None:
     )
 
 
-def _definition(row: sqlite3.Row | Goal) -> GoalDefinition:
+def _definition(row: sqlite3.Row | GoalDefinition) -> GoalDefinition:
     return GoalDefinition(
         target_distinct_dates=row["target_distinct_dates"],
         window_start=row["window_start"],
@@ -287,6 +332,20 @@ def _definition(row: sqlite3.Row | Goal) -> GoalDefinition:
         success_criteria=row["success_criteria"],
         measurement_plan=row["measurement_plan"],
     )
+
+
+def _activity_order(entry: ActivityEntry) -> tuple[datetime, int, int, int]:
+    timestamp = datetime.fromisoformat(entry["at"])
+    timestamp = timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else timestamp
+    match entry["kind"]:
+        case "revision":
+            return timestamp, 0, entry["definition"]["revision"], 0
+        case "observation":
+            return timestamp, 1, entry["observation"]["evidence_id"], 0
+        case "call":
+            return timestamp, 2, entry["run_id"], entry["sequence"]
+        case "decision":
+            return timestamp, 3, entry["decision"]["event_id"], 0
 
 
 class GoalAPI(WorkspaceDatabase):
@@ -409,28 +468,226 @@ class GoalAPI(WorkspaceDatabase):
         with self._connection("ro") as connection:
             connection.execute("BEGIN")
             self._get_goal(connection, goal_id)
-            rows = connection.execute(
-                f"""
-                SELECT revision.*, revision.goal_id AS id, {EVENT_COLUMNS}
-                FROM goal_revisions AS revision {COMPLETION_JOIN}
-                WHERE revision.goal_id = ? ORDER BY revision.revision
-                """,
-                (goal_id,),
+            return self._goal_history(connection, goal_id)
+
+    @staticmethod
+    def _goal_history(
+        connection: sqlite3.Connection, goal_id: int
+    ) -> list[GoalRevision]:
+        rows = connection.execute(
+            f"""
+            SELECT revision.*, revision.goal_id AS id, {EVENT_COLUMNS}
+            FROM goal_revisions AS revision {COMPLETION_JOIN}
+            WHERE revision.goal_id = ? ORDER BY revision.revision
+            """,
+            (goal_id,),
+        )
+        by_revision: dict[int, list[Evidence]] = defaultdict(list)
+        for record in goal_evidence(connection, goal_id):
+            by_revision[record["revision"]].append(record)
+        return [
+            GoalRevision(
+                created_at=row["created_at"],
+                evidence=by_revision[row["revision"]],
+                **_definition(row),
+                revision=row["revision"],
+                title=row["title"],
+                completion=_completion(row),
             )
-            by_revision: dict[int, list[Evidence]] = defaultdict(list)
-            for record in goal_evidence(connection, goal_id):
-                by_revision[record["revision"]].append(record)
-            return [
-                GoalRevision(
-                    created_at=row["created_at"],
-                    evidence=by_revision[row["revision"]],
-                    **_definition(row),
-                    revision=row["revision"],
-                    title=row["title"],
-                    completion=_completion(row),
+            for row in rows
+        ]
+
+    def get_goal_activity(self, goal_id: int) -> GoalActivity:
+        """Read the owner-visible timeline in a consistent workspace snapshot."""
+        with self._connection("ro") as connection:
+            connection.execute("BEGIN")
+            self._get_goal(connection, goal_id)
+            history = self._goal_history(connection, goal_id)
+            calls, commits = related_calls(connection, goal_id, ADMIN_USER_ID)
+        timeline: list[ActivityEntry] = list(calls)
+        for revision in history:
+            definition = RevisionDefinition(
+                **_definition(revision),
+                created_at=revision["created_at"],
+                revision=revision["revision"],
+                title=revision["title"],
+            )
+            timeline.append(
+                RevisionActivity(
+                    kind="revision", at=definition["created_at"], definition=definition
                 )
-                for row in rows
-            ]
+            )
+            for observation in revision["evidence"]:
+                timeline.append(
+                    ObservationActivity(
+                        kind="observation",
+                        at=observation["recorded_at"],
+                        observation=observation,
+                    )
+                )
+            if (decision := revision["completion"]) is not None:
+                timeline.append(
+                    DecisionActivity(
+                        kind="decision",
+                        at=decision["recorded_at"],
+                        decision=decision,
+                        committing_call=commits.get(decision["event_id"]),
+                    )
+                )
+        return GoalActivity(
+            goal_id=goal_id, timeline=sorted(timeline, key=_activity_order)
+        )
+
+    def start_run(self, completion_grant_id: int | None = None) -> OperatorRun:
+        """Bind a run to the exact grant checked at launch, or start an advisory run."""
+        with self._write() as connection:
+            if completion_grant_id is not None:
+                self._get_completion_grant(connection, completion_grant_id)
+            run_id = connection.execute(
+                """
+                INSERT INTO operator_runs (owner_user_id, completion_grant_id, started_at)
+                VALUES (?, ?, ?) RETURNING id
+                """,
+                (ADMIN_USER_ID, completion_grant_id, utc_timestamp()),
+            ).fetchone()[0]
+            return run_record(run_row(connection, run_id, ADMIN_USER_ID), [])
+
+    def finish_run(self, run_id: int, outcome: Literal["succeeded", "failed"]) -> None:
+        _validate_positive_integer(run_id, "Run ID")
+        if outcome not in ("succeeded", "failed"):
+            raise GoalValidationError("A finished run must succeed or fail.")
+        with self._write() as connection:
+            run = run_row(connection, run_id, ADMIN_USER_ID)
+            if run["outcome"] == outcome:
+                return
+            if run["outcome"] != "unfinished":
+                raise GoalConflictError(f"Run {run_id} already finished.")
+            connection.execute(
+                "UPDATE operator_runs SET outcome = ?, finished_at = ? WHERE id = ?",
+                (outcome, utc_timestamp(), run_id),
+            )
+
+    def get_run(self, run_id: int) -> OperatorRun:
+        _validate_positive_integer(run_id, "Run ID")
+        with self._connection("ro") as connection:
+            connection.execute("BEGIN")
+            row = run_row(connection, run_id, ADMIN_USER_ID)
+            return run_record(row, run_calls(connection, run_id))
+
+    def start_tool_call(
+        self,
+        run_id: int,
+        tool: HarnessTool,
+        *,
+        target_goal_id: int | None = None,
+        target_revision: int | None = None,
+    ) -> CallReference:
+        _validate_positive_integer(run_id, "Run ID")
+        if tool not in get_args(HarnessTool.__value__):
+            raise GoalValidationError("Unknown Harness tool.")
+        if target_goal_id is not None:
+            _validate_positive_integer(target_goal_id, "Target goal ID")
+        if target_revision is not None:
+            _validate_positive_integer(target_revision, "Target revision")
+        with self._write() as connection:
+            run = run_row(connection, run_id, ADMIN_USER_ID)
+            if run["outcome"] != "unfinished":
+                raise GoalConflictError(f"Run {run_id} already finished.")
+            sequence = connection.execute(
+                "SELECT coalesce(max(sequence), 0) + 1 FROM run_calls WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO run_calls (run_id, sequence, tool, target_goal_id, target_revision, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    sequence,
+                    tool,
+                    target_goal_id,
+                    target_revision,
+                    utc_timestamp(),
+                ),
+            )
+        return CallReference(run_id=run_id, sequence=sequence)
+
+    def finish_tool_call(
+        self,
+        call: CallReference,
+        outcome: Literal["returned", "denied", "failed"],
+        *,
+        returned_goals: list[GoalResultReference] | None = None,
+    ) -> None:
+        if outcome not in ("returned", "denied", "failed") or (
+            outcome == "returned"
+        ) != (returned_goals is not None):
+            raise GoalValidationError("A returned call requires result references.")
+        with self._write() as connection:
+            attempt = self._open_tool_call(connection, call)
+            if returned_goals is not None:
+                self._validate_tool_result(connection, attempt, returned_goals)
+                save_result_references(connection, call, returned_goals)
+            connection.execute(
+                """
+                UPDATE run_calls SET outcome = :outcome, finished_at = :finished_at
+                WHERE run_id = :run_id AND sequence = :sequence
+                """,
+                dict(call, outcome=outcome, finished_at=utc_timestamp()),
+            )
+
+    @staticmethod
+    def _validate_tool_result(
+        connection: sqlite3.Connection,
+        attempt: sqlite3.Row,
+        goals: list[GoalResultReference],
+    ) -> None:
+        if attempt["tool"] == "complete_goal":
+            event_id = attempt["committed_event_id"] or attempt["retrieved_event_id"]
+            if (
+                event_id is None
+                or len(goals) != 1
+                or goals[0]["goal_id"] != attempt["target_goal_id"]
+                or goals[0]["revision"] != attempt["target_revision"]
+                or (decision := goals[0]["decision"]) is None
+                or decision["event_id"] != event_id
+            ):
+                raise GoalValidationError(
+                    "The completion result must reference the call's saved decision."
+                )
+        outside_scope = connection.execute(
+            """
+            SELECT 1 FROM json_each(?) AS result
+            WHERE NOT EXISTS (
+                SELECT 1 FROM goals WHERE id = result.value AND owner_user_id = ?
+            ) LIMIT 1
+            """,
+            (json.dumps([goal["goal_id"] for goal in goals]), ADMIN_USER_ID),
+        ).fetchone()
+        if outside_scope is not None:
+            raise GoalValidationError(
+                "Every returned goal must belong to the workspace owner."
+            )
+
+    @staticmethod
+    def _open_tool_call(
+        connection: sqlite3.Connection, call: CallReference
+    ) -> sqlite3.Row:
+        _validate_positive_integer(call["run_id"], "Run ID")
+        _validate_positive_integer(call["sequence"], "Call sequence")
+        row = connection.execute(
+            """
+            SELECT call.*, run.completion_grant_id, run.outcome AS run_outcome
+            FROM run_calls AS call JOIN operator_runs AS run ON run.id = call.run_id
+            WHERE run.owner_user_id = :owner AND call.run_id = :run_id
+                AND call.sequence = :sequence AND call.outcome = 'unfinished'
+            """,
+            dict(call, owner=ADMIN_USER_ID),
+        ).fetchone()
+        if row is None:
+            raise GoalValidationError("The tool call is unavailable or finished.")
+        return row
 
     def list_goals(self, status: GoalStatus | None = None) -> list[GoalSummary]:
         if status is not None and status not in get_args(GoalStatus.__value__):
@@ -695,6 +952,7 @@ class GoalAPI(WorkspaceDatabase):
         completion_grant_id: int,
         rationale: str,
         evidence_ids: list[int] | tuple[int, ...],
+        call: CallReference | None = None,
     ) -> DelegatedCompletion: ...
 
     def complete_goal(
@@ -707,6 +965,7 @@ class GoalAPI(WorkspaceDatabase):
         evidence_ids: list[int] | tuple[int, ...] = (),
         completion_grant_id: int | None = None,
         rationale: str | None = None,
+        call: CallReference | None = None,
     ) -> Completion | DelegatedCompletion:
         _validate_positive_integer(revision, "Revision")
         with self._write() as connection:
@@ -721,6 +980,21 @@ class GoalAPI(WorkspaceDatabase):
                 raise GoalValidationError(
                     f"Stale revision. Current revision is {goal['revision']}."
                 )
+            if call is not None:
+                attempt = self._open_tool_call(connection, call)
+                if (
+                    completion_grant_id is None
+                    or attempt["completion_grant_id"] != completion_grant_id
+                    or attempt["run_outcome"] != "unfinished"
+                    or attempt["tool"] != "complete_goal"
+                    or attempt["target_goal_id"] != goal_id
+                    or attempt["target_revision"] != revision
+                    or attempt["committed_event_id"] is not None
+                    or attempt["retrieved_event_id"] is not None
+                ):
+                    raise GoalValidationError(
+                        "The tool call does not match this completion."
+                    )
             if completion_grant_id is None:
                 if rationale is not None:
                     raise GoalValidationError(
@@ -762,6 +1036,14 @@ class GoalAPI(WorkspaceDatabase):
                         for key, value in decision_fields.items()
                     )
                 ):
+                    if call is not None:
+                        connection.execute(
+                            """
+                            UPDATE run_calls SET retrieved_event_id = :event_id
+                            WHERE run_id = :run_id AND sequence = :sequence
+                            """,
+                            dict(call, event_id=saved["event_id"]),
+                        )
                     return saved
                 raise GoalValidationError(
                     "This revision already has a different completion decision."
@@ -785,10 +1067,12 @@ class GoalAPI(WorkspaceDatabase):
                 statement_id = add_evidence(
                     connection, goal_id, revision, actor, statement
                 )["evidence_id"]
+            timestamp = utc_timestamp()
             decision_id = connection.execute(
                 """INSERT INTO goal_events (
-                    goal_id, revision, kind, actor_user_id, payload, statement_evidence_id, completion_grant_id
-                ) VALUES (?, ?, 'completion', ?, ?, ?, ?) RETURNING id""",
+                    goal_id, revision, kind, actor_user_id, payload, statement_evidence_id,
+                    completion_grant_id, occurred_at, recorded_at
+                ) VALUES (?, ?, 'completion', ?, ?, ?, ?, ?, ?) RETURNING id""",
                 (
                     goal_id,
                     revision,
@@ -798,6 +1082,8 @@ class GoalAPI(WorkspaceDatabase):
                     else "{}",
                     statement_id,
                     completion_grant_id,
+                    timestamp,
+                    timestamp,
                 ),
             ).fetchone()[0]
             connection.executemany(
@@ -807,6 +1093,14 @@ class GoalAPI(WorkspaceDatabase):
             connection.execute(
                 "UPDATE goals SET status = 'completed' WHERE id = ?", (goal_id,)
             )
+            if call is not None:
+                connection.execute(
+                    """
+                    UPDATE run_calls SET committed_event_id = :event_id
+                    WHERE run_id = :run_id AND sequence = :sequence
+                    """,
+                    dict(call, event_id=decision_id),
+                )
             decision = self._get_goal(connection, goal_id)["completion"]
             assert decision is not None
             return decision
@@ -880,14 +1174,22 @@ class GoalAPI(WorkspaceDatabase):
             """
             INSERT INTO goal_revisions (
                 goal_id, revision, title, desired_outcome, duration, duration_days,
-                assessment_type, success_criteria, measurement_plan, target_distinct_dates, window_start
+                assessment_type, success_criteria, measurement_plan, target_distinct_dates, window_start,
+                created_at
             )
             VALUES (
                 :goal_id, :revision, :title, :desired_outcome, :duration, :duration_days,
-                :assessment_type, :success_criteria, :measurement_plan, :target_distinct_dates, :window_start
+                :assessment_type, :success_criteria, :measurement_plan, :target_distinct_dates, :window_start,
+                :created_at
             )
             """,
-            {"goal_id": goal_id, "revision": revision, "title": title, **definition},
+            {
+                "goal_id": goal_id,
+                "revision": revision,
+                "title": title,
+                "created_at": utc_timestamp(),
+                **definition,
+            },
         )
 
     @staticmethod

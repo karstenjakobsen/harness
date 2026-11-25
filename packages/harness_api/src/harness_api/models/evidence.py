@@ -5,6 +5,8 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Literal, NotRequired, TypedDict
 
+from ..database import utc_timestamp
+
 type EvidenceSource = Literal[
     "owner_confirmation",
     "owner_supplied_reference",
@@ -83,12 +85,23 @@ def add_evidence(
     payload: EvidenceStatement,
     retry_key: str | None = None,
 ) -> Evidence:
+    timestamp = utc_timestamp()
     row = connection.execute(
         """
-        INSERT INTO goal_events (goal_id, revision, kind, actor_user_id, payload, retry_key)
-        VALUES (?, ?, 'observation', ?, ?, ?) RETURNING *
+        INSERT INTO goal_events (
+            goal_id, revision, kind, actor_user_id, payload, retry_key, occurred_at, recorded_at
+        )
+        VALUES (?, ?, 'observation', ?, ?, ?, ?, ?) RETURNING *
     """,
-        (goal_id, revision, actor_user_id, json.dumps(payload), retry_key),
+        (
+            goal_id,
+            revision,
+            actor_user_id,
+            json.dumps(payload),
+            retry_key,
+            timestamp,
+            timestamp,
+        ),
     ).fetchone()
     return evidence_record(row)
 

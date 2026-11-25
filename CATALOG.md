@@ -25,6 +25,10 @@ Harness derives the actor from the grant bound at startup and returns the saved
 decision with its citations. The operator decides when the evidence is sufficient.
 The session's grant is checked again on every completion call.
 
+`operator ask` records Harness MCP activity in the workspace database. The
+two history commands read its typed references and outcomes without requiring
+`--trace-file`. [HTTP and CLI activity contract](README.md#operator-activity)
+
 ## Workspace users and operators
 
 These commands use the current workspace database and print JSON. Every operator
@@ -49,9 +53,10 @@ operator ownership, and assignment history.
 
 ## Workspace goals
 
-`operator goal` uses `.harness/goals.sqlite3` in the current working directory.
-Message-based creation uses Codex to draft the goal. Explicit creation and the
-other goal commands access the local database directly and print JSON.
+`operator goal` and `operator run show` call `GoalAPI` for the current workspace,
+which uses `.harness/goals.sqlite3` in the current working directory. Message-based
+creation uses Codex to draft the goal before the CLI saves it through `GoalAPI`.
+Explicit creation and the other workspace commands print JSON.
 
 | Command | What it does |
 | --- | --- |
@@ -59,6 +64,8 @@ other goal commands access the local database directly and print JSON.
 | `operator goal create --title TITLE [--parent GOAL_ID] [FIELDS]` | Creates an active goal. Supply a parent ID to create a subgoal. |
 | `operator goal list` | Lists saved goals in this workspace. |
 | `operator goal show GOAL_ID` | Shows the current goal. Add `--tree` for its descendants and current completion decisions, or `--history` for revision creation times, evidence recorded under each revision, and saved decisions. |
+| `operator goal history GOAL_ID` | Shows the goal timeline with revisions, observations, decisions and related run calls. |
+| `operator run show RUN_ID` | Shows one operator run with its identity, timing, outcome, ordered calls, returned references and decision links. |
 | `operator goal revise GOAL_ID FIELDS` | Updates the supplied fields and appends a revision when the definition changes. Use `--title TITLE` to rename the goal. |
 | `operator goal observe GOAL_ID --retry-key KEY [--reported-date YYYY-MM-DD] EVIDENCE` | Records an owner confirmation or owner-supplied reference. Reuse the key for an identical retry. Use separate keys for intentional reports about the same day. |
 | `operator goal progress GOAL_ID [--revision N]` | Assesses the current or selected revision. `evidence` contains every record considered. `days` lists each qualifying date and its supporting IDs. |
@@ -98,5 +105,5 @@ operator goal create --title "Track food" --duration-days 7
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
-| `make test-live` | Runs the signed-in CLI and MCP acceptance tests for goal plans and progress. |
+| `make test-live` | Runs the signed-in acceptance tests for goal plans, progress and delegated review history. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |

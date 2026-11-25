@@ -9,6 +9,7 @@ from harness_api import (
     GoalConflictError,
     GoalNotFoundError,
     GoalValidationError,
+    RunNotFoundError,
     WorkspaceStorageError,
 )
 
@@ -20,12 +21,13 @@ from .commands.goal import create_goal as create_goal
 from .commands.goal import goal
 from .commands.list import list_operators
 from .commands.register import register
+from .commands.run import run
 from .commands.unregister import unregister
 from .commands.user import user
 
 
 @click.group(
-    commands=[ask, get_operator, goal, list_operators, register, unregister, user]
+    commands=[ask, get_operator, goal, list_operators, register, run, unregister, user]
 )
 def cli() -> None:
     """Ask Codex about goals and manage the current workspace."""
@@ -44,6 +46,7 @@ def main() -> int:
         GoalConflictError,
         GoalNotFoundError,
         GoalValidationError,
+        RunNotFoundError,
         WorkspaceStorageError,
     ) as error:
         click.echo(f"operator: {error}", err=True)

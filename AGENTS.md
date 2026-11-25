@@ -1,6 +1,6 @@
 # Harness engineering guidelines
 
-- Read the [terminology and attribution rules](TERMINOLOGY.md) and the [command catalog](CATALOG.md).
+- Read the [terminology and attribution rules](TERMINOLOGY.md) and the [command catalog](CATALOG.md). And update accordingly if you make changes to source. 
 
 ## API and adapter boundaries
 

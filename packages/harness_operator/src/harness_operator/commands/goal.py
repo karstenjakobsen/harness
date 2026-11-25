@@ -197,6 +197,13 @@ def show(goal_id: int, tree: bool, history: bool) -> None:
 
 @goal.command()
 @click.argument("goal_id", type=POSITIVE_INTEGER)
+def history(goal_id: int) -> None:
+    """Read the goal timeline and discover related operator runs."""
+    print_record(GoalAPI().get_goal_activity(goal_id))
+
+
+@goal.command()
+@click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.option("--confirmation", help="What the owner confirms.")
 @click.option("--reference", help="A reference supplied by the owner.")
 @click.option(

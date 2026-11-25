@@ -7,6 +7,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
+from fastapi.testclient import TestClient
+
+from harness_api import DATABASE_PATH
+from harness_api.app import create_app
 
 QUESTION = (
     "For my Lose 20 lb goal, list each subgoal, tell me which is complete and how "
@@ -375,7 +379,7 @@ def test_day_pass_answer_rejects_replies_that_miss_the_gap(reply):
 
 @pytest.mark.live
 def test_delegated_operator_decides_when_membership_evidence_is_sufficient(
-    live_directory, run, goal
+    workspace, run, goal
 ):
     parent = goal("create", "--title", "Build an exercise routine")
     child = goal(
@@ -402,17 +406,12 @@ def test_delegated_operator_decides_when_membership_evidence_is_sufficient(
         "Review this goal. If you judge the evidence sufficient, complete it. "
         "Otherwise tell me what’s missing."
     )
-    first_trace = live_directory / "before.jsonl"
-    reply = run(
-        "ask", "--completion-grant", grant["id"], "--trace-file", first_trace, review
-    )
-    assert_tool_result(
-        first_trace, "get_goal_progress", goal_id, goal("progress", goal_id)
-    )
-    assert all(
-        json.loads(line).get("item", {}).get("tool") != "complete_goal"
-        for line in first_trace.read_text(encoding="utf-8").splitlines()
-    )
+    reply = run("ask", "--completion-grant", grant["id"], review)
+    (first_id,) = _related_run_ids(goal("history", goal_id))
+    first = json.loads(run("run", "show", first_id))
+    original = [tour["evidence_id"], day_pass["evidence_id"]]
+    assert _returned_progress(first, goal_id, child["revision"], original)
+    assert all(call["tool"] != "complete_goal" for call in first["calls"])
     assert goal("show", goal_id)["status"] == "active"
     assert goal("show", goal_id)["completion"] is None
     assert_day_pass_answer(reply)
@@ -425,30 +424,129 @@ def test_delegated_operator_decides_when_membership_evidence_is_sufficient(
         "--retry-key",
         "membership",
     )
-    final_trace = live_directory / "after.jsonl"
-    reply = run(
-        "ask", "--completion-grant", grant["id"], "--trace-file", final_trace, review
+    reply = run("ask", "--completion-grant", grant["id"], review)
+    history = goal("history", goal_id)
+    (second_id,) = _related_run_ids(history) - {first_id}
+    second = json.loads(run("run", "show", second_id))
+    all_observations = [*original, confirmation["evidence_id"]]
+    _assert_audited_completion(
+        second,
+        history,
+        goal_id,
+        child["revision"],
+        all_observations,
+        confirmation,
+        operator["id"],
+        grant["id"],
     )
     (revision,) = goal("show", goal_id, "--history")
     assert revision["evidence"] == [tour, day_pass, confirmation]
     assert confirmation["source"] == "owner_confirmation"
     assert confirmation["submitted_by"] == 1
     decision = revision["completion"]
-    if decision is None:
-        calls = [
-            item
-            for line in final_trace.read_text(encoding="utf-8").splitlines()
-            if (event := json.loads(line))["type"] == "item.completed"
-            and (item := event.get("item", {})).get("tool") == "complete_goal"
-        ]
-        pytest.fail(
-            f"No delegated completion was saved. Reply {reply!r}. Completion calls {calls!r}."
-        )
-    assert decision["completion_grant_id"] == grant["id"]
-    assert decision["recorded_by_operator_id"] == operator["id"]
-    assert confirmation["evidence_id"] in decision["evidence_ids"]
-    assert decision["rationale"].strip()
-    assert_tool_result(final_trace, "complete_goal", goal_id, decision)
+    assert [
+        item["decision"] for item in history["timeline"] if item["kind"] == "decision"
+    ] == [decision]
+    assert json.loads(run("run", "show", first_id)) == first
     assert goal("show", goal_id)["status"] == "completed"
     assert goal("show", parent["id"]) == parent
     assert "complet" in reply.lower() and "membership" in reply.lower()
+
+    with TestClient(create_app(workspace / DATABASE_PATH)) as client:
+        response = client.get(f"/goals/{goal_id}/history", params={"view": "activity"})
+        response.raise_for_status()
+        activity = response.json()
+        discovered = []
+        for run_id in _related_run_ids(activity):
+            response = client.get(f"/runs/{run_id}")
+            response.raise_for_status()
+            discovered.append(response.json())
+        first_http, second_http = sorted(
+            discovered, key=lambda record: record["started_at"]
+        )
+        assert _returned_progress(first_http, goal_id, child["revision"], original)
+        assert all(call["tool"] != "complete_goal" for call in first_http["calls"])
+        _assert_audited_completion(
+            second_http,
+            activity,
+            goal_id,
+            child["revision"],
+            all_observations,
+            confirmation,
+            operator["id"],
+            grant["id"],
+        )
+        again = client.get(f"/runs/{first_http['id']}")
+        again.raise_for_status()
+        assert again.json() == first_http == first
+
+
+def _related_run_ids(history):
+    return {item["run_id"] for item in history["timeline"] if item["kind"] == "call"}
+
+
+def _returned_progress(run, goal_id, revision, observation_ids):
+    return [
+        call["sequence"]
+        for call in run["calls"]
+        if call["tool"] == "get_goal_progress"
+        and call["outcome"] == "returned"
+        and call["target_goal_id"] == goal_id
+        and any(
+            result["goal_id"] == goal_id
+            and result["revision"] == revision
+            and result["status"] == "active"
+            and result["observation_ids"] == observation_ids
+            for result in call["returned_goals"]
+        )
+    ]
+
+
+def _assert_audited_completion(
+    run,
+    activity,
+    goal_id,
+    revision,
+    observation_ids,
+    confirmation,
+    operator_id,
+    grant_id,
+):
+    assert run["outcome"] == "succeeded" and run["mode"] == "delegated"
+    assert run["operator_id"] == operator_id and run["completion_grant_id"] == grant_id
+    (commit,) = [
+        call for call in run["calls"] if call["committed_event_id"] is not None
+    ]
+    assert commit["tool"] == "complete_goal" and commit["outcome"] == "returned"
+    assert commit["target_goal_id"] == goal_id and commit["target_revision"] == revision
+    assert any(
+        seq < commit["sequence"]
+        for seq in _returned_progress(run, goal_id, revision, observation_ids)
+    )
+    (entry,) = [item for item in activity["timeline"] if item["kind"] == "decision"]
+    decision = entry["decision"]
+    assert (
+        decision["event_id"] == commit["committed_event_id"]
+        and decision["revision"] == revision
+    )
+    assert entry["committing_call"] == {
+        "run_id": run["id"],
+        "sequence": commit["sequence"],
+    }
+    assert (
+        decision["recorded_by_operator_id"] == operator_id
+        and decision["completion_grant_id"] == grant_id
+    )
+    assert decision["rationale"].strip()
+    (returned,) = commit["returned_goals"]
+    assert returned["decision"]["event_id"] == decision["event_id"]
+    assert returned["decision"]["evidence_ids"] == decision["evidence_ids"]
+    assert confirmation["evidence_id"] in decision["evidence_ids"]
+    observations = {
+        item["observation"]["evidence_id"]: item["observation"]
+        for item in activity["timeline"]
+        if item["kind"] == "observation"
+    }
+    saved = observations[confirmation["evidence_id"]]
+    assert saved["submitted_by"] == confirmation["submitted_by"] == 1
+    assert saved["recorded_at"] == confirmation["recorded_at"] and saved["recorded_at"]

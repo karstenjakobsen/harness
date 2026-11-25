@@ -3,7 +3,7 @@ import sys
 
 from click.testing import CliRunner
 
-from harness_api import DATABASE_PATH
+from harness_api import DATABASE_PATH, GoalAPI
 from harness_operator import cli, main
 
 
@@ -39,6 +39,38 @@ def test_workspace_goal_commands_read_and_write_the_same_goal(monkeypatch, tmp_p
         revised["title"],
         "completed",
     )
+
+
+def test_cli_discovers_and_reads_workspace_runs(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    api = GoalAPI()
+    goal = api.create_goal("Review notes")
+    goal_id = goal["id"]
+    run_id = api.start_run()["id"]
+    call = api.start_tool_call(run_id, "get_goal_progress", target_goal_id=goal_id)
+    api.finish_tool_call(
+        call,
+        "returned",
+        returned_goals=[
+            {
+                "goal_id": goal_id,
+                "revision": 1,
+                "status": "draft",
+                "decision": None,
+                "observation_ids": [],
+            }
+        ],
+    )
+    api.finish_run(run_id, "succeeded")
+    runner = CliRunner()
+    history = runner.invoke(cli, ["goal", "history", str(goal_id)])
+    assert history.exit_code == 0, history.output
+    assert json.loads(history.output) == api.get_goal_activity(goal_id)
+    (_, activity) = json.loads(history.output)["timeline"]
+    assert activity["run_id"] == run_id
+    show = runner.invoke(cli, ["run", "show", str(activity["run_id"])])
+    assert show.exit_code == 0, show.output
+    assert json.loads(show.output) == api.get_run(run_id)
 
 
 def test_cli_observations_revision_selection_and_completion_citations(

@@ -7,6 +7,7 @@ from ..models.goals import (
     AssessmentType,
     Completion,
     DelegatedCompletion,
+    GoalActivity,
     GoalCreationStatus,
     GoalDuration,
     GoalProgress,
@@ -22,6 +23,7 @@ EvidenceView = Evidence
 CompletionView = Completion
 GoalProgressView = GoalProgress
 GoalHistoryView = list[GoalRevision]
+GoalActivityView = GoalActivity
 
 
 class GoalDefinitionFields(BaseModel):

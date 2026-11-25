@@ -10,15 +10,20 @@
 | Assignment | The recorded relationship between a goal and the registered operator responsible for it. Unregistering the operator releases its open assignments. Completion authority requires an explicit grant. |
 | Delegation | The owner’s explicit grant of a specific action on a specific goal to a registered operator. A completion grant uses the ID of the assignment created when the owner grants completion of one subgoal. |
 | Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
-| Workspace | The context for a set of goals. Local commands use the workspace database. HTTP commands address the workspace served by the selected API server. |
+| Workspace | The context for users, registered operators, goals, evidence, decisions and operator run history. Local commands use the current workspace database. HTTP requests use the workspace served by the selected API server. |
 | Schema snapshot | The complete SQLite schema and initial system user in `001_initial.sql`. SQLite’s `user_version` records the schema version installed in each workspace. |
-| GoalAPI | The public Python interface for goal operations. It owns the rules shared by the HTTP, CLI, and MCP adapters. Use “HTTP API” when referring specifically to the network interface. |
+| Harness API | The workspace operations provided by the `harness_api` package. Its public Python interfaces are `UserAPI`, `OperatorAPI` and `GoalAPI`. The HTTP, CLI and MCP adapters call the model operations they expose. |
+| HTTP API | The FastAPI interface for working with workspace users, registered operators and goals, and reading goal activity and operator runs. [Endpoint catalog](README.md#fastapi) |
+| `UserAPI` | The public Python interface for creating, reading, updating and deleting workspace user accounts. |
+| `OperatorAPI` | The public Python interface for registering, reading and unregistering operators. Unregistering also releases the operator’s open goal assignments. |
+| `GoalAPI` | The public Python interface for goals and revisions, observations, progress assessments, completion decisions and grants. It also records operator runs and MCP tool calls and serves goal activity and run history. |
 
 ## Identity and attribution
 
 | Current entry point | What the application establishes |
 | --- | --- |
-| Goal CLI and HTTP endpoints | `GoalAPI` scopes goals to the workspace account identified by `ADMIN_USER_ID`. Local owner writes use that account as `submitted_by` for reports and `recorded_by` for completion. HTTP writes have no established caller and return null for those identities. In message-based creation, Codex drafts the definition and the CLI saves it through `GoalAPI` in the same account. |
+| Goal and run reads | `GoalAPI` scopes goals, goal activity and operator runs to the workspace account identified by `ADMIN_USER_ID`. |
+| Goal CLI and HTTP writes | Local owner writes use the workspace account as `submitted_by` for reports and `recorded_by` for completion. HTTP writes have no established caller and return null for those identities. In message-based creation, Codex drafts the definition and the CLI saves it through `GoalAPI` in the same account. |
 | Account CLI and HTTP endpoints | A numeric user or operator ID selects an existing record. Named registration assigns the owner from `--user` or HTTP `owner_user_id`, defaulting to `admin`. These operations record no separate initiating identity. |
 | Bare `operator register` | Starts Codex sign-in. Named registration creates a workspace operator record. |
 | Ordinary `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. |
@@ -54,10 +59,14 @@ An owner can record evidence while a goal is open. The event ID identifies the e
 | Evidence | What information supports a claim, and where did it come from? | The file check's response supports a claim about the mode at 10:00. A link pasted by the owner has owner-supplied provenance. |
 | Assessment | What does the evidence establish against this revision's criteria? | The standing goal met its condition at 10:00. Its lifecycle status is still `active`. |
 | Audit record | Who performed which action in Harness, and when? | At 10:05 the owner recorded an observation made at 10:00. |
+| Operator run | Which `operator ask` session contained the activity? | A delegated run records the registered operator and exact grant. An advisory run has no bound operator or grant. |
+| Tool call | What did MCP attempt, and what outcome did it record? | A call has a run ID, sequence, timestamps and requested target when applicable. A call can remain unfinished after the run ends. |
+| Returned reference | Which goal revision, observation records, or decision citations did a tool response expose? | A progress response returned observations 31 and 32. MCP saved their IDs before handing off the response. Assistant receipt can remain unknown. |
+| Committing call | Which call saved the decision? | The model links the decision to the call in the completion transaction. A retry can retrieve that event and has its own call sequence. |
 
 A successful HTTP response supports only the claim defined by that endpoint. A health check can establish reachability. A file-mode check can establish the mode of the file it inspected.
 
-The local workspace CLI and default Python model operate as the workspace owner. A confirmation has source `owner_confirmation` and identifies that owner as submitter and observer. A pasted reference has source `owner_supplied_reference`, identifies its submitter and leaves the original observer unknown. An adapter without an established caller uses `GoalAPI(path, local_owner=False)`, as the HTTP service does. Its reports have source `unattributed_confirmation` or `unattributed_reference`. Unknown identities are null. Owner-input reports have no check requester. A retry key is scoped to the goal and submitting identity, with one scope for unattributed requests.
+The local `operator goal` commands and `GoalAPI` with its default caller setting attribute observations to the workspace owner. A confirmation has source `owner_confirmation` and identifies that owner as submitter and observer. A pasted reference has source `owner_supplied_reference`, identifies its submitter and leaves the original observer unknown. An adapter without an established caller uses `GoalAPI(path, local_owner=False)`, as the HTTP service does. Its reports have source `unattributed_confirmation` or `unattributed_reference`. Unknown identities are null. Owner-input reports have no check requester. A retry key is scoped to the goal and submitting identity, with one scope for unattributed requests.
 
 **Count distinct reported dates** groups dated owner confirmations by `reported_date` and retains each supporting evidence ID. The rule compares the number of qualifying dates with `target_distinct_dates`. `duration_days` optionally limits those dates to an inclusive window starting on `window_start` or the goal’s UTC creation date. A one-day window includes only its start date. The model returns `met` or `unmet` for this rule and `unavailable` for prose-only criteria.
 

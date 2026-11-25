@@ -118,10 +118,69 @@ CREATE TABLE completion_citations (
 ) STRICT, WITHOUT ROWID;
 -- End goal event schema
 
+-- Begin run activity schema
+CREATE TABLE operator_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    completion_grant_id INTEGER REFERENCES goal_assignments(id),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    outcome TEXT NOT NULL DEFAULT 'unfinished'
+        CHECK (outcome IN ('unfinished', 'succeeded', 'failed')),
+    CHECK ((outcome = 'unfinished') = (finished_at IS NULL))
+) STRICT;
+
+CREATE TABLE run_calls (
+    run_id INTEGER NOT NULL REFERENCES operator_runs(id),
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    tool TEXT NOT NULL CHECK (tool IN ('list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal')),
+    -- Requested IDs can be invalid or belong to a different owner.
+    target_goal_id INTEGER CHECK (target_goal_id > 0),
+    target_revision INTEGER CHECK (target_revision > 0),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    outcome TEXT NOT NULL DEFAULT 'unfinished'
+        CHECK (outcome IN ('unfinished', 'returned', 'denied', 'failed')),
+    committed_event_id INTEGER UNIQUE,
+    retrieved_event_id INTEGER,
+    CHECK ((outcome = 'unfinished') = (finished_at IS NULL)),
+    CHECK ((committed_event_id IS NOT NULL) + (retrieved_event_id IS NOT NULL) <= 1),
+    CHECK ((committed_event_id IS NULL AND retrieved_event_id IS NULL) OR
+        (tool = 'complete_goal' AND target_goal_id IS NOT NULL)),
+    FOREIGN KEY (target_goal_id, committed_event_id) REFERENCES goal_events(goal_id, decision_id),
+    FOREIGN KEY (target_goal_id, retrieved_event_id) REFERENCES goal_events(goal_id, decision_id),
+    PRIMARY KEY (run_id, sequence)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX run_calls_by_target ON run_calls(target_goal_id);
+
+CREATE TABLE run_call_goals (
+    run_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    goal_id INTEGER NOT NULL REFERENCES goals(id),
+    revision INTEGER,
+    status TEXT CHECK (status IN ('draft', 'active', 'paused', 'completed', 'revoked')),
+    observation_ids TEXT NOT NULL CHECK (json_type(observation_ids) = 'array'),
+    decision_event_id INTEGER,
+    cited_evidence_ids TEXT CHECK (json_type(cited_evidence_ids) = 'array'),
+    statement_evidence_id INTEGER,
+    CHECK ((decision_event_id IS NULL) = (cited_evidence_ids IS NULL)),
+    CHECK (statement_evidence_id IS NULL OR decision_event_id IS NOT NULL),
+    PRIMARY KEY (run_id, sequence, position),
+    FOREIGN KEY (run_id, sequence) REFERENCES run_calls(run_id, sequence),
+    FOREIGN KEY (goal_id, revision) REFERENCES goal_revisions(goal_id, revision),
+    FOREIGN KEY (goal_id, decision_event_id) REFERENCES goal_events(goal_id, decision_id),
+    FOREIGN KEY (goal_id, statement_evidence_id) REFERENCES goal_events(goal_id, evidence_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX run_call_goals_by_goal ON run_call_goals(goal_id);
+-- End run activity schema
+
 INSERT INTO users (username, display_name) VALUES ('admin', 'admin');
 
 CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;

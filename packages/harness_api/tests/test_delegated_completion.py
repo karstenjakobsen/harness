@@ -59,7 +59,7 @@ def test_upgrade_keeps_responsibility_and_owner_completion_without_grant(v7_work
     history = api.get_goal_history(2)
     assert api.get_goal(2)["operator"] == "Reviewer"
     with closing(sqlite3.connect(path, autocommit=True)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (8,)
+        assert db.execute("PRAGMA user_version").fetchone() == (9,)
         assert db.execute("""
             SELECT id, goal_id, operator_id, claimed_at, released_at, completion_granted_at
             FROM goal_assignments
@@ -74,17 +74,26 @@ def test_upgrade_keeps_responsibility_and_owner_completion_without_grant(v7_work
     assert api.get_goal(3)["completion"] == api.complete_goal(
         3, 1, confirmation="Prior statement", evidence_ids=[2]
     )
-    request = {"rationale": "Verified by the owner", "evidence_ids": [1]}
+
+    def complete(grant_id):
+        return api.complete_goal(
+            2,
+            1,
+            completion_grant_id=grant_id,
+            rationale="Verified by the owner",
+            evidence_ids=[1],
+        )
+
     with pytest.raises(GoalValidationError, match="grant"):
         api.get_completion_grant(1)
     with pytest.raises(GoalValidationError, match="grant"):
-        api.complete_goal(2, 1, completion_grant_id=1, **request)
+        complete(1)
     assert api.get_goal(2)["status"] == "active"
     assert api.get_goal_history(2) == history
 
     grant = api.grant_completion(2, 1)
     assert grant["id"] > 1
-    decision = api.complete_goal(2, 1, completion_grant_id=grant["id"], **request)
+    decision = complete(grant["id"])
     assert decision["event_id"] == 21
     assert decision["recorded_by_operator_id"] == 1
     assert api.get_goal_history(2)[0]["evidence"] == history[0]["evidence"]

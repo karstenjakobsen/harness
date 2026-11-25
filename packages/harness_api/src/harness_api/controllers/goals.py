@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response
 
@@ -8,6 +8,7 @@ from ..views.goals import (
     CompletionRequest,
     CompletionView,
     EvidenceView,
+    GoalActivityView,
     GoalCreateRequest,
     GoalHistoryView,
     GoalProgressView,
@@ -77,7 +78,13 @@ def get_goal_progress(
 
 
 @router.get("/{goal_id}/history")
-def get_goal_history(goal_id: GoalId, goals: GoalService) -> GoalHistoryView:
+def get_goal_history(
+    goal_id: GoalId,
+    goals: GoalService,
+    view: Literal["activity"] | None = None,
+) -> GoalHistoryView | GoalActivityView:
+    if view == "activity":
+        return goals.get_goal_activity(goal_id)
     return goals.get_goal_history(goal_id)
 
 

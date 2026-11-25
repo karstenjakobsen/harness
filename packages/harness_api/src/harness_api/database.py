@@ -1,13 +1,22 @@
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing, contextmanager
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from typing import Literal
 
 DATABASE_PATH = Path(".harness/goals.sqlite3")
 ADMIN_USER_ID = 1
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+
+
+def utc_timestamp() -> str:
+    return (
+        datetime.now(UTC)
+        .replace(tzinfo=None)
+        .isoformat(sep=" ", timespec="microseconds")
+    )
 
 
 class WorkspaceStorageError(RuntimeError):
@@ -37,21 +46,27 @@ class WorkspaceDatabase:
             (version,) = connection.execute("PRAGMA user_version").fetchone()
             if version == SCHEMA_VERSION:
                 return
-            snapshot = files("harness_api").joinpath("migrations", "001_initial.sql")
-            if version == 7:
-                self._upgrade_v7(connection, snapshot.read_text(encoding="utf-8"))
-            elif (
-                version
-                or connection.execute(
+            if version not in (0, 7, 8) or (
+                version == 0
+                and connection.execute(
                     "SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
                 ).fetchone()
             ):
                 raise self.storage_error(
                     f"Cannot open workspace schema version {version}. "
-                    f"Use a version 7 workspace or a fresh database for schema version {SCHEMA_VERSION}."
+                    f"Use a version 7 or 8 workspace or a fresh database for schema version {SCHEMA_VERSION}."
                 )
-            else:
-                connection.executescript(snapshot.read_text(encoding="utf-8"))
+            snapshot = (
+                files("harness_api")
+                .joinpath("migrations", "001_initial.sql")
+                .read_text(encoding="utf-8")
+            )
+            if version == 0:
+                connection.executescript(snapshot)
+                return
+            if version == 7:
+                self._upgrade_v7(connection, snapshot)
+            self._upgrade_v8(connection, snapshot)
 
     @staticmethod
     def _upgrade_v7(connection: sqlite3.Connection, snapshot: str) -> None:
@@ -89,6 +104,13 @@ class WorkspaceDatabase:
             DROP TABLE v7_goal_events;
             PRAGMA user_version = 8;
         """)
+
+    @staticmethod
+    def _upgrade_v8(connection: sqlite3.Connection, snapshot: str) -> None:
+        activity_schema = snapshot.split("-- Begin run activity schema\n", 1)[1].split(
+            "-- End run activity schema\n", 1
+        )[0]
+        connection.executescript(activity_schema + "PRAGMA user_version = 9;")
 
     @contextmanager
     def _connection(
