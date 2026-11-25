@@ -11,7 +11,20 @@ Add `--help` to any command or group to see its options.
 | Command | What it does |
 | --- | --- |
 | `operator register` | Starts Codex device sign-in and displays the verification link and one-time code. |
-| `operator ask [--trace-file PATH] [MESSAGE]` | Asks Codex a question and prints its reply. The optional flag saves the Codex event stream to a new file. |
+| `operator ask [--trace-file PATH] [MESSAGE]` | Opens an advisory session and prints its reply. The optional flag saves the Codex event stream, including MCP calls, to a new file. |
+
+Today, `operator ask` can read goals with `list_goals`, `get_goal_tree` and
+`get_goal_progress`. It can weigh the evidence, suggest completion or ask what
+is missing. To act on its advice, the local owner uses `operator goal complete`.
+Named registration creates a workspace record. Ordinary ask sessions remain advisory.
+
+**Planned delegated session.** The owner will be able to grant a registered
+operator permission to complete one assigned subgoal and start a session bound
+to that assignment. Its proposed MCP action is
+`complete_goal(goal_id, expected_revision, evidence_ids, rationale)`.
+Harness will supply the actor from the session and return the saved decision
+with its citations. The grant and session commands will be added to the command
+table when they ship. [Slice 3 implementation plan](docs/SLICE3_TODO.md)
 
 ## Workspace users and operators
 
