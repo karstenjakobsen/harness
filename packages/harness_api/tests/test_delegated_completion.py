@@ -59,7 +59,7 @@ def test_upgrade_keeps_responsibility_and_owner_completion_without_grant(v7_work
     history = api.get_goal_history(2)
     assert api.get_goal(2)["operator"] == "Reviewer"
     with closing(sqlite3.connect(path, autocommit=True)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (9,)
+        assert db.execute("PRAGMA user_version").fetchone() == (10,)
         assert db.execute("""
             SELECT id, goal_id, operator_id, claimed_at, released_at, completion_granted_at
             FROM goal_assignments

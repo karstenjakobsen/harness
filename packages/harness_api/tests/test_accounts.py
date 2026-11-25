@@ -156,7 +156,7 @@ def test_standalone_snapshot_initializes_workspace(tmp_path):
     snapshot = files("harness_api").joinpath("migrations", "001_initial.sql")
     with closing(sqlite3.connect(path, autocommit=True)) as connection:
         connection.executescript(snapshot.read_text(encoding="utf-8"))
-        assert connection.execute("PRAGMA user_version").fetchone() == (9,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (10,)
     assert [user["id"] for user in UserAPI(path).list_users()] == [1]
     assert OperatorAPI(path).register_operator("Coach")["owner_user_id"] == 1
     goals = GoalAPI(path)

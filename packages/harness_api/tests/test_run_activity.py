@@ -16,6 +16,25 @@ from harness_api import (
 from harness_api.app import create_app
 
 
+def test_denied_read_does_not_attach_to_goal_created_later(tmp_path):
+    path = tmp_path / "goals.db"
+    api = GoalAPI(path)
+    run_id = api.start_run()["id"]
+    attempt = api.start_tool_call(run_id, "get_goal_progress", target_goal_id=1)
+    with pytest.raises(GoalNotFoundError):
+        api.get_goal_progress(1)
+    api.finish_tool_call(attempt, "denied")
+    api.finish_run(run_id, "succeeded")
+
+    goal_id = api.create_goal("First goal")["id"]
+    assert goal_id == 1
+    reopened = GoalAPI(path)
+    (call,) = reopened.get_run(run_id)["calls"]
+    assert call["target_goal_id"] == goal_id and call["outcome"] == "denied"
+    (revision,) = reopened.get_goal_activity(goal_id)["timeline"]
+    assert revision["kind"] == "revision"
+
+
 def test_completion_attempt_commit_and_delivery_are_independent(tmp_path):
     path = tmp_path / "goals.db"
     api = GoalAPI(path)
@@ -136,6 +155,14 @@ def test_completion_attempt_commit_and_delivery_are_independent(tmp_path):
     )
     assert last["committed_event_id"] is None and last["retrieved_event_id"] is None
     assert api.get_goal_history(child)[0]["completion"] == decision
+    assert any(
+        item["kind"] == "call"
+        and item["run_id"] == run_id
+        and item["sequence"] == denied["sequence"]
+        and item["relationship"] == "completion_target"
+        and item["outcome"] == "denied"
+        for item in api.get_goal_activity(child)["timeline"]
+    )
 
 
 def test_owner_scope_order_and_http_contract(tmp_path):
@@ -169,8 +196,8 @@ def test_owner_scope_order_and_http_contract(tmp_path):
             INSERT INTO users (id, username, display_name) VALUES (2, 'other', 'Other');
             INSERT INTO goals (id, owner_user_id) VALUES (2, 2);
             INSERT INTO operator_runs (id, owner_user_id, started_at) VALUES (2, 2, '2025-01-01 10:00:00');
-            INSERT INTO run_calls (run_id, sequence, tool, target_goal_id, started_at)
-            VALUES (2, 1, 'get_goal_progress', 1, '2025-01-01 10:00:00');
+            INSERT INTO run_calls (run_id, sequence, tool, target_goal_id, resolved_goal_id, started_at)
+            VALUES (2, 1, 'get_goal_progress', 1, 1, '2025-01-01 10:00:00');
         """)
     with pytest.raises(GoalValidationError, match="workspace owner"):
         api.finish_tool_call(
@@ -240,7 +267,7 @@ def test_upgrade_v8_keeps_delegated_decision_and_citation_without_run_attributio
     GoalAPI(path)
     reopened = GoalAPI(path)
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (9,)
+        assert db.execute("PRAGMA user_version").fetchone() == (10,)
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
     assert reopened.get_goal(23)["parent_goal_id"] == 22
     assert reopened.get_completion_grant(24) == {
@@ -270,3 +297,63 @@ def test_upgrade_v8_keeps_delegated_decision_and_citation_without_run_attributio
     last = timeline[-1]
     assert last["kind"] == "decision"
     assert last["decision"] == decision and last["committing_call"] is None
+
+
+def test_upgrade_v9_keeps_confirmed_goal_relationships(tmp_path):
+    path = tmp_path / "goals.db"
+    snapshot = Path(__file__).with_name("fixtures") / "schema_v9.sql"
+    with closing(sqlite3.connect(path, autocommit=True)) as db:
+        db.executescript(snapshot.read_text(encoding="utf-8"))
+        db.executescript("""
+            INSERT INTO operators (id, owner_user_id, name) VALUES (1, 1, 'Reviewer');
+            INSERT INTO goals (id, owner_user_id, status, parent_goal_id, created_at)
+            VALUES (1, 1, 'active', NULL, '2025-01-01 10:00:02'),
+                   (2, 1, 'completed', 1, '2025-01-01 10:00:02');
+            INSERT INTO goal_revisions (goal_id, revision, title, created_at)
+            VALUES (1, 1, 'Parent', '2025-01-01 10:00:02'),
+                   (2, 1, 'Child', '2025-01-01 10:00:02');
+            INSERT INTO goal_assignments (id, goal_id, operator_id, completion_granted_at, released_at)
+            VALUES (1, 2, 1, '2025-01-01 10:00:03', '2025-01-01 10:00:06');
+            INSERT INTO goal_events (id, goal_id, revision, kind, actor_user_id, payload, recorded_at)
+            VALUES (1, 2, 1, 'observation', 1, '{"evidence_kind":"owner_confirmation","evidence":"Verified"}',
+                    '2025-01-01 10:00:03');
+            INSERT INTO goal_events (id, goal_id, revision, kind, completion_grant_id, payload, recorded_at)
+            VALUES (2, 2, 1, 'completion', 1, '{"rationale":"Verified"}', '2025-01-01 10:00:05');
+            INSERT INTO completion_citations VALUES (2, 2, 1);
+
+            INSERT INTO operator_runs (id, owner_user_id, completion_grant_id, started_at, finished_at, outcome)
+            VALUES (1, 1, NULL, '2025-01-01 10:00:00', '2025-01-01 10:00:01', 'succeeded'),
+                   (2, 1, NULL, '2025-01-01 10:00:03', '2025-01-01 10:00:04', 'succeeded'),
+                   (3, 1, 1, '2025-01-01 10:00:04', NULL, 'unfinished');
+            INSERT INTO run_calls (
+                run_id, sequence, tool, target_goal_id, target_revision,
+                started_at, finished_at, outcome, committed_event_id
+            ) VALUES
+                (1, 1, 'get_goal_progress', 2, NULL, '2025-01-01 10:00:00', '2025-01-01 10:00:01', 'denied', NULL),
+                (2, 1, 'get_goal_progress', 2, NULL, '2025-01-01 10:00:03', '2025-01-01 10:00:04', 'returned', NULL),
+                (3, 1, 'complete_goal', 2, 1, '2025-01-01 10:00:05', NULL, 'unfinished', 2),
+                (3, 2, 'complete_goal', 2, 1, '2025-01-01 10:00:07', '2025-01-01 10:00:08', 'denied', NULL);
+            INSERT INTO run_call_goals (run_id, sequence, position, goal_id, revision, status, observation_ids)
+            VALUES (2, 1, 0, 2, 1, 'active', '[1]');
+        """)
+
+    GoalAPI(path)
+    reopened = GoalAPI(path)
+    (missing,) = reopened.get_run(1)["calls"]
+    assert (missing["target_goal_id"], missing["outcome"]) == (2, "denied")
+    timeline = reopened.get_goal_activity(2)["timeline"]
+    assert [
+        (entry["run_id"], entry["sequence"], entry["relationship"], entry["outcome"])
+        for entry in timeline
+        if entry["kind"] == "call"
+    ] == [
+        (2, 1, "requested", "returned"),
+        (3, 1, "completion_target", "unfinished"),
+        (3, 2, "completion_target", "denied"),
+    ]
+    (decision,) = [entry for entry in timeline if entry["kind"] == "decision"]
+    assert decision["decision"]["evidence_ids"] == [1]
+    assert decision["committing_call"] == {"run_id": 3, "sequence": 1}
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("PRAGMA user_version").fetchone() == (10,)
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []

@@ -8,7 +8,7 @@ from typing import Literal
 
 DATABASE_PATH = Path(".harness/goals.sqlite3")
 ADMIN_USER_ID = 1
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def utc_timestamp() -> str:
@@ -46,7 +46,7 @@ class WorkspaceDatabase:
             (version,) = connection.execute("PRAGMA user_version").fetchone()
             if version == SCHEMA_VERSION:
                 return
-            if version not in (0, 7, 8) or (
+            if version not in (0, 7, 8, 9) or (
                 version == 0
                 and connection.execute(
                     "SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
@@ -54,7 +54,7 @@ class WorkspaceDatabase:
             ):
                 raise self.storage_error(
                     f"Cannot open workspace schema version {version}. "
-                    f"Use a version 7 or 8 workspace or a fresh database for schema version {SCHEMA_VERSION}."
+                    f"Use a version 7, 8, or 9 workspace or a fresh database for schema version {SCHEMA_VERSION}."
                 )
             snapshot = (
                 files("harness_api")
@@ -66,7 +66,11 @@ class WorkspaceDatabase:
                 return
             if version == 7:
                 self._upgrade_v7(connection, snapshot)
-            self._upgrade_v8(connection, snapshot)
+            if version == 9:
+                self._upgrade_v9(connection)
+            else:
+                self._upgrade_v8(connection, snapshot)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @staticmethod
     def _upgrade_v7(connection: sqlite3.Connection, snapshot: str) -> None:
@@ -110,7 +114,27 @@ class WorkspaceDatabase:
         activity_schema = snapshot.split("-- Begin run activity schema\n", 1)[1].split(
             "-- End run activity schema\n", 1
         )[0]
-        connection.executescript(activity_schema + "PRAGMA user_version = 9;")
+        connection.executescript(activity_schema)
+
+    @staticmethod
+    def _upgrade_v9(connection: sqlite3.Connection) -> None:
+        connection.executescript("""
+            ALTER TABLE run_calls ADD COLUMN resolved_goal_id INTEGER REFERENCES goals(id)
+                CHECK (resolved_goal_id IS NULL OR resolved_goal_id IS target_goal_id);
+
+            -- A run's bound grant proves its goal was already visible at startup.
+            UPDATE run_calls AS call SET resolved_goal_id = target_goal_id
+            WHERE EXISTS (
+                SELECT 1 FROM operator_runs AS run
+                JOIN goal_assignments AS grant ON grant.id = run.completion_grant_id
+                JOIN goals AS goal ON goal.id = grant.goal_id
+                WHERE run.id = call.run_id AND goal.id = call.target_goal_id
+                    AND goal.owner_user_id = run.owner_user_id AND goal.deleted_at IS NULL
+            );
+            DROP INDEX run_calls_by_target;
+            CREATE INDEX run_calls_by_resolved_goal ON run_calls(resolved_goal_id)
+                WHERE resolved_goal_id IS NOT NULL;
+        """)
 
     @contextmanager
     def _connection(

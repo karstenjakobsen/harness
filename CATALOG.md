@@ -64,7 +64,7 @@ Explicit creation and the other workspace commands print JSON.
 | `operator goal create --title TITLE [--parent GOAL_ID] [FIELDS]` | Creates an active goal. Supply a parent ID to create a subgoal. |
 | `operator goal list` | Lists saved goals in this workspace. |
 | `operator goal show GOAL_ID` | Shows the current goal. Add `--tree` for its descendants and current completion decisions, or `--history` for revision creation times, evidence recorded under each revision, and saved decisions. |
-| `operator goal history GOAL_ID` | Shows the goal timeline with revisions, observations, decisions and related run calls. |
+| `operator goal history GOAL_ID` | Shows revisions, observations, decisions and run calls linked by a resolved target or returned goal. |
 | `operator run show RUN_ID` | Shows one operator run with its identity, timing, outcome, ordered calls, returned references and decision links. |
 | `operator goal revise GOAL_ID FIELDS` | Updates the supplied fields and appends a revision when the definition changes. Use `--title TITLE` to rename the goal. |
 | `operator goal observe GOAL_ID --retry-key KEY [--reported-date YYYY-MM-DD] EVIDENCE` | Records an owner confirmation or owner-supplied reference. Reuse the key for an identical retry. Use separate keys for intentional reports about the same day. |

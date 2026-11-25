@@ -599,17 +599,23 @@ class GoalAPI(WorkspaceDatabase):
             ).fetchone()[0]
             connection.execute(
                 """
-                INSERT INTO run_calls (run_id, sequence, tool, target_goal_id, target_revision, started_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO run_calls (
+                    run_id, sequence, tool, target_goal_id, target_revision, started_at, resolved_goal_id
+                ) VALUES (
+                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :started_at,
+                    (SELECT id FROM goals WHERE id = :target_goal_id
+                        AND owner_user_id = :owner AND deleted_at IS NULL)
+                )
                 """,
-                (
-                    run_id,
-                    sequence,
-                    tool,
-                    target_goal_id,
-                    target_revision,
-                    utc_timestamp(),
-                ),
+                {
+                    "run_id": run_id,
+                    "sequence": sequence,
+                    "tool": tool,
+                    "target_goal_id": target_goal_id,
+                    "target_revision": target_revision,
+                    "started_at": utc_timestamp(),
+                    "owner": run["owner_user_id"],
+                },
             )
         return CallReference(run_id=run_id, sequence=sequence)
 

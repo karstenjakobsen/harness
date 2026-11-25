@@ -143,6 +143,8 @@ CREATE TABLE run_calls (
         CHECK (outcome IN ('unfinished', 'returned', 'denied', 'failed')),
     committed_event_id INTEGER UNIQUE,
     retrieved_event_id INTEGER,
+    resolved_goal_id INTEGER REFERENCES goals(id)
+        CHECK (resolved_goal_id IS NULL OR resolved_goal_id IS target_goal_id),
     CHECK ((outcome = 'unfinished') = (finished_at IS NULL)),
     CHECK ((committed_event_id IS NOT NULL) + (retrieved_event_id IS NOT NULL) <= 1),
     CHECK ((committed_event_id IS NULL AND retrieved_event_id IS NULL) OR
@@ -152,7 +154,8 @@ CREATE TABLE run_calls (
     PRIMARY KEY (run_id, sequence)
 ) STRICT, WITHOUT ROWID;
 
-CREATE INDEX run_calls_by_target ON run_calls(target_goal_id);
+CREATE INDEX run_calls_by_resolved_goal ON run_calls(resolved_goal_id)
+    WHERE resolved_goal_id IS NOT NULL;
 
 CREATE TABLE run_call_goals (
     run_id INTEGER NOT NULL,
@@ -183,4 +186,4 @@ CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
-PRAGMA user_version = 9;
+PRAGMA user_version = 10;

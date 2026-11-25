@@ -60,7 +60,7 @@ An owner can record evidence while a goal is open. The event ID identifies the e
 | Assessment | What does the evidence establish against this revision's criteria? | The standing goal met its condition at 10:00. Its lifecycle status is still `active`. |
 | Audit record | Who performed which action in Harness, and when? | At 10:05 the owner recorded an observation made at 10:00. |
 | Operator run | Which `operator ask` session contained the activity? | A delegated run records the registered operator and exact grant. An advisory run has no bound operator or grant. |
-| Tool call | What did MCP attempt, and what outcome did it record? | A call has a run ID, sequence, timestamps and requested target when applicable. A call can remain unfinished after the run ends. |
+| Tool call | What did MCP attempt, and what outcome did it record? | The run trace keeps the requested target ID. When the goal was visible to the workspace owner at call start, the resolved target also links the call to that goal's timeline. A call can remain unfinished after the run ends. |
 | Returned reference | Which goal revision, observation records, or decision citations did a tool response expose? | A progress response returned observations 31 and 32. MCP saved their IDs before handing off the response. Assistant receipt can remain unknown. |
 | Committing call | Which call saved the decision? | The model links the decision to the call in the completion transaction. A retry can retrieve that event and has its own call sequence. |
 

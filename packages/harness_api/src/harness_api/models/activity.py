@@ -154,7 +154,7 @@ def related_calls(
     rows = connection.execute(
         """
         WITH related(run_id, sequence) AS (
-            SELECT run_id, sequence FROM run_calls WHERE target_goal_id = :goal_id
+            SELECT run_id, sequence FROM run_calls WHERE resolved_goal_id = :goal_id
             UNION
             SELECT run_id, sequence FROM run_call_goals WHERE goal_id = :goal_id
         )

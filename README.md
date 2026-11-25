@@ -63,7 +63,7 @@ deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.m
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
 On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Version 9 upgrades version 7 and version 8 workspaces in
+`001_initial.sql`. Version 10 upgrades workspaces from versions 7, 8 and 9 in
 place. Existing assignments keep their responsible operator and require an
 explicit grant for completion authority. Opening a pre-v7 or unrecognized
 workspace returns an error and leaves the file intact.
@@ -206,16 +206,20 @@ with equal timestamps sort by revision, observation, call, and decision, then
 by their stable IDs. Each call gives its
 `run_id`, `sequence`, `tool`, `outcome` and `relationship` to the goal. The
 relationship is `listed`, `descendant`, `requested`, or `completion_target`.
+Requested targets contribute to the timeline when they resolved to an
+owner-visible goal at call start. Returned goals also contribute to the timeline.
+For version 9 records, returned references and matching bound grants establish
+goal relationships. Older attempts with only a supplied ID remain in the run trace.
 The revision list remains available at `/goals/{goal_id}/history`.
 
 Follow a `run_id` to `GET /runs/{run_id}`. An advisory run has null operator and
 grant fields. A delegated run identifies the registered operator, exact grant
 and granted goal. The run outcome is `succeeded`, `failed`, or `unfinished`.
 A launch error, such as an existing trace file, marks the run `failed`.
-Calls are ordered by `sequence` and retain their requested goal and revision
-when supplied. The call outcome is `returned`, `denied`, `failed`, or
-`unfinished`. A successful empty result has `returned_goals: []`. Calls without
-a returned result have `returned_goals: null`.
+Calls are ordered by `sequence` and retain the requested goal ID and revision
+when supplied, including on denial. The call outcome is `returned`, `denied`,
+`failed`, or `unfinished`. A successful empty result has `returned_goals: []`.
+Calls without a returned result have `returned_goals: null`.
 
 Each result reference retains its goal ID, revision and any returned status. `observation_ids`
 identifies observation records returned by a progress call. A result's `decision`
