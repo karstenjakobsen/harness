@@ -25,28 +25,28 @@ def imported_names(path, package):
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                yield alias.lineno, alias.name
+                yield alias.lineno, alias.name, None
         elif isinstance(node, ast.ImportFrom):
             module = resolve_name("." * node.level + (node.module or ""), package)
             for alias in node.names:
-                yield alias.lineno, f"{module}.{alias.name}"
+                yield alias.lineno, module, alias.name
 
 
 def import_violations(path, src):
     relative = path.relative_to(src)
     package = ".".join(relative.parent.parts)
-    for line, name in imported_names(path, package):
+    for line, module, member in imported_names(path, package):
+        name = f"{module}.{member}" if member is not None else module
         if relative.parts[0] == "harness_api":
             forbidden = any(
-                name == module or name.startswith(module + ".")
-                for module in ADAPTER_MODULES
+                name == adapter or name.startswith(adapter + ".")
+                for adapter in ADAPTER_MODULES
             )
         else:
-            root, _, member = name.partition(".")
+            root = module.partition(".")[0]
             forbidden = root in ("sqlite3", "_sqlite3") or (
                 root == "harness_api"
-                and member not in ("", "*")
-                and member not in harness_api.__all__
+                and (module != "harness_api" or member not in harness_api.__all__)
             )
         if forbidden:
             yield f"{path}:{line}: forbidden import {name}"
@@ -78,6 +78,17 @@ def test_production_import_boundaries():
             "harness_operator/commands/get.py",
             "import harness_api.models.accounts as accounts",
             "harness_api.models.accounts",
+        ),
+        (
+            "harness_operator/commands/get.py",
+            "import harness_api as api\napi.database.WorkspaceDatabase",
+            "harness_api",
+        ),
+        ("harness_mcp/server.py", "from harness_api import *", "harness_api.*"),
+        (
+            "harness_mcp/server.py",
+            "import harness_api.OperatorAPI",
+            "harness_api.OperatorAPI",
         ),
         ("harness_mcp/server.py", "import sqlite3 as db", "sqlite3"),
         (
