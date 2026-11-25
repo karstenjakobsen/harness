@@ -1,6 +1,6 @@
 UV ?= uv
 
-.PHONY: setup api check format test
+.PHONY: setup api check format test test-live
 
 setup:
 	$(UV) sync --locked --all-packages
@@ -16,4 +16,7 @@ format:
 	$(UV) run --locked ruff format .
 
 test:
-	$(UV) run --locked --all-packages pytest
+	$(UV) run --locked --all-packages pytest -m "not live"
+
+test-live:
+	$(UV) run --locked --all-packages pytest -m live

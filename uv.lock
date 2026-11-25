@@ -232,12 +232,14 @@ source = { editable = "packages/harness_mcp" }
 dependencies = [
     { name = "harness-api" },
     { name = "mcp" },
+    { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "harness-api", editable = "packages/harness_api" },
     { name = "mcp", specifier = ">=1.30,<2" },
+    { name = "pydantic", specifier = ">=2,<3" },
 ]
 
 [[package]]
@@ -248,7 +250,6 @@ dependencies = [
     { name = "click" },
     { name = "harness-api" },
     { name = "harness-mcp" },
-    { name = "httpx" },
     { name = "pydantic" },
 ]
 
@@ -257,7 +258,6 @@ requires-dist = [
     { name = "click", specifier = ">=8.1,<9" },
     { name = "harness-api", editable = "packages/harness_api" },
     { name = "harness-mcp", editable = "packages/harness_mcp" },
-    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "pydantic", specifier = ">=2,<3" },
 ]
 
