@@ -16,7 +16,7 @@
 
 | Current entry point | What the application establishes |
 | --- | --- |
-| Goal CLI and HTTP endpoints | `GoalAPI` scopes goals to the workspace account identified by `ADMIN_USER_ID`. CLI completion stores that account as `recorded_by`. In message-based creation, Codex drafts the definition and the CLI saves it through `GoalAPI` in the same account. |
+| Goal CLI and HTTP endpoints | `GoalAPI` scopes goals to the workspace account identified by `ADMIN_USER_ID`. Local owner writes use that account as `submitted_by` for reports and `recorded_by` for completion. HTTP writes have no established caller and return null for those identities. In message-based creation, Codex drafts the definition and the CLI saves it through `GoalAPI` in the same account. |
 | Account CLI and HTTP endpoints | A user or operator ID selects the target record. Named registration assigns the owner from `--user` or HTTP `owner_user_id`, defaulting to `admin`. These operations record no separate initiating identity. |
 | Bare `operator register` | Starts Codex sign-in. Named registration creates a workspace operator record. |
 | `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. Asking selects no registered operator ID. |
@@ -35,11 +35,11 @@ The current HTTP endpoints do not establish who initiated a request. A resource 
 | Assessment type | How the criteria are evaluated. The model uses `objective`, `judgment`, or `mixed`. |
 | Timing | `duration` distinguishes a one-time outcome (`one_time`) from an ongoing condition (`standing`). `duration_days` expresses a length in days. |
 | Goal status | A stored lifecycle value of `draft`, `active`, `paused`, `completed`, or `revoked`. Use the exact value in API contracts and test assertions. |
-| Completion | A decision that a specific goal revision met its criteria. The current implementation records the actor, time, and either an owner confirmation or an owner-supplied reference. |
+| Completion | A decision that a specific goal revision met its criteria. It records the actor when known, time, a confirmation or reference with its own evidence ID, and the exact additional evidence IDs cited. |
 
 ## Evidence, assessment, and audit
 
-Today, Harness stores evidence with a completion event. The following terms also guide design of the planned first-class evidence layer.
+An owner can record evidence while a goal is open. The event ID identifies the evidence for its lifetime. A report retains its submission revision when later revisions reuse it. In history, `created_at` dates a revision and `recorded_at` dates an evidence submission. Both timestamps are UTC. The optional `reported_date` is the calendar date the statement concerns. For owner input, `occurred_at` dates the reporting action.
 
 | Term | Question it answers | File-mode example |
 | --- | --- | --- |
@@ -49,3 +49,9 @@ Today, Harness stores evidence with a completion event. The following terms also
 | Audit record | Who performed which action in Harness, and when? | At 10:05 the owner recorded an observation made at 10:00. |
 
 A successful HTTP response supports only the claim defined by that endpoint. A health check can establish reachability. A file-mode check can establish the mode of the file it inspected.
+
+The local workspace CLI and default Python model operate as the workspace owner. A confirmation has source `owner_confirmation` and identifies that owner as submitter and observer. A pasted reference has source `owner_supplied_reference`, identifies its submitter and leaves the original observer unknown. An adapter without an established caller uses `GoalAPI(path, local_owner=False)`, as the HTTP service does. Its reports have source `unattributed_confirmation` or `unattributed_reference`. Unknown identities are null. Owner-input reports have no check requester. A retry key is scoped to the goal and submitting identity, with one scope for unattributed requests.
+
+**Count distinct reported dates** groups dated owner confirmations by `reported_date` and retains each supporting evidence ID. The rule compares the number of qualifying dates with `target_distinct_dates`. `duration_days` optionally limits those dates to an inclusive window starting on `window_start` or the goal’s UTC creation date. A one-day window includes only its start date. The model returns `met` or `unmet` for this rule and `unavailable` for prose-only criteria.
+
+Historical progress applies the selected revision’s criteria to the evidence available at read time and returns the goal’s current lifecycle status. A saved completion keeps its original `statement_evidence_id` for its confirmation or reference and its `evidence_ids` for the additional records cited when the decision was made.

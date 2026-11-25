@@ -182,3 +182,87 @@ def test_http_reports_storage_unavailable(tmp_path):
         response = client.get("/goals")
         assert response.status_code == 503
         assert response.json() == {"detail": "The goals database is unavailable."}
+
+
+def test_http_observations_keep_unknown_caller_and_completion_citations(tmp_path):
+    db = tmp_path / "goals.db"
+    with TestClient(create_app(db)) as client:
+        goal = client.post(
+            "/goals",
+            json={
+                "title": "Track",
+                "target_distinct_dates": 7,
+                "window_start": "2026-11-23",
+                "duration_days": 7,
+            },
+        ).json()
+        path = f"/goals/{goal['id']}"
+        report = {
+            "confirmation": "Daily log",
+            "reported_date": "2026-11-23",
+            "retry_key": "entry-1",
+        }
+        obs = path + "/observations"
+        for forged in (
+            {"submitted_by": "admin"},
+            {"source": "machine"},
+            {"observed_by": "app"},
+        ):
+            assert client.post(obs, json=report | forged).status_code == 422
+        saved = client.post(obs, json=report)
+        assert saved.status_code == 200
+        evidence = saved.json()
+        assert evidence["source"] == "unattributed_confirmation"
+        assert (
+            evidence["submitted_by"]
+            is evidence["observed_by"]
+            is evidence["requested_by"]
+            is None
+        )
+        assert client.post(obs, json=report).json() == evidence
+        assert (
+            client.post(obs, json=report | {"reported_date": "2026-11-24"}).status_code
+            == 409
+        )
+        assert (
+            client.post(obs, json=report | {"reported_date": "2026-02-29"}).status_code
+            == 422
+        )
+        api = GoalAPI(db)
+        local = api.record_observation(
+            goal["id"],
+            confirmation="Daily log",
+            reported_date="2026-11-23",
+            retry_key="entry-1",
+        )
+        client.patch(path, json={"target_distinct_dates": 14}).raise_for_status()
+        progress = client.get(path + "/progress", params={"revision": 1}).json()
+        assert progress == api.get_goal_progress(goal["id"], revision=1)
+        assert (progress["count"], progress["target"], progress["evidence"]) == (
+            1,
+            7,
+            [local],
+        )
+        assert client.get(path + "/progress?revision=999").status_code == 422
+        citations = [evidence["evidence_id"], local["evidence_id"]]
+        body = {"revision": 2, "reference": "app:report/1", "evidence_ids": citations}
+        assert (
+            client.post(path + "/completion", json=body | {"revision": 1}).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                path + "/completion", json=body | {"evidence_ids": [True]}
+            ).status_code
+            == 422
+        )
+        decision = client.post(path + "/completion", json=body).json()
+        assert (
+            decision["recorded_by"] is None
+            and decision["evidence_kind"] == "unattributed_reference"
+        )
+        assert decision["evidence_ids"] == citations
+        assert client.post(path + "/completion", json=body).json() == decision
+        history = client.get(path + "/history").json()
+        assert history == api.get_goal_history(goal["id"])
+        assert history[-1]["completion"] == decision

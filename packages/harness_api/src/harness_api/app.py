@@ -27,7 +27,7 @@ from .models.goals import (
 def create_app(database_path: Path | str = DATABASE_PATH) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-        app.state.goal_api = GoalAPI(database_path)
+        app.state.goal_api = GoalAPI(database_path, local_owner=False)
         app.state.user_api = UserAPI(database_path)
         app.state.operator_api = OperatorAPI(database_path)
         yield

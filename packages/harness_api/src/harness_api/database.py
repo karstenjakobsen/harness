@@ -6,7 +6,7 @@ from pathlib import Path
 
 DATABASE_PATH = Path(".harness/goals.sqlite3")
 ADMIN_USER_ID = "admin"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class WorkspaceStorageError(RuntimeError):
@@ -42,13 +42,50 @@ class WorkspaceDatabase:
                 )
             snapshot = files("harness_api").joinpath("migrations", "001_initial.sql")
             try:
-                if version:
+                if 0 < version < 5:
                     self._upgrade_legacy_workspace(connection, version)
+                if version:
+                    connection.execute("""ALTER TABLE goal_revisions ADD COLUMN target_distinct_dates
+                        INTEGER CHECK (target_distinct_dates IS NULL OR
+                        (typeof(target_distinct_dates) = 'integer' AND target_distinct_dates > 0))""")
+                    connection.execute(
+                        "ALTER TABLE goal_revisions ADD COLUMN window_start TEXT"
+                    )
+                if version >= 3:
+                    connection.execute(
+                        "ALTER TABLE goal_events ADD COLUMN retry_key TEXT"
+                    )
+                    connection.execute(
+                        "ALTER TABLE goal_events ADD COLUMN statement_evidence_id INTEGER REFERENCES goal_events(id)"
+                    )
                 connection.executescript(snapshot.read_text(encoding="utf-8"))
+                if version >= 3:
+                    self._migrate_completion_evidence(connection)
             except sqlite3.IntegrityError as error:
                 raise self.storage_error(
                     f"Cannot apply workspace schema. {error}"
                 ) from error
+
+    @staticmethod
+    def _migrate_completion_evidence(connection: sqlite3.Connection) -> None:
+        # Keep each decision ID and give its embedded statement a citable observation.
+        decisions = connection.execute(
+            "SELECT id FROM goal_events WHERE kind = 'completion'"
+        ).fetchall()
+        for decision in decisions:
+            observation = connection.execute(
+                """
+                INSERT INTO goal_events (goal_id, revision, kind, actor, occurred_at, recorded_at, payload)
+                SELECT goal_id, revision, 'observation', actor, occurred_at, recorded_at, payload
+                FROM goal_events WHERE id = ?
+                RETURNING id
+            """,
+                (decision["id"],),
+            ).fetchone()
+            connection.execute(
+                "UPDATE goal_events SET statement_evidence_id = ?, payload = '{}' WHERE id = ?",
+                (observation["id"], decision["id"]),
+            )
 
     def _upgrade_legacy_workspace(
         self, connection: sqlite3.Connection, version: int

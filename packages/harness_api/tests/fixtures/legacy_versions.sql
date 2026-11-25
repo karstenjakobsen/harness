@@ -83,3 +83,13 @@ CREATE UNIQUE INDEX one_completion_per_revision ON goal_events(goal_id, revision
     WHERE kind = 'completion';
 
 PRAGMA user_version = 4;
+
+ALTER TABLE users ADD COLUMN deleted_at TEXT CHECK (id != 'admin' OR deleted_at IS NULL);
+ALTER TABLE operators ADD COLUMN deleted_at TEXT;
+CREATE INDEX operators_by_registered_owner ON operators(owner_user_id) WHERE deleted_at IS NULL;
+UPDATE users SET id = 'admin', display_name = 'admin' WHERE id = 'local';
+CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 'admin'
+BEGIN
+    SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
+END;
+PRAGMA user_version = 5;

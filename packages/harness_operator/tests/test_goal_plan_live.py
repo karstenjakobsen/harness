@@ -18,8 +18,7 @@ QUESTION = (
 )
 
 
-def assert_tree_call(trace, expected_tree):
-    parent_id = expected_tree["root_id"]
+def assert_read_call(trace, tool, goal_id, expected):
     for line in trace.read_text(encoding="utf-8").splitlines():
         event = json.loads(line)
         item = event.get("item", {})
@@ -27,21 +26,39 @@ def assert_tree_call(trace, expected_tree):
             event["type"] == "item.completed"
             and item.get("type") == "mcp_tool_call"
             and item.get("server") == "harness_mcp"
-            and item.get("tool") == "get_goal_tree"
-            and item.get("arguments") == {"goal_id": parent_id}
+            and item.get("tool") == tool
+            and item.get("arguments", {}).get("goal_id") == goal_id
             and item.get("status") == "completed"
             and not item.get("error")
         ):
             result = item.get("result")
             if result and not (result.get("isError") or result.get("is_error")):
-                tree = result.get("structuredContent") or result.get(
+                record = result.get("structuredContent") or result.get(
                     "structured_content"
                 )
-                if tree is None:
-                    tree = json.loads(result["content"][0]["text"])
-                assert tree == expected_tree
-                return
-    pytest.fail(f"No successful get_goal_tree call for parent {parent_id} in {trace}")
+                if record is None:
+                    record = json.loads(result["content"][0]["text"])
+                if record == expected:
+                    return
+    pytest.fail(
+        f"No successful {tool} call returned the expected record for goal {goal_id}"
+    )
+
+
+def test_trace_accepts_a_matching_read_after_an_earlier_revision(tmp_path):
+    trace = tmp_path / "reads.jsonl"
+    with trace.open("w", encoding="utf-8") as stream:
+        for revision in (1, 2):
+            item = {
+                "type": "mcp_tool_call",
+                "server": "harness_mcp",
+                "tool": "get_goal_progress",
+                "arguments": {"goal_id": 7, "revision": revision},
+                "status": "completed",
+                "result": {"structuredContent": {"revision": revision}},
+            }
+            print(json.dumps({"type": "item.completed", "item": item}), file=stream)
+    assert_read_call(trace, "get_goal_progress", 7, {"revision": 2})
 
 
 def assert_plan_answer(answer):
@@ -103,16 +120,23 @@ def test_answer_rejects_incorrect_or_missing_goal_facts(correct, wrong):
 
 
 @pytest.fixture
-def workspace(tmp_path):
-    with TemporaryDirectory(dir=tmp_path, prefix="workspace-") as directory:
+def live_directory(tmp_path):
+    with TemporaryDirectory(dir=tmp_path, prefix="live-") as directory:
         yield Path(directory)
 
 
-@pytest.mark.live
-def test_ask_explains_saved_plan_through_mcp(tmp_path, workspace):
+@pytest.fixture
+def workspace(live_directory):
+    workspace = live_directory / "workspace"
+    workspace.mkdir()
+    return workspace
+
+
+@pytest.fixture
+def run(workspace):
     operator = Path(sysconfig.get_path("scripts")) / "operator"
 
-    def run(*args):
+    def invoke(*args):
         result = subprocess.run(
             [operator, *map(str, args)],
             cwd=workspace,
@@ -125,9 +149,19 @@ def test_ask_explains_saved_plan_through_mcp(tmp_path, workspace):
         assert result.returncode == 0, result.stderr
         return result.stdout
 
-    def goal(*args):
+    return invoke
+
+
+@pytest.fixture
+def goal(run):
+    def invoke(*args):
         return json.loads(run("goal", *args))
 
+    return invoke
+
+
+@pytest.mark.live
+def test_ask_explains_saved_plan_through_mcp(live_directory, workspace, run, goal):
     database = workspace / ".harness/goals.sqlite3"
     assert not database.exists()
     parent = goal("create", "--title", "Lose 20 lb")
@@ -190,7 +224,65 @@ def test_ask_explains_saved_plan_through_mcp(tmp_path, workspace):
         food["id"]: (parent_id, "active"),
     }
 
-    trace = tmp_path / "ask.jsonl"
+    trace = live_directory / "ask.jsonl"
     reply = run("ask", "--trace-file", trace, QUESTION)
-    assert_tree_call(trace, tree)
+    assert_read_call(trace, "get_goal_tree", parent_id, tree)
     assert_plan_answer(reply)
+
+
+@pytest.mark.live
+def test_ask_explains_monday_progress_before_and_after_revision(
+    live_directory, run, goal
+):
+    goal_id = goal("create", "--title", "Food log", "--target-distinct-dates", 7)["id"]
+    monday = "2026-11-23"
+    reports = [
+        goal(
+            "observe",
+            goal_id,
+            "--confirmation",
+            statement,
+            "--reported-date",
+            monday,
+            "--retry-key",
+            key,
+        )
+        for statement, key in [
+            ("I logged lunch", "lunch"),
+            ("I logged dinner", "dinner"),
+        ]
+    ]
+    ids = [r["evidence_id"] for r in reports]
+    question = (
+        "What progress have I made on my food log, and how do we know? "
+        "Return JSON with count, target, status, and days. For each day include "
+        "reported_date, evidence_ids, source, and submitted_by using the saved values."
+    )
+    for target in (7, 14):
+        if target == 14:
+            goal("revise", goal_id, "--target-distinct-dates", target)
+        progress = goal("progress", goal_id)
+        assert (progress["count"], progress["target"], progress["status"]) == (
+            1,
+            target,
+            "active",
+        )
+        assert progress["evidence"] == reports
+        trace = live_directory / f"revision-{progress['revision']}.jsonl"
+        reply = run("ask", "--trace-file", trace, question)
+        assert_read_call(trace, "get_goal_progress", goal_id, progress)
+        answer = json.loads(
+            reply.strip()
+            .removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
+        assert (answer["count"], answer["target"], answer["status"]) == (
+            1,
+            target,
+            "active",
+        )
+        [day] = answer["days"]
+        assert day["reported_date"] == monday and sorted(day["evidence_ids"]) == ids
+        assert (day["source"], day["submitted_by"]) == ("owner_confirmation", "admin")

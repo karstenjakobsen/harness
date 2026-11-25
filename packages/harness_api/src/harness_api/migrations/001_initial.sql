@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS goal_revisions (
     duration_days INTEGER CHECK (
         duration_days IS NULL OR (typeof(duration_days) = 'integer' AND duration_days > 0)
     ),
+    target_distinct_dates INTEGER CHECK (
+        target_distinct_dates IS NULL OR (typeof(target_distinct_dates) = 'integer' AND target_distinct_dates > 0)
+    ),
+    window_start TEXT,
     PRIMARY KEY (goal_id, revision)
 );
 
@@ -66,11 +70,25 @@ CREATE TABLE IF NOT EXISTS goal_events (
     occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     payload TEXT NOT NULL CHECK (json_valid(payload)),
+    retry_key TEXT,
+    statement_evidence_id INTEGER REFERENCES goal_events(id),
     FOREIGN KEY (goal_id, revision) REFERENCES goal_revisions (goal_id, revision)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS one_completion_per_revision ON goal_events(goal_id, revision)
     WHERE kind = 'completion';
+
+CREATE UNIQUE INDEX IF NOT EXISTS observation_retry ON goal_events(goal_id, actor, retry_key)
+    WHERE kind = 'observation';
+
+CREATE INDEX IF NOT EXISTS observations_by_goal ON goal_events(goal_id, id)
+    WHERE kind = 'observation';
+
+CREATE TABLE IF NOT EXISTS completion_citations (
+    decision_id INTEGER NOT NULL REFERENCES goal_events(id),
+    evidence_id INTEGER NOT NULL REFERENCES goal_events(id),
+    PRIMARY KEY (decision_id, evidence_id)
+);
 
 INSERT INTO users (id, display_name) VALUES ('admin', 'admin')
     ON CONFLICT (id) DO NOTHING;
@@ -79,4 +97,4 @@ CREATE TRIGGER IF NOT EXISTS keep_system_admin BEFORE DELETE ON users WHEN OLD.i
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;

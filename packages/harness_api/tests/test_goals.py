@@ -137,7 +137,7 @@ def test_migrates_existing_database_and_limits_operations_to_admin(
     with pytest.raises(GoalNotFoundError):
         api.delete_goal(13)
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
         assert connection.execute(
             "SELECT deleted_at FROM goals WHERE id = 13"
         ).fetchone() == (None,)
@@ -294,6 +294,9 @@ def test_failed_status_update_rolls_back_completion_evidence(tmp_path):
     path = tmp_path / "goals.sqlite3"
     api = GoalAPI(path)
     goal = api.create_goal("Review notes")
+    report = api.record_observation(
+        goal["id"], confirmation="Read notes", retry_key="review"
+    )
     with closing(sqlite3.connect(path, autocommit=True)) as connection:
         connection.executescript("""
             CREATE TRIGGER fail_status BEFORE UPDATE OF status ON goals BEGIN
@@ -301,9 +304,17 @@ def test_failed_status_update_rolls_back_completion_evidence(tmp_path):
             END;
             """)
         with pytest.raises(GoalStorageError):
-            api.complete_goal(goal["id"], 1, reference="notes:review/1")
-        assert connection.execute("SELECT count(*) FROM goal_events").fetchone() == (0,)
+            api.complete_goal(
+                goal["id"],
+                1,
+                reference="notes:review/1",
+                evidence_ids=[report["evidence_id"]],
+            )
+        assert connection.execute(
+            "SELECT count(*) FROM completion_citations"
+        ).fetchone() == (0,)
     assert api.get_goal(goal["id"]) == goal
+    assert api.get_goal_history(goal["id"])[0]["evidence"] == [report]
 
 
 def test_opening_current_database_does_not_wait_for_writer(tmp_path):

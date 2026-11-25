@@ -54,9 +54,9 @@ For the next slice, I’d add a small HTTP test fixture that reads a temporary f
 
 Consider `GoalAPI.record_observation(...)` for recording evidence against a stable goal and `GoalAPI.get_goal_progress(goal_id, revision=None)` for assessing it. Both names and signatures are provisional. A submission retains its source, the date or time the report concerns, and when Harness received it. Derive the submitter from established caller context and preserve the requester and observer separately when known. [Identity and attribution](../TERMINOLOGY.md#identity-and-attribution)
 
-### Open decision for historical progress
+### Historical progress
 
-Settle the meaning of `get_goal_progress(goal_id, revision=N)` before implementing that read. Suppose revision N ends Monday night. On Tuesday Harness receives a qualifying report about Monday.
+The [approved implementation plan](SLICE3_TODO.md#agreed-decisions) selects the first contract below. Suppose revision N ends Monday night. On Tuesday Harness receives a qualifying report about Monday.
 
 | Possible contract | What revision N would show |
 | --- | --- |

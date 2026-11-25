@@ -61,8 +61,9 @@ deleted user IDs stay reserved. See the [CLI command catalog](CATALOG.md).
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
 On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Workspaces on schema versions 1 through 4 upgrade in place
-to version 5. The upgrade renames the original `local` owner to `admin`, including its goal
+`001_initial.sql`. Workspaces on schema versions 1 through 5 upgrade in place
+to version 6. Each existing completion statement receives a stable evidence ID.
+For pre-v5 workspaces the upgrade renames the original `local` owner to `admin`, including its goal
 and operator ownership and completion attribution. If a separate `admin`
 user already exists, the upgrade stops so the two identities can be resolved.
 
@@ -78,6 +79,8 @@ The Python API raises `GoalValidationError` for unknown status filters and for
 non-text values in goal text fields. The corresponding HTTP requests return 422.
 For questions about a plan, the operator calls `get_goal_tree` with the goal ID
 to read each descendant’s current requirements, status, and completion evidence.
+For progress it calls `get_goal_progress` and explains the model’s assessment
+using the returned evidence IDs, dates and provenance.
 
 ### Create a draft goal
 
@@ -118,6 +121,24 @@ Use `--reference REF` to record an owner-supplied app reference. Repeating the
 same completion returns the saved decision. Changing a completed definition
 reopens that goal and keeps the earlier evidence in its revision history.
 
+### Record progress while a goal is active
+
+In a fresh workspace, these commands create goal 1 and record two reports about Monday.
+
+```sh
+operator goal create --title "Food log" --target-distinct-dates 7
+operator goal observe 1 --reported-date 2026-11-23 --confirmation "I logged lunch" --retry-key lunch
+operator goal observe 1 --reported-date 2026-11-23 --confirmation "I logged dinner" --retry-key dinner
+operator goal progress 1
+operator goal revise 1 --target-distinct-dates 14
+operator ask "What progress have I made on my food log, and how do we know?"
+```
+
+Both confirmations support one distinct date. Progress changes from 1/7 to 1/14,
+and the goal stays active. `operator goal progress 1 --revision 1` evaluates the
+seven-date rule with all evidence available now. Use `operator goal show 1 --history`
+to see when the confirmations arrived and when the target changed. [Command catalog](CATALOG.md#workspace-goals)
+
 ## FastAPI
 
 Run `make api` from the workspace root to serve the workspace API. Open
@@ -140,7 +161,15 @@ curl --fail --silent --show-error http://127.0.0.1:8000/goals
 | `POST` | `/goals` | Create revision 1 with `status` set to `draft` (default) or `active` |
 | `GET` | `/goals/{goal_id}` | Read the latest definition |
 | `PATCH` | `/goals/{goal_id}` | Revise the title, outcome, timing, success criteria, or verification method |
+| `POST` | `/goals/{goal_id}/observations` | Record a confirmation or reference with a retry key and optional reported date. The HTTP caller is unattributed |
+| `GET` | `/goals/{goal_id}/progress` | Assess the optional `revision` with evidence available now |
+| `GET` | `/goals/{goal_id}/history` | Read revision timestamps, submissions and saved completions |
+| `POST` | `/goals/{goal_id}/completion` | Complete the current `revision` with a confirmation or reference and optional `evidence_ids` |
 | `DELETE` | `/goals/{goal_id}` | Soft-delete a leaf and close its assignment. A parent with visible children returns HTTP 409 |
+
+An identical observation retry returns HTTP 200 with the original evidence ID.
+Reusing its key with different report content returns 409. A stale completion
+revision, conflicting completion retry, or citation from another goal returns 422.
 
 The `harness_api` package follows MVC. `GoalAPI`, `UserAPI`, and `OperatorAPI`
 own persistence and business rules. The FastAPI controllers call those models,
@@ -149,6 +178,6 @@ commands call the same Python models. Start FastAPI and run the CLI from the
 same workspace to use the same SQLite database.
 
 Run `make test` for the offline suite and `make check` for lint and formatting.
-Run `make test-live` separately with Codex signed in. It creates a plan through
-the CLI in a temporary workspace, verifies the MCP call, and checks the reply.
+Run `make test-live` separately with Codex signed in. It populates temporary workspaces through
+the CLI, verifies plan and progress reads through MCP, and checks the replies.
 Test teardown removes the workspace and its database even if an assertion fails.

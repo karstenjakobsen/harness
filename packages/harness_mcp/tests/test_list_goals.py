@@ -33,7 +33,11 @@ async def client(tmp_path):
 @pytest.mark.anyio
 async def test_server_initializes_an_empty_goal_list(client, tmp_path):
     tools = await client.list_tools()
-    assert {tool.name for tool in tools.tools} == {"list_goals", "get_goal_tree"}
+    assert {tool.name for tool in tools.tools} == {
+        "list_goals",
+        "get_goal_tree",
+        "get_goal_progress",
+    }
     assert all(tool.annotations.readOnlyHint for tool in tools.tools)
     result = await client.call_tool("list_goals", {})
     assert result.structuredContent == {"goals": []}
@@ -104,3 +108,27 @@ async def test_lists_latest_revisions_and_current_assignments_for_admin(
     assert all_goals.structuredContent == {"goals": [active, draft]}
     active_goals = await client.call_tool("list_goals", {"status": "active"})
     assert active_goals.structuredContent == {"goals": [active]}
+
+
+@pytest.mark.anyio
+async def test_progress_returns_selected_model_assessment(client, tmp_path):
+    api = GoalAPI(tmp_path / DATABASE_PATH)
+    goal = api.create_goal("Food log", status="active", target_distinct_dates=7)
+    goal_id = goal["id"]
+    api.record_observation(
+        goal_id,
+        confirmation="Meals logged",
+        reported_date="2026-11-23",
+        retry_key="first",
+    )
+    api.update_goal(goal_id, target_distinct_dates=14)
+    for args in ({}, {"revision": 1}):
+        result = await client.call_tool(
+            "get_goal_progress", {"goal_id": goal_id, **args}
+        )
+        assert not result.isError
+        assert result.structuredContent == api.get_goal_progress(goal_id, **args)
+    invalid = await client.call_tool(
+        "get_goal_progress", {"goal_id": goal_id, "revision": True}
+    )
+    assert invalid.isError

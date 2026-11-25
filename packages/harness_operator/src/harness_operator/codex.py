@@ -8,16 +8,20 @@ from typing import TextIO
 
 from pydantic import ConfigDict, TypeAdapter, with_config
 
-from harness_api import GoalDefinition
+from harness_api import GoalDraftFields
 
 OPERATOR_INSTRUCTIONS = """\
 You are the user's goal operator. Treat goals as flexible guidelines.
 Read relevant workspace files when helpful and suggest a small next step.
 Use the harness_mcp list_goals tool to find saved goal IDs. For questions about a
-plan, its requirements, status, or evidence, call get_goal_tree with the goal ID.
+plan and its subgoals or completion decisions, call get_goal_tree with the goal ID.
+For progress questions call get_goal_progress. Use its assessed revision, count,
+target and lifecycle status. Cite the evidence IDs for each reported date and
+attribute records using the returned source and submitter. State when attribution
+or automatic assessment is unavailable.
 Use the returned records to answer. List each goal on its own line with its status
 and the relevant timing or evidence. Draft, active, and paused goals are open.
-Attribute owner confirmations and owner-supplied references to the owner.
+Attribute completion statements according to their saved provenance.
 If the tool fails, say that you could not retrieve the goals.
 Keep this turn advisory. Describe goal changes as proposals.
 """
@@ -37,7 +41,7 @@ Return a draft definition only. Do not carry out the goal or run checks.
 
 
 @with_config(ConfigDict(extra="forbid", strict=True))
-class GoalDraft(GoalDefinition):
+class GoalDraft(GoalDraftFields):
     title: str
     clarification: str | None
 

@@ -64,6 +64,15 @@ def definition_options(command: Callable) -> Callable:
         click.option("--duration", type=click.Choice(get_args(GoalDuration.__value__))),
         click.option("--duration-days", type=POSITIVE_INTEGER),
         click.option(
+            "--target-distinct-dates",
+            type=POSITIVE_INTEGER,
+            help="Count distinct dates confirmed by the owner.",
+        ),
+        click.option(
+            "--window-start",
+            help="First calendar date of the duration in days (YYYY-MM-DD).",
+        ),
+        click.option(
             "--assessment-type", type=click.Choice(get_args(AssessmentType.__value__))
         ),
         click.option("--success-criteria", help="What counts as success."),
@@ -126,20 +135,39 @@ def revise(goal_id: int, **fields) -> None:
 @click.option(
     "--reference", help="An external evidence reference supplied by the owner."
 )
+@click.option(
+    "--evidence-id",
+    "evidence_ids",
+    type=POSITIVE_INTEGER,
+    multiple=True,
+    help="Cite a saved evidence ID. Repeat for additional records.",
+)
 def complete(
-    goal_id: int, revision: int, confirmation: str | None, reference: str | None
+    goal_id: int,
+    revision: int,
+    confirmation: str | None,
+    reference: str | None,
+    evidence_ids: tuple[int, ...],
 ) -> None:
     """Complete the verified revision and return its evidence record."""
     print_record(
         GoalAPI().complete_goal(
-            goal_id, revision, confirmation=confirmation, reference=reference
+            goal_id,
+            revision,
+            confirmation=confirmation,
+            reference=reference,
+            evidence_ids=evidence_ids,
         )
     )
 
 
 @goal.command()
 @click.argument("goal_id", type=GOAL_ID)
-@click.option("--tree", is_flag=True, help="Include descendants and current evidence.")
+@click.option(
+    "--tree",
+    is_flag=True,
+    help="Include descendants and their current completion decisions.",
+)
 @click.option(
     "--history", is_flag=True, help="List this goal's revisions and their evidence."
 )
@@ -154,3 +182,28 @@ def show(goal_id: int, tree: bool, history: bool) -> None:
         print_record(api.get_goal_history(goal_id))
     else:
         print_record(api.get_goal(goal_id))
+
+
+@goal.command()
+@click.argument("goal_id", type=GOAL_ID)
+@click.option("--confirmation", help="What the owner confirms.")
+@click.option("--reference", help="A reference supplied by the owner.")
+@click.option("--reported-date", help="The date the report concerns (YYYY-MM-DD).")
+@click.option(
+    "--retry-key", required=True, help="Reuse this key when retrying this submission."
+)
+def observe(goal_id: int, **report) -> None:
+    """Record a report independently of completion."""
+    print_record(GoalAPI().record_observation(goal_id, **report))
+
+
+@goal.command()
+@click.argument("goal_id", type=GOAL_ID)
+@click.option(
+    "--revision",
+    type=POSITIVE_INTEGER,
+    help="Assess this revision using the evidence available now.",
+)
+def progress(goal_id: int, revision: int | None) -> None:
+    """Assess progress and show the supporting records."""
+    print_record(GoalAPI().get_goal_progress(goal_id, revision))

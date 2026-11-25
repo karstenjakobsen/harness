@@ -2,21 +2,33 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from ..models.evidence import Evidence
 from ..models.goals import (
     AssessmentType,
     Completion,
     GoalCreationStatus,
     GoalDuration,
+    GoalProgress,
+    GoalRevision,
     GoalStatus,
 )
 
 GoalTitle = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
+
+# These endpoints return the public model records verbatim.
+EvidenceView = Evidence
+CompletionView = Completion
+GoalProgressView = GoalProgress
+GoalHistoryView = list[GoalRevision]
 
 
 class GoalDefinitionFields(BaseModel):
     desired_outcome: str | None = None
     duration: GoalDuration | None = None
-    duration_days: Annotated[int, Field(strict=True, gt=0, lt=2**63)] | None = None
+    duration_days: PositiveInteger | None = None
+    target_distinct_dates: PositiveInteger | None = None
+    window_start: str | None = None
     assessment_type: AssessmentType | None = None
     success_criteria: str | None = None
     measurement_plan: str | None = None
@@ -51,3 +63,20 @@ class GoalSummaryView(BaseModel):
 class GoalView(GoalSummaryView, GoalDefinitionFields):
     parent_goal_id: int | None
     completion: Completion | None
+
+
+class StatementRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation: str | None = None
+    reference: str | None = None
+
+
+class ObservationRequest(StatementRequest):
+    retry_key: str
+    reported_date: str | None = None
+
+
+class CompletionRequest(StatementRequest):
+    revision: PositiveInteger
+    evidence_ids: list[PositiveInteger] = Field(default_factory=list)
