@@ -36,6 +36,7 @@ Keep the complete fresh-workspace schema in [001_initial.sql](packages/harness_a
 - For a new delegated action, test the authority boundary directly. Cover a valid grant, an out-of-scope target, a pre-delegation assignment after upgrade, and a grant withdrawn after session start. Regrant the action and verify the old session is still denied. Verify denied writes and failed transactions leave history intact. At MCP, check both tool discovery and direct invocation from an advisory session.
 - Test discretion with the same open-ended request before and after stronger evidence arrives. Inspect the live trace and saved state for both outcomes. The first turn may seek clarification while the goal stays open. The second can exercise the delegated action. [Slice 3 acceptance](docs/SLICE3_TODO.md#acceptance)
 - Run `make check` and `make test` for code changes. Run the signed-in `make test-live` when the slice affects live operator behavior. Report live results separately and identify any check that could not run.
+- After completing each `docs/SLICE<N>_TODO.md`, create and run `docs/SLICE<N>_EVIDENCE.sh` to verify the slice’s acceptance criteria. Capture the run’s output in `docs/SLICE<N>_EVIDENCE.md`, using the same slice number for all three files. [Slice 7 script](docs/SLICE7_EVIDENCE.sh) · [Captured output](docs/SLICE7_EVIDENCE.md)
 
 ## Scope and handoff
 
