@@ -37,6 +37,8 @@ def test_generated_keys_and_integer_foreign_keys(tmp_path):
                 # The requested target can be absent. The audit still keeps its ID.
                 assert types["target_run_id"] == "INTEGER"
                 keys.remove("target_run_id")
+                assert types["target_skill_id"] == "TEXT"
+                keys.remove("target_skill_id")
             assert keys <= {fk[3] for fk in foreign_keys}
         with pytest.raises(sqlite3.IntegrityError):
             db.execute("DELETE FROM users WHERE id = 1")
@@ -51,7 +53,7 @@ def test_generated_keys_and_integer_foreign_keys(tmp_path):
     assert users.create_user("second")["id"] > user["id"]
 
 
-@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 13])
+@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 14])
 def test_incompatible_workspace_requires_fresh_database(tmp_path, version):
     path = tmp_path / "workspace.db"
     with closing(sqlite3.connect(path, autocommit=True)) as db:

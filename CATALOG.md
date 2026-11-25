@@ -23,6 +23,12 @@ The assistant can weigh the evidence, suggest completion or ask what
 is missing. To act on its advice, the local owner uses `operator goal complete`.
 Named registration creates a workspace record. Ordinary ask sessions remain advisory.
 
+Before starting each run, `operator ask` imports the committed Harness skill
+catalog into the selected workspace. A recorded session can discover descriptions
+with `list_skills()` and choose exact instructions with `read_skill(id, revision)`.
+An invalid catalog stops startup before a run is created. Inspect
+`operator run show RUN_ID` for the skill revisions each call listed or read. [Skill catalog and provenance](README.md#plan-with-versioned-skills)
+
 The delegated session exposes
 `complete_goal(goal_id, expected_revision, evidence_ids, rationale)`.
 Harness derives the actor from the grant bound at startup and returns the saved
@@ -119,5 +125,5 @@ operator goal create --title "Track food" --duration-days 7
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
-| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, and one operator inspecting another's revision. |
+| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, one operator inspecting another's revision, and an advisory chess plan using versioned skills. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |

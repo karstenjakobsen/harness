@@ -63,7 +63,7 @@ deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.m
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
 On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Version 12 upgrades workspaces from versions 7 through 11 in
+`001_initial.sql`. Version 13 upgrades workspaces from versions 7 through 12 in
 place. Existing assignments keep their responsible operator and require an
 explicit grant for completion authority. Opening a pre-v7 or unrecognized
 workspace returns an error and leaves the file intact.
@@ -82,6 +82,33 @@ For questions about a plan, the operator calls `get_goal_tree` with the goal ID
 to read each descendant’s current requirements, status, and completion evidence.
 For progress it calls `get_goal_progress` and explains the model’s assessment
 using the returned evidence IDs, dates and provenance.
+
+### Plan with versioned skills
+
+Before each `operator ask` session, Harness imports the committed `skills/` tree
+from the Harness checkout used by `make setup`. The caller can start in an empty
+workspace. Each skill directory contains a UTF-8 `operator.yaml` and `SKILL.md`.
+The manifest declares `kind: skill`, a stable `id` matching
+`[A-Za-z0-9][A-Za-z0-9_.-]*`, a positive 64-bit integer `revision`, and a
+`name`, `description`, and `author`. A duplicate manifest field rejects the
+catalog. The Git reader uses the original objects for its recorded commit SHA,
+including in checkouts with local replacement refs.
+
+Recorded sessions can use `list_skills()` to discover guidance and
+`read_skill(id, revision)` to retrieve it. The operator chooses which revisions
+to read and which subgoals to propose. An advisory plan stays in the reply.
+
+Discovery reflects the last successful import into this workspace. Removing a
+skill removes it from discovery. The saved revision retains its original files,
+directory path, Git commit SHA and SHA-256 content hash. The hash covers the
+manifest’s UTF-8 byte length as eight big-endian bytes, then the manifest and
+Markdown bytes in order. An unrelated commit or folder move preserves the
+original provenance. Changing either file under an existing ID and revision
+rejects the entire import before the run starts. Bump the manifest revision to
+publish changed content. Historical HTTP reads use SQLite even when the source
+checkout is unavailable. The public skill queries raise `SkillValidationError`
+for a malformed ID or revision (HTTP 422) and `SkillNotFoundError` for a valid
+key absent from the owner’s catalog history (HTTP 404). [Seed catalog](skills)
 
 ### Delegate completion of a subgoal
 
@@ -188,6 +215,9 @@ curl --fail --silent --show-error http://127.0.0.1:8000/goals
 | `GET` | `/goals/{goal_id}/history` | Read revision timestamps, submissions and saved completions |
 | `GET` | `/goals/{goal_id}/history?view=activity` | Read the goal timeline and discover related operator runs |
 | `GET` | `/runs/{run_id}` | Read the run identity, timing, outcome and ordered tool calls |
+| `GET` | `/skills` | List skills and revisions in the workspace owner’s current catalog |
+| `GET` | `/skills/{skill_id}/revisions/{revision}` | Read the exact saved manifest, instructions and source provenance |
+| `GET` | `/skills/{skill_id}/revisions/{revision}/reads` | List owner-visible `{run_id, sequence}` pairs for calls that returned the full revision |
 | `POST` | `/goals/{goal_id}/completion` | Complete the current `revision` with a confirmation or reference and optional `evidence_ids` |
 | `DELETE` | `/goals/{goal_id}` | Soft-delete a leaf and close its assignment. A parent with visible children returns HTTP 409 |
 
@@ -227,8 +257,19 @@ A launch error, such as an existing trace file, marks the run `failed`.
 Calls are ordered by `sequence` and retain the requested goal ID and revision
 or the requested run ID (`target_run_id`), including on denial. The call outcome
 is `returned`, `denied`, `failed`, or `unfinished`. A successful empty goal
-result has `returned_goals: []`. History reads use `returned_history`. A call
-without a returned result has both fields set to `null`.
+result has `returned_goals: []`. History reads use `returned_history`. Skill calls
+use `returned_skills`, an ordered list of `{id, revision}` references. A
+successful empty catalog listing returns `[]`. A call without a returned
+result has all three fields set to `null`.
+
+For a `list_skills` call, these references identify the descriptions made
+available for discovery. For a `read_skill` call, `target_skill_id` and
+`target_revision` identify the requested revision. An invalid skill ID yields
+a denied attempt with a null `target_skill_id`. A returned reference
+identifies the instructions Harness handed to the transport. To inspect them,
+follow the reference to `GET /skills/{skill_id}/revisions/{revision}`. Append
+`/reads` to find the calls that returned those instructions. A listing alone
+contributes zero entries to that reverse lookup.
 
 Each result reference retains its goal ID, revision and any returned status. `observation_ids`
 identifies observation records returned by a progress call. A result's `decision`
@@ -274,7 +315,7 @@ or completion transaction saves its committing call even if the call remains
 `unfinished` after an interruption. Older decisions and direct owner completions
 have `committing_call: null`. All MCP goal writes require a recorded run.
 
-The `harness_api` package follows MVC. `GoalAPI`, `UserAPI`, and `OperatorAPI`
+The `harness_api` package follows MVC. `GoalAPI`, `SkillAPI`, `UserAPI`, and `OperatorAPI`
 own persistence and business rules. The FastAPI controllers call those models,
 and Pydantic views define the HTTP request and response bodies. Workspace CLI
 commands call the same Python models. Start FastAPI and run the CLI from the

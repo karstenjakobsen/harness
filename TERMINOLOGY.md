@@ -12,16 +12,18 @@
 | Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
 | Workspace | The context for users, registered operators, goals, evidence, decisions and operator run history. Local commands use the current workspace database. HTTP requests use the workspace served by the selected API server. |
 | Schema snapshot | The complete SQLite schema and initial system user in `001_initial.sql`. SQLite’s `user_version` records the schema version installed in each workspace. |
-| Harness API | The workspace operations provided by the `harness_api` package. Its public Python interfaces are `UserAPI`, `OperatorAPI` and `GoalAPI`. The HTTP, CLI and MCP adapters call the model operations they expose. |
+| Harness API | The workspace operations provided by the `harness_api` package. Its public Python interfaces are `UserAPI`, `OperatorAPI`, `GoalAPI` and `SkillAPI`. The HTTP, CLI and MCP adapters call the model operations they expose. |
 | HTTP API | The FastAPI interface for working with workspace users, registered operators and goals, and reading goal activity and operator runs. [Endpoint catalog](README.md#fastapi) |
 | `UserAPI` | The public Python interface for creating, reading, updating and deleting workspace user accounts. |
 | `OperatorAPI` | The public Python interface for registering, reading and unregistering operators. Unregistering also releases the operator’s open goal assignments. |
+| `SkillAPI` | The public model for importing the workspace owner’s catalog, listing current skills, reading exact revisions and finding the run calls that read them. |
 | `GoalAPI` | The public Python interface for goals and revisions, observations, progress assessments, completion decisions and grants. It also records operator runs and MCP tool calls and serves goal activity and run history. |
 
 ## Identity and attribution
 
 | Current entry point | What the application establishes |
 | --- | --- |
+| Skill catalog and revision reads | The manifest ID identifies a skill across folder moves. `SkillAPI` scopes the catalog, revision lookup and reverse lookup of reading calls to the workspace account identified by `ADMIN_USER_ID`. The manifest author is the source’s declared author. |
 | Goal and run reads | `GoalAPI` scopes goals, goal activity and operator runs to the workspace account identified by `ADMIN_USER_ID`. |
 | Goal CLI and HTTP writes | Local owner writes use the workspace account as `submitted_by` for reports and `recorded_by` for completion. HTTP writes have no established caller and return null for those identities. In message-based creation, Codex drafts the definition and the CLI saves it through `GoalAPI` in the same account. |
 | Account CLI and HTTP endpoints | A numeric user or operator ID selects an existing record. Named registration assigns the owner from `--user` or HTTP `owner_user_id`, defaulting to `admin`. These operations record no separate initiating identity. |
@@ -62,7 +64,11 @@ An owner can record evidence while a goal is open. The event ID identifies the e
 | Audit record | Who performed which action in Harness, and when? | At 10:05 the owner recorded an observation made at 10:00. |
 | Operator run | Which `operator ask` session contained the activity? | A delegated run records the registered operator and exact grant. An advisory run has no bound operator or grant. |
 | Tool call | What did MCP attempt, and what outcome did it record? | The run trace keeps the requested target ID. When the goal was visible to the workspace owner at call start, the resolved target also links the call to that goal's timeline. A call can remain unfinished after the run ends. |
-| Returned reference | Which revisions, observations, decision citations, runs or calls did a tool response expose? | A progress response returned observations 31 and 32. MCP saved their IDs before handing off the response. Assistant receipt can remain unknown. |
+| Returned reference | Which goal revisions, skill revisions, observations, decision citations, runs or calls did a tool response expose? | A progress response returned observations 31 and 32. MCP saved their IDs before handing off the response. Assistant receipt can remain unknown. |
+| Skill revision | Which exact guidance could the operator open? | The pair `(chess-rules, 1)` resolves to its original manifest, instructions, repository path, SHA and hash after revision 2 is imported. |
+| Skill catalog | Which skill revisions are discoverable now? | A skill removed by the last successful import disappears from the listing. Earlier revisions remain available by exact ID and revision. |
+| Listed skill | Which revision’s name and description did a discovery call return? | `list_skills` recorded revision 1 of both chess and Go. |
+| Skill read | Which revision’s instructions did the tool return? | `read_skill` returned chess revision 1. The call records exposure of the instructions. Evidence of following them would require a separate observation. |
 | History read | What did an operator see when inspecting a goal timeline or run? | A run read exposed an unfinished call with revision 2 already committed. The read retains that outcome and commit reference after the call becomes returned. |
 | Committing call | Which call saved the revision or decision? | The model saves the revision or decision and its call link in the same transaction. An identical creation or completion retry can retrieve the original record under its own call sequence. |
 

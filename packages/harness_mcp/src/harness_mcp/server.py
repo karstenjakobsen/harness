@@ -36,6 +36,11 @@ from harness_api import (
     HarnessTool,
     OperatorRun,
     RunNotFoundError,
+    SkillNotFoundError,
+    SkillReference,
+    SkillRevision,
+    SkillSummary,
+    SkillValidationError,
     WorkspaceStorageError,
 )
 
@@ -43,7 +48,12 @@ PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
 HARNESS_TOOLS = get_args(HarnessTool.__value__)
 WRITE_TOOLS = ("complete_goal", "create_goal", "revise_goal")
 HISTORY_TOOLS = ("get_goal_activity", "get_run")
-RUN_REQUIRED_TOOLS = WRITE_TOOLS + HISTORY_TOOLS
+SKILL_TOOLS = ("list_skills", "read_skill")
+RUN_REQUIRED_TOOLS = WRITE_TOOLS + HISTORY_TOOLS + SKILL_TOOLS
+
+
+class SkillList(TypedDict):
+    skills: list[SkillSummary]
 
 
 class GoalList(TypedDict):
@@ -126,14 +136,19 @@ class HarnessServer(FastMCP):
             tool = cast(HarnessTool, request.params.name)
             arguments = request.params.arguments or {}
             revision_field = "expected_revision" if tool in WRITE_TOOLS else "revision"
+            skill_id = arguments.get("id")
             call = api.start_tool_call(
                 run_id,
                 tool,
                 target_goal_id=_positive_id(arguments.get("goal_id"))
-                if tool not in ("list_goals", "create_goal", "get_run")
+                if tool not in ("list_goals", "create_goal", "get_run", *SKILL_TOOLS)
                 else None,
                 target_revision=_positive_id(arguments.get(revision_field))
-                if tool in ("complete_goal", "revise_goal", "get_goal_progress")
+                if tool
+                in ("complete_goal", "revise_goal", "get_goal_progress", "read_skill")
+                else None,
+                target_skill_id=skill_id
+                if tool == "read_skill" and isinstance(skill_id, str)
                 else None,
                 target_run_id=_positive_id(arguments.get("run_id"))
                 if tool == "get_run"
@@ -151,7 +166,21 @@ class HarnessServer(FastMCP):
                 api.finish_tool_call(call, invocation.error_outcome)
             else:
                 assert result.structuredContent is not None
-                if tool in HISTORY_TOOLS:
+                if tool in SKILL_TOOLS:
+                    items = (
+                        result.structuredContent["skills"]
+                        if tool == "list_skills"
+                        else [result.structuredContent]
+                    )
+                    api.finish_tool_call(
+                        call,
+                        "returned",
+                        returned_skills=[
+                            SkillReference(id=item["id"], revision=item["revision"])
+                            for item in items
+                        ],
+                    )
+                elif tool in HISTORY_TOOLS:
                     api.finish_tool_call(
                         call,
                         "returned",
@@ -205,6 +234,8 @@ class HarnessServer(FastMCP):
                         GoalConflictError,
                         GoalNotFoundError,
                         RunNotFoundError,
+                        SkillNotFoundError,
+                        SkillValidationError,
                         ValidationError,
                     ),
                 )
@@ -288,6 +319,16 @@ def create_server(
         return api.get_goal_progress(goal_id, revision)
 
     if run_id is not None:
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def list_skills() -> SkillList:
+            """Discover current skill revisions by name and description."""
+            return {"skills": api.skills.list_skills()}
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def read_skill(id: str, revision: PositiveInteger) -> SkillRevision:
+            """Read the exact instructions, manifest and provenance for a skill revision."""
+            return api.skills.read_skill(id, revision)
 
         @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
         def get_goal_activity(goal_id: PositiveInteger) -> GoalActivity:

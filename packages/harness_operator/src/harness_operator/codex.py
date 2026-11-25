@@ -9,11 +9,13 @@ from typing import TextIO
 
 from pydantic import ConfigDict, TypeAdapter, with_config
 
-from harness_api import DefinitionGrant, GoalAPI, GoalDefinition
+from harness_api import DefinitionGrant, GoalAPI, GoalDefinition, read_skill_catalog
 
 OPERATOR_INSTRUCTIONS = """\
 You are the user's goal operator. Treat goals as flexible guidelines.
 Read relevant workspace files when helpful and suggest a small next step.
+When planning, discover available guidance with list_skills and use read_skill
+for the revisions you judge relevant. Choose the subgoals and checks yourself.
 Use the harness_mcp list_goals tool to find saved goal IDs. For questions about a
 plan and its subgoals or completion decisions, call get_goal_tree with the goal ID.
 For progress questions call get_goal_progress. Use its assessed revision, count,
@@ -169,6 +171,7 @@ def ask_codex(
     definition_grant_id: int | None = None,
 ) -> int:
     api = GoalAPI()
+    api.skills.import_catalog(read_skill_catalog())
     run = api.start_run(completion_grant_id, definition_grant_id=definition_grant_id)
     grant = run["definition_grant"]
     if grant is not None:

@@ -13,6 +13,8 @@ type HarnessTool = Literal[
     "get_goal_progress",
     "get_goal_activity",
     "get_run",
+    "list_skills",
+    "read_skill",
     "complete_goal",
     "create_goal",
     "revise_goal",
@@ -33,6 +35,11 @@ type CallRelationship = Literal[
 class CallReference(TypedDict):
     run_id: int
     sequence: int
+
+
+class SkillReference(TypedDict):
+    id: str
+    revision: int
 
 
 class DecisionReference(TypedDict):
@@ -120,6 +127,8 @@ class RunCall(CallReadReference):
     target_goal_id: int | None
     target_revision: int | None
     target_run_id: int | None
+    target_skill_id: str | None
+    returned_skills: list[SkillReference] | None
     started_at: str
     finished_at: str | None
     returned_goals: list[GoalResultReference] | None
@@ -217,6 +226,16 @@ def revision_reference(row: sqlite3.Row) -> RevisionReference | None:
 def run_calls(
     connection: sqlite3.Connection, run_id: int, exclude_sequence: int | None
 ) -> list[RunCall]:
+    skills: dict[int, list[SkillReference]] = defaultdict(list)
+    for row in connection.execute(
+        """SELECT ref.sequence, skill.skill_key, skill.revision FROM run_call_skills AS ref
+           JOIN skill_revisions AS skill ON skill.id = ref.snapshot_id
+           WHERE ref.run_id = ? ORDER BY ref.sequence, ref.position""",
+        (run_id,),
+    ):
+        skills[row["sequence"]].append(
+            SkillReference(id=row["skill_key"], revision=row["revision"])
+        )
     results: dict[int, list[GoalResultReference]] = defaultdict(list)
     for row in connection.execute(
         "SELECT * FROM run_call_goals WHERE run_id = ? ORDER BY sequence, position",
@@ -246,6 +265,11 @@ def run_calls(
             target_goal_id=row["target_goal_id"],
             target_revision=row["target_revision"],
             target_run_id=row["target_run_id"],
+            target_skill_id=row["target_skill_id"],
+            returned_skills=skills[row["sequence"]]
+            if row["outcome"] == "returned"
+            and row["tool"] in ("list_skills", "read_skill")
+            else None,
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             outcome=row["outcome"],
@@ -258,7 +282,9 @@ def run_calls(
             if row["revision_kind"] == "retrieved"
             else None,
             returned_goals=results[row["sequence"]]
-            if row["outcome"] == "returned" and row["returned_history"] is None
+            if row["outcome"] == "returned"
+            and row["returned_history"] is None
+            and row["tool"] not in ("list_skills", "read_skill")
             else None,
             returned_history=json.loads(row["returned_history"])
             if row["returned_history"] is not None

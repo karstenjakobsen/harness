@@ -809,3 +809,155 @@ def _assert_audited_completion(
     saved = observations[confirmation["evidence_id"]]
     assert saved["submitted_by"] == confirmation["submitted_by"] == 1
     assert saved["recorded_at"] == confirmation["recorded_at"] and saved["recorded_at"]
+
+
+@pytest.mark.live
+def test_advisory_chess_plan_reads_versioned_skills(
+    live_directory, workspace, run, goal
+):
+    original = goal("create", "--title", "Build a chess game in Go")
+    trace = live_directory / "chess.jsonl"
+    question = (
+        "For my ‘Build a chess game in Go’ goal, what subgoals would you propose, "
+        "and how would you verify that a move cannot leave your own king in check?"
+    )
+    reply = run("ask", "--trace-file", trace, question)
+    with TestClient(create_app(workspace / DATABASE_PATH)) as client:
+
+        def get(path):
+            return client.get(path).raise_for_status().json()
+
+        saved = get("/runs/1")
+        assert saved["mode"] == "advisory" and saved["outcome"] == "succeeded"
+        catalog = get("/skills")
+        assert_tool_result(trace, "list_skills", None, {"skills": catalog})
+        listed = [{"id": s["id"], "revision": s["revision"]} for s in catalog]
+        assert any(
+            c["tool"] == "list_skills" and c["returned_skills"] == listed
+            for c in saved["calls"]
+        )
+        excerpts = {
+            f"/runs/{saved['id']}": {
+                "mode": saved["mode"],
+                "outcome": saved["outcome"],
+                "calls": [
+                    {
+                        key: call[key]
+                        for key in ("sequence", "tool", "outcome", "returned_skills")
+                    }
+                    for call in saved["calls"]
+                    if call["tool"] in ("list_skills", "read_skill")
+                ],
+            }
+        }
+        read = set()
+        for call in saved["calls"]:
+            if call["tool"] == "read_skill" and call["outcome"] == "returned":
+                (ref,) = call["returned_skills"]
+                url = f"/skills/{ref['id']}/revisions/{ref['revision']}"
+                snapshot = get(url)
+                assert (
+                    snapshot["instructions"]
+                    and snapshot["manifest"]
+                    and snapshot["commit_sha"]
+                )
+                assert (snapshot["id"], snapshot["revision"]) == (
+                    call["target_skill_id"],
+                    call["target_revision"],
+                )
+                assert_tool_result(trace, "read_skill", None, snapshot)
+                readers = get(url + "/reads")
+                assert {"run_id": saved["id"], "sequence": call["sequence"]} in readers
+                excerpts[url] = {
+                    key: snapshot[key]
+                    for key in ("source_path", "commit_sha", "content_hash")
+                }
+                excerpts[url]["instructions_excerpt"] = "\n\n".join(
+                    snapshot["instructions"].split("\n\n", 2)[:2]
+                )
+                excerpts[url + "/reads"] = readers
+                read.add((ref["id"], ref["revision"]))
+        current = {item["id"]: item["revision"] for item in catalog}
+        assert {
+            (skill_id, current[skill_id]) for skill_id in ("chess-rules", "go-testing")
+        } <= read
+        tree = goal("show", original["id"], "--tree")
+        (root,) = tree["goals"]
+        assert (root["id"], root["revision"]) == (original["id"], original["revision"])
+
+    assert_chess_plan_answer(reply)
+    print(f"\nOwner's question\n{question}")
+    print(f"\nSigned-in operator's reply\n{reply.strip()}")
+    print("\nVerified HTTP response excerpts")
+    print(json.dumps(excerpts, indent=2, ensure_ascii=False))
+    print(
+        f"Goal {root['id']} after the run: revision {root['revision']}, {len(tree['goals']) - 1} descendants."
+    )
+
+
+def assert_chess_plan_answer(reply):
+    answer = reply.lower()
+    assert re.search(r"subgoal|milestone|\bplan\b|^\s*1[.)]", answer, re.MULTILINE), (
+        reply
+    )
+    assert "king" in answer and "check" in answer, reply
+    fen = re.search(r"\b(?:[prnbqk1-8]+/){7}[prnbqk1-8]+ [wb]\b", answer)
+    assert fen or len(set(re.findall(r"[a-h][1-8]", answer))) >= 3, reply
+    assert re.search(r"testing\.t|t\.run\(|go test|table.driven", answer), reply
+    # Read each candidate with its own expectation. A verdict from the next
+    # row of a Go table or Markdown table belongs to a different move.
+    coordinates = answer.translate(str.maketrans("", "", '"`'))
+    moves = list(
+        re.finditer(
+            r"([a-h][1-8])[ \t]*(?:[-–—→>,]+|to)?[ \t]*([a-h][1-8])", coordinates
+        )
+    )
+    seed_position = "k3r3/8/8/8/8/8/4r3/4k3 w" in answer or (
+        "rook" in answer
+        and all(square in answer for square in ("e1", "e2", "e8", "a8"))
+    )
+    for index, move in enumerate(moves):
+        start, end = move.groups()
+        if (
+            seed_position
+            and start == "e2"
+            and end in {"e3", "e4", "e5", "e6", "e7", "e8"}
+        ):
+            continue  # The rook keeps blocking the e-file or captures the attacker.
+        stop = moves[index + 1].start() if index + 1 < len(moves) else len(coordinates)
+        after = coordinates[move.end() : stop][:150]
+        previous = moves[index - 1].end() if index else 0
+        before = coordinates[previous : move.start()].rsplit("\n", 1)[-1]
+        if re.search(
+            r"\b(false|illegal|reject(?:ed)?|absent)\b|must not|should not|wanterr:\s*true",
+            after,
+        ):
+            return
+        if re.search(r"\b(illegal|reject)[:\s`*]*$", before):
+            return
+    raise AssertionError(
+        f"Expected the Go test to reject a move exposing the moving king: {reply}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("off_file", "still_blocking"), [("legal", "illegal"), ("true", "false")]
+)
+def test_chess_answer_rejects_reversed_expected_results(off_file, still_blocking):
+    reply = (
+        "Proposed subgoals: represent positions, then generate legal moves.\n"
+        "Test king safety in check with a table-driven Go test.\n"
+        "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1\n"
+        f"| e2f2 | {off_file} |\n| e2e3 | {still_blocking} |"
+    )
+    with pytest.raises(AssertionError):
+        assert_chess_plan_answer(reply)
+
+
+@pytest.mark.parametrize("case", ['{"e2", "f2", false}', "e2 → f2 must be rejected"])
+def test_chess_answer_accepts_a_full_position_and_one_illegal_move(case):
+    assert_chess_plan_answer(
+        "Proposed subgoals: represent the board and generate legal moves.\n"
+        "For king safety, use a table-driven Go test for check.\n"
+        f"k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1\n{case}"
+    )

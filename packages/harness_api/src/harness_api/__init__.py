@@ -16,6 +16,7 @@ from .models.activity import (
     HarnessTool,
     OperatorRun,
     RunNotFoundError,
+    SkillReference,
 )
 from .models.evidence import Evidence
 from .models.goals import (
@@ -42,6 +43,17 @@ from .models.goals import (
     GoalTree,
     GoalValidationError,
 )
+from .models.skills import (
+    SkillAPI,
+    SkillCatalog,
+    SkillCatalogError,
+    SkillNotFoundError,
+    SkillRevision,
+    SkillSource,
+    SkillSummary,
+    SkillValidationError,
+)
+from .skill_source import read_skill_catalog
 
 __all__ = [
     "ADMIN_USER_ID",
@@ -81,7 +93,17 @@ __all__ = [
     "OperatorAPI",
     "OperatorRun",
     "RunNotFoundError",
+    "SkillAPI",
+    "SkillCatalog",
+    "SkillCatalogError",
+    "SkillNotFoundError",
+    "SkillReference",
+    "SkillRevision",
+    "SkillSource",
+    "SkillSummary",
+    "SkillValidationError",
     "User",
     "UserAPI",
     "WorkspaceStorageError",
+    "read_skill_catalog",
 ]

@@ -159,10 +159,11 @@ CREATE TABLE run_calls (
     sequence INTEGER NOT NULL CHECK (sequence > 0),
     tool TEXT NOT NULL CHECK (tool IN (
         'list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal', 'create_goal', 'revise_goal',
-        'get_goal_activity', 'get_run'
+        'get_goal_activity', 'get_run', 'list_skills', 'read_skill'
     )),
     -- Requested IDs can be invalid or belong to a different owner.
     target_goal_id INTEGER CHECK (target_goal_id > 0),
+    target_skill_id TEXT CHECK (target_skill_id IS NULL OR tool = 'read_skill'),
     target_revision INTEGER CHECK (target_revision > 0),
     target_run_id INTEGER CHECK (
         target_run_id IS NULL OR (target_run_id > 0 AND tool = 'get_run')
@@ -229,10 +230,43 @@ CREATE INDEX run_call_revisions_by_goal ON run_call_revisions(goal_id);
 -- End run call schema
 -- End run activity schema
 
+-- Begin skill schema
+CREATE TABLE skill_revisions (
+    id INTEGER PRIMARY KEY,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    skill_key TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    discoverable INTEGER NOT NULL DEFAULT 0 CHECK (discoverable IN (0, 1)),
+    UNIQUE (owner_user_id, skill_key, revision)
+) STRICT;
+
+CREATE UNIQUE INDEX current_skill ON skill_revisions(owner_user_id, skill_key)
+    WHERE discoverable = 1;
+
+CREATE TABLE run_call_skills (
+    run_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    snapshot_id INTEGER NOT NULL REFERENCES skill_revisions(id),
+    PRIMARY KEY (run_id, sequence, position),
+    UNIQUE (run_id, sequence, snapshot_id),
+    FOREIGN KEY (run_id, sequence) REFERENCES run_calls(run_id, sequence)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX calls_by_skill_revision ON run_call_skills(snapshot_id);
+-- End skill schema
+
 INSERT INTO users (username, display_name) VALUES ('admin', 'admin');
 
 CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
-PRAGMA user_version = 12;
+PRAGMA user_version = 13;

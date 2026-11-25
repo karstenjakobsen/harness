@@ -4,12 +4,13 @@ import stat
 import subprocess
 import sys
 import tomllib
+from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
 
 import pytest
 
-from harness_api import GoalAPI, OperatorAPI
+from harness_api import GoalAPI, OperatorAPI, RunNotFoundError, read_skill_catalog
 from harness_operator import ask_codex, main
 
 
@@ -198,3 +199,24 @@ def test_cli_binds_one_definition_grant_and_approves_its_tool(
     assert invoke("goal", "withdraw-definition-grant", grant["id"]) == 0
     assert json.loads(capsys.readouterr().out) == grant
     assert invoke("ask", "--definition-grant", grant["id"], "Save the definition.") == 1
+
+
+def test_catalog_conflict_stops_ask_before_starting_a_run(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    catalog = read_skill_catalog()
+    goals = GoalAPI()
+    goals.skills.import_catalog(catalog)
+    changed = replace(
+        catalog.sources[0], instructions="Changed without a revision bump"
+    )
+    monkeypatch.setattr(
+        "harness_operator.codex.read_skill_catalog",
+        lambda: replace(catalog, sources=(changed, *catalog.sources[1:])),
+    )
+    monkeypatch.setattr(sys, "argv", ["operator", "ask", "Propose a plan"])
+    assert main() == 1
+    assert "Bump its revision" in capsys.readouterr().err
+    with pytest.raises(RunNotFoundError):
+        goals.get_run(1)

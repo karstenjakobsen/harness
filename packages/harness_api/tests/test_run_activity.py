@@ -310,7 +310,7 @@ def test_upgrade_v8_keeps_delegated_decision_and_citation_without_run_attributio
     GoalAPI(path)
     reopened = GoalAPI(path)
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (12,)
+        assert db.execute("PRAGMA user_version").fetchone() == (13,)
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
     assert reopened.get_goal(23)["parent_goal_id"] == 22
     assert reopened.get_completion_grant(24) == {
@@ -342,7 +342,7 @@ def test_upgrade_v8_keeps_delegated_decision_and_citation_without_run_attributio
     assert last["decision"] == decision and last["committing_call"] is None
 
 
-@pytest.mark.parametrize("version", [9, 10, 11])
+@pytest.mark.parametrize("version", [9, 10, 11, 12])
 def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
     path = tmp_path / "goals.db"
     snapshot = Path(__file__).with_name("fixtures") / f"schema_v{version}.sql"
@@ -384,7 +384,7 @@ def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
             db.execute(
                 "UPDATE run_calls SET resolved_goal_id = 2 WHERE run_id IN (2, 3)"
             )
-        if version == 11:
+        if version >= 11:
             db.executescript("""
                 INSERT INTO goal_revisions (goal_id, revision, title, created_at)
                 VALUES (1, 2, 'Revised parent', '2025-01-01 10:00:10');
@@ -398,6 +398,14 @@ def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
                 INSERT INTO run_call_revisions (run_id, sequence, goal_id, revision, kind)
                 VALUES (4, 1, 1, 2, 'committed');
             """)
+
+        if version == 12:
+            db.execute(
+                """INSERT INTO run_calls (run_id, sequence, tool, target_run_id, started_at,
+                                          finished_at, outcome, returned_history)
+                   VALUES (4, 2, 'get_run', 1, '2025-01-01 10:01:00', '2025-01-01 10:01:01', 'returned', ?)""",
+                ('{"run_id":1,"outcome":"succeeded","calls":[]}',),
+            )
 
     GoalAPI(path)
     reopened = GoalAPI(path)
@@ -426,7 +434,7 @@ def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
     assert revision["committing_call"] is None
     assert decision["decision"]["evidence_ids"] == [1]
     assert decision["committing_call"] == {"run_id": 3, "sequence": 1}
-    if version == 11:
+    if version >= 11:
         run = reopened.get_run(4)
         assert run["definition_grant"] == {
             "id": 1,
@@ -434,7 +442,16 @@ def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
             "action": "revise_goal",
             "goal_id": 1,
         }
-        (call,) = run["calls"]
+        call = run["calls"][0]
+        if version == 12:
+            history = run["calls"][1]
+            assert history["target_run_id"] == 1
+            assert history["returned_history"] == {
+                "run_id": 1,
+                "outcome": "succeeded",
+                "calls": [],
+            }
+            assert history["returned_skills"] is None
         assert call["committed_revision"] == {"goal_id": 1, "revision": 2}
         assert call["returned_history"] is None and call["target_run_id"] is None
         revisions = [
@@ -444,5 +461,5 @@ def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
         ]
         assert revisions[1]["committing_call"] == {"run_id": 4, "sequence": 1}
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (12,)
+        assert db.execute("PRAGMA user_version").fetchone() == (13,)
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []

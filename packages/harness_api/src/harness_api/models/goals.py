@@ -3,6 +3,7 @@ import sqlite3
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
+from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
 from types import EllipsisType
@@ -31,6 +32,7 @@ from .activity import (
     OperatorRun,
     RevisionReadReference,
     RevisionReference,
+    SkillReference,
     related_calls,
     revision_reference,
     run_calls,
@@ -50,6 +52,7 @@ from .evidence import (
     goal_evidence,
     is_future_dated,
 )
+from .skills import SkillAPI, is_skill_id
 
 EVENT_COLUMNS = """
 event.id AS event_id, event.actor_user_id, event.recorded_at, statement.payload, event.statement_evidence_id,
@@ -454,6 +457,11 @@ class GoalAPI(WorkspaceDatabase):
         super().__init__(path)
         self._submitter = ADMIN_USER_ID if local_owner else None
 
+    @cached_property
+    def skills(self) -> SkillAPI:
+        """The skill catalog in the same workspace as these runs."""
+        return SkillAPI(self._path)
+
     def save_goal_draft(
         self,
         original_message: str,
@@ -727,14 +735,23 @@ class GoalAPI(WorkspaceDatabase):
         target_goal_id: int | None = None,
         target_revision: int | None = None,
         target_run_id: int | None = None,
+        target_skill_id: str | None = None,
     ) -> CallReference:
         _validate_positive_integer(run_id, "Run ID")
         if tool not in get_args(HarnessTool.__value__):
             raise GoalValidationError("Unknown Harness tool.")
         if target_goal_id is not None:
+            if tool in ("list_skills", "read_skill"):
+                raise GoalValidationError("Skill calls cannot have a goal target.")
             _validate_positive_integer(target_goal_id, "Target goal ID")
         if target_revision is not None:
+            if tool == "list_skills":
+                raise GoalValidationError("Catalog discovery cannot target a revision.")
             _validate_positive_integer(target_revision, "Target revision")
+        if target_skill_id is not None and (
+            tool != "read_skill" or not isinstance(target_skill_id, str)
+        ):
+            raise GoalValidationError("Only read_skill can request a skill ID.")
         if target_run_id is not None:
             _validate_positive_integer(target_run_id, "Target run ID")
             if tool != "get_run":
@@ -750,10 +767,10 @@ class GoalAPI(WorkspaceDatabase):
             connection.execute(
                 """
                 INSERT INTO run_calls (
-                    run_id, sequence, tool, target_goal_id, target_revision, target_run_id,
+                    run_id, sequence, tool, target_goal_id, target_revision, target_run_id, target_skill_id,
                     started_at, resolved_goal_id
                 ) VALUES (
-                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :target_run_id,
+                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :target_run_id, :target_skill_id,
                     :started_at,
                     (SELECT id FROM goals WHERE id = :target_goal_id
                         AND owner_user_id = :owner AND deleted_at IS NULL)
@@ -766,6 +783,9 @@ class GoalAPI(WorkspaceDatabase):
                     "target_goal_id": target_goal_id,
                     "target_revision": target_revision,
                     "target_run_id": target_run_id,
+                    "target_skill_id": target_skill_id
+                    if is_skill_id(target_skill_id)
+                    else None,
                     "started_at": utc_timestamp(),
                     "owner": run["owner_user_id"],
                 },
@@ -779,8 +799,12 @@ class GoalAPI(WorkspaceDatabase):
         *,
         returned_goals: list[GoalResultReference] | None = None,
         history_result: GoalActivity | OperatorRun | None = None,
+        returned_skills: list[SkillReference] | None = None,
     ) -> None:
-        result_count = int(returned_goals is not None) + int(history_result is not None)
+        result_count = sum(
+            value is not None
+            for value in (returned_goals, history_result, returned_skills)
+        )
         if outcome not in ("returned", "denied", "failed") or result_count != int(
             outcome == "returned"
         ):
@@ -788,16 +812,13 @@ class GoalAPI(WorkspaceDatabase):
         with self._write() as connection:
             attempt = self._open_tool_call(connection, call)
             history_reference = None
-            if outcome == "returned" and (
-                (attempt["tool"] in ("get_goal_activity", "get_run"))
-                != (history_result is not None)
-            ):
-                raise GoalValidationError("The result type must match the tool call.")
-            if history_result is not None:
+            if returned_skills is not None:
+                self._save_skill_references(connection, attempt, returned_skills)
+            elif history_result is not None:
                 history_reference = self._history_read_reference(
                     connection, attempt, history_result
                 )
-            if returned_goals is not None:
+            elif returned_goals is not None:
                 self._validate_tool_result(connection, attempt, returned_goals)
                 save_result_references(connection, call, returned_goals)
             connection.execute(
@@ -817,6 +838,57 @@ class GoalAPI(WorkspaceDatabase):
                     else None,
                 ),
             )
+
+    @staticmethod
+    def _save_skill_references(
+        connection: sqlite3.Connection,
+        attempt: sqlite3.Row,
+        skills: list[SkillReference],
+    ) -> None:
+        if attempt["tool"] not in ("list_skills", "read_skill"):
+            raise GoalValidationError("The result type must match the tool call.")
+        if attempt["tool"] == "read_skill" and skills != [
+            {
+                "id": attempt["target_skill_id"],
+                "revision": attempt["target_revision"],
+            }
+        ]:
+            raise GoalValidationError(
+                "The returned skill must match the requested ID and revision."
+            )
+        listed_ids = set()
+        for position, skill in enumerate(skills):
+            if (
+                not isinstance(skill, dict)
+                or skill.keys() != {"id", "revision"}
+                or not is_skill_id(skill["id"])
+            ):
+                raise GoalValidationError(
+                    "A skill reference requires an ID and revision."
+                )
+            _validate_positive_integer(skill["revision"], "Skill revision")
+            if skill["id"] in listed_ids:
+                raise GoalValidationError(
+                    "A skill can appear only once in a catalog listing."
+                )
+            listed_ids.add(skill["id"])
+            cursor = connection.execute(
+                """INSERT INTO run_call_skills (run_id, sequence, position, snapshot_id)
+                   SELECT ?, ?, ?, id FROM skill_revisions
+                   WHERE owner_user_id = ? AND skill_key = ? AND revision = ?""",
+                (
+                    attempt["run_id"],
+                    attempt["sequence"],
+                    position,
+                    ADMIN_USER_ID,
+                    skill["id"],
+                    skill["revision"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise GoalValidationError(
+                    "The returned skill revision must exist in this workspace."
+                )
 
     @staticmethod
     def _history_read_reference(
@@ -863,6 +935,13 @@ class GoalAPI(WorkspaceDatabase):
         attempt: sqlite3.Row,
         goals: list[GoalResultReference],
     ) -> None:
+        if attempt["tool"] in (
+            "list_skills",
+            "read_skill",
+            "get_goal_activity",
+            "get_run",
+        ):
+            raise GoalValidationError("The result type must match the tool call.")
         if attempt["tool"] == "complete_goal":
             event_id = attempt["committed_event_id"] or attempt["retrieved_event_id"]
             if (

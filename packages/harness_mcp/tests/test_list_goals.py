@@ -1,7 +1,10 @@
+import shutil
 import sqlite3
+import subprocess
 import sys
 from contextlib import asynccontextmanager, closing
 from datetime import timedelta
+from hashlib import sha256
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +17,9 @@ from harness_api import (
     GoalConflictError,
     GoalValidationError,
     OperatorAPI,
+    SkillCatalogError,
+    SkillNotFoundError,
+    read_skill_catalog,
 )
 from harness_api.app import create_app
 from harness_mcp.server import create_server
@@ -64,6 +70,10 @@ async def test_server_initializes_an_empty_goal_list(client, tmp_path):
         await client.call_tool("get_goal_activity", {"goal_id": goal["id"]})
     ).isError
     assert (await client.call_tool("get_run", {"run_id": run["id"]})).isError
+    assert (await client.call_tool("list_skills", {})).isError
+    assert (
+        await client.call_tool("read_skill", {"id": "chess-rules", "revision": 1})
+    ).isError
     assert api.get_run(run["id"])["calls"] == []
 
 
@@ -99,6 +109,7 @@ async def test_only_the_bound_session_can_complete_its_subgoal(client, tmp_path)
         tmp_path, "--completion-grant", str(first["id"]), "--run-id", str(old_run)
     ) as old:
         tools = await old.list_tools()
+        assert {tool.name for tool in tools.tools} >= {"list_skills", "read_skill"}
         (write,) = [tool for tool in tools.tools if not tool.annotations.readOnlyHint]
         assert write.name == "complete_goal"
         assert write.inputSchema["properties"].keys() == request.keys()
@@ -762,3 +773,198 @@ async def test_http_discovers_both_mcp_reviews_and_resolves_the_decision(tmp_pat
         assert get(f"/runs/{first['id']}") == first
         assert get(f"/goals/{goal_id}")["status"] == "completed"
         assert get(f"/goals/{parent}")["status"] == "active"
+
+
+@pytest.mark.anyio
+async def test_catalog_import_and_historical_skill_reads(tmp_path, monkeypatch):
+    repo = tmp_path / "source"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    # Import Go first so the conflicting chess revision exercises rollback of a valid insert.
+    go = repo / "skills/a-go"
+    chess = repo / "skills/b-chess"
+    for folder, skill_id in ((go, "go-testing"), (chess, "chess-rules")):
+        folder.mkdir(parents=True)
+        (folder / "operator.yaml").write_text(
+            f"kind: skill\nid: {skill_id}\nrevision: 1\nname: {skill_id}\ndescription: Example\nauthor: Test\n"
+        )
+        (folder / "SKILL.md").write_text(f"Instructions for {skill_id}\n")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    def commit(message):
+        git("add", "-A")
+        git(
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            message,
+        )
+        return git("rev-parse", "HEAD")
+
+    git("init", "-q")
+    original_sha = commit("Two skills")
+    api = GoalAPI(workspace / DATABASE_PATH)
+
+    def load():
+        api.skills.import_catalog(read_skill_catalog(repo))
+
+    manifest = (chess / "operator.yaml").read_bytes()
+    markdown = (chess / "SKILL.md").read_bytes()
+    original_hash = sha256(
+        len(manifest).to_bytes(8, "big") + manifest + markdown
+    ).hexdigest()
+    load()
+    load()
+    (repo / "README").write_text("Unrelated commit")
+    commit("Unrelated")
+    (chess / "SKILL.md").write_text("Uncommitted edit")
+    load()
+    ref = {"id": "chess-rules", "revision": 1}
+    go_ref = {"id": "go-testing", "revision": 1}
+    run_id = api.start_run()["id"]
+    async with workspace_client(workspace, "--run-id", str(run_id)) as session:
+        listed = (await session.call_tool("list_skills", {})).structuredContent[
+            "skills"
+        ]
+        assert [item.keys() for item in listed] == [
+            set(ref) | {"name", "description"}
+        ] * 2
+        assert [(item["id"], item["revision"]) for item in listed] == [
+            ("chess-rules", 1),
+            ("go-testing", 1),
+        ]
+        original = (await session.call_tool("read_skill", ref)).structuredContent
+        assert (
+            original["instructions"].encode() == markdown
+            and original["manifest"].encode() == manifest
+        )
+        assert (
+            original["source_path"],
+            original["commit_sha"],
+            original["content_hash"],
+        ) == ("skills/b-chess", original_sha, original_hash)
+        assert (
+            await session.call_tool("read_skill", {"id": "go-testing", "revision": 2})
+        ).isError
+        malformed = await session.call_tool(
+            "read_skill", {"id": "not a skill ID", "revision": 1}
+        )
+        assert malformed.isError
+    # A requested full read interrupted before returning has no returned reference.
+    api.start_tool_call(
+        run_id, "read_skill", target_skill_id="go-testing", target_revision=1
+    )
+    api.finish_run(run_id, "succeeded")
+    listing, reading, failed, malformed, interrupted = api.get_run(run_id)["calls"]
+    assert malformed["outcome"] == "denied" and malformed["target_skill_id"] is None
+    assert (
+        listing["returned_skills"] == [ref, go_ref]
+        and listing["returned_goals"] is None
+    )
+    assert (
+        reading["returned_skills"] == [ref] and reading["target_skill_id"] == ref["id"]
+    )
+    assert failed["outcome"] == "denied" and failed["returned_skills"] is None
+    assert (
+        interrupted["outcome"] == "unfinished"
+        and interrupted["returned_skills"] is None
+    )
+
+    go_manifest = go / "operator.yaml"
+    go_manifest.write_text(
+        go_manifest.read_text().replace("revision: 1", "revision: 2")
+    )
+    commit("Go revision 2 and conflicting chess text")
+    url = "/skills/chess-rules/revisions/1"
+    with pytest.raises(
+        SkillCatalogError, match="chess-rules.*revision 1.*Bump"
+    ) as conflict:
+        load()
+    after_conflict = api.skills.list_skills()
+    assert after_conflict == listed
+    with pytest.raises(SkillNotFoundError):
+        api.skills.read_skill("go-testing", 2)
+    print(f"\nOffline catalog import rejected: {conflict.value}")
+    print(
+        "Discovery after rollback:", [(s["id"], s["revision"]) for s in after_conflict]
+    )
+    print("Exact lookup of go-testing revision 2 raised SkillNotFoundError.")
+    with TestClient(create_app(workspace / DATABASE_PATH)) as http:
+        past = http.get(f"/runs/{run_id}").raise_for_status().json()["calls"][1]
+        (item,) = past["returned_skills"]
+        assert (
+            http.get(f"/skills/{item['id']}/revisions/{item['revision']}")
+            .raise_for_status()
+            .json()
+            == original
+        )
+
+    (chess / "SKILL.md").write_bytes(markdown)
+    (chess / "operator.yaml").write_bytes(manifest + b"# new description pending\n")
+    commit("Conflicting manifest only")
+    with pytest.raises(SkillCatalogError, match="chess-rules.*revision 1.*Bump"):
+        load()
+    assert api.skills.list_skills() == listed
+    (chess / "operator.yaml").write_bytes(
+        manifest.replace(b"revision: 1", b"revision: 2")
+    )
+    (chess / "SKILL.md").write_text("Chess revision two\n")
+    (chess.parent / "b-chess").rename(chess.parent / "moved-chess")
+    commit("Bump chess revision and move its folder")
+    load()
+    assert [(item["id"], item["revision"]) for item in api.skills.list_skills()] == [
+        ("chess-rules", 2),
+        ("go-testing", 2),
+    ]
+    assert (
+        api.skills.read_skill("chess-rules", 2)["source_path"] == "skills/moved-chess"
+    )
+
+    shutil.rmtree(chess.parent / "moved-chess")
+    commit("Remove chess from discovery")
+    load()
+    repo.rename(tmp_path / "checkout-unavailable")
+    async with workspace_client(
+        workspace, "--run-id", str(api.start_run()["id"])
+    ) as session:
+        assert (await session.call_tool("list_skills", {})).structuredContent == {
+            "skills": [listed[1] | {"revision": 2}]
+        }
+        assert (
+            await session.call_tool("read_skill", ref)
+        ).structuredContent == original
+    # Opening the HTTP service and following saved reads also work without a Git executable.
+    monkeypatch.setenv("PATH", str(workspace))
+    with TestClient(create_app(workspace / DATABASE_PATH)) as http:
+        historical = http.get(url).raise_for_status().json()
+        assert historical == original
+        current = http.get("/skills").raise_for_status().json()
+        assert current == [listed[1] | {"revision": 2}]
+        assert http.get("/skills/chess-rules/revisions/3").status_code == 404
+        assert http.get("/skills/chess-rules/revisions/3/reads").status_code == 404
+        readers = http.get(url + "/reads").raise_for_status().json()
+        assert readers == [
+            {"run_id": run_id, "sequence": reading["sequence"]},
+            {"run_id": run_id + 1, "sequence": 2},
+        ]
+        go_reads = (
+            http.get("/skills/go-testing/revisions/1/reads").raise_for_status().json()
+        )
+        assert go_reads == []
+    print("Discovery after removal:", [(s["id"], s["revision"]) for s in current])
+    print(f"Historical HTTP read without Git: {url}")
+    print(f"  Instructions: {historical['instructions'].rstrip()}")
+    print(f"  Source: {historical['source_path']} at {historical['commit_sha']}")
+    print(f"  Content hash: {historical['content_hash']}")
+    print(f"  Full reads of chess-rules revision 1: {readers}")
+    print(f"  Full reads of go-testing revision 1 (only listed): {go_reads}")
