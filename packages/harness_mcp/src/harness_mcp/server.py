@@ -20,6 +20,7 @@ from harness_api import (
     DecisionReference,
     DelegatedCompletion,
     DelegatedGoalResult,
+    GoalActivity,
     GoalAPI,
     GoalConflictError,
     GoalCreationStatus,
@@ -33,6 +34,7 @@ from harness_api import (
     GoalTree,
     GoalValidationError,
     HarnessTool,
+    OperatorRun,
     RunNotFoundError,
     WorkspaceStorageError,
 )
@@ -40,6 +42,8 @@ from harness_api import (
 PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
 HARNESS_TOOLS = get_args(HarnessTool.__value__)
 WRITE_TOOLS = ("complete_goal", "create_goal", "revise_goal")
+HISTORY_TOOLS = ("get_goal_activity", "get_run")
+RUN_REQUIRED_TOOLS = WRITE_TOOLS + HISTORY_TOOLS
 
 
 class GoalList(TypedDict):
@@ -126,10 +130,13 @@ class HarnessServer(FastMCP):
                 run_id,
                 tool,
                 target_goal_id=_positive_id(arguments.get("goal_id"))
-                if tool not in ("list_goals", "create_goal")
+                if tool not in ("list_goals", "create_goal", "get_run")
                 else None,
                 target_revision=_positive_id(arguments.get(revision_field))
                 if tool in ("complete_goal", "revise_goal", "get_goal_progress")
+                else None,
+                target_run_id=_positive_id(arguments.get("run_id"))
+                if tool == "get_run"
                 else None,
             )
             invocation = _Invocation(call, frozenset(arguments))
@@ -144,11 +151,22 @@ class HarnessServer(FastMCP):
                 api.finish_tool_call(call, invocation.error_outcome)
             else:
                 assert result.structuredContent is not None
-                api.finish_tool_call(
-                    call,
-                    "returned",
-                    returned_goals=_result_references(tool, result.structuredContent),
-                )
+                if tool in HISTORY_TOOLS:
+                    api.finish_tool_call(
+                        call,
+                        "returned",
+                        history_result=cast(
+                            GoalActivity | OperatorRun, result.structuredContent
+                        ),
+                    )
+                else:
+                    api.finish_tool_call(
+                        call,
+                        "returned",
+                        returned_goals=_result_references(
+                            tool, result.structuredContent
+                        ),
+                    )
             return response
 
         self._mcp_server.request_handlers[CallToolRequest] = record_call
@@ -156,14 +174,14 @@ class HarnessServer(FastMCP):
     async def list_tools(self) -> list[Tool]:
         tools = await super().list_tools()
         for tool in tools:
-            if tool.name in WRITE_TOOLS:
+            if tool.name in RUN_REQUIRED_TOOLS:
                 tool.inputSchema["additionalProperties"] = False
         return tools
 
     async def call_tool(self, name: str, arguments: dict[str, object]):
         # FastMCP's default argument model ignores unknown fields.
         try:
-            if name in WRITE_TOOLS:
+            if name in RUN_REQUIRED_TOOLS:
                 tool = next(
                     (tool for tool in await self.list_tools() if tool.name == name),
                     None,
@@ -186,6 +204,7 @@ class HarnessServer(FastMCP):
                         GoalValidationError,
                         GoalConflictError,
                         GoalNotFoundError,
+                        RunNotFoundError,
                         ValidationError,
                     ),
                 )
@@ -193,10 +212,10 @@ class HarnessServer(FastMCP):
                 invocation.error_outcome = "denied"
             raise
 
-    def write_invocation(self) -> _Invocation:
+    def audited_invocation(self) -> _Invocation:
         invocation = self._invocation.get()
         if invocation is None:
-            raise ToolError("An audited invocation is required for a goal write.")
+            raise ToolError("A recorded invocation is required for this tool.")
         return invocation
 
 
@@ -268,6 +287,25 @@ def create_server(
         """
         return api.get_goal_progress(goal_id, revision)
 
+    if run_id is not None:
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def get_goal_activity(goal_id: PositiveInteger) -> GoalActivity:
+            """Read a goal's revisions, observations, decisions and calls across operators.
+
+            A committing_call gives the run ID and sequence that saved a revision or decision.
+            """
+            return api.get_goal_activity(goal_id, call=server.audited_invocation().call)
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def get_run(run_id: PositiveInteger) -> OperatorRun:
+            """Inspect an owner-visible run and its ordered calls, including other operators' runs.
+
+            The run identifies the operator and grant. Each call has a sequence, outcome,
+            and references to saved changes and returned records.
+            """
+            return api.get_run(run_id, call=server.audited_invocation().call)
+
     if completion_grant_id is not None:
         grant = api.get_completion_grant(completion_grant_id)
 
@@ -287,7 +325,7 @@ def create_server(
                 completion_grant_id=grant["id"],
                 evidence_ids=evidence_ids,
                 rationale=rationale,
-                call=server.write_invocation().call,
+                call=server.audited_invocation().call,
             )
 
     if definition_grant_id is not None:
@@ -311,7 +349,7 @@ def create_server(
                 window_start: str | None = None,
             ) -> DelegatedGoalResult:
                 """Save one top-level goal definition. Reuse the same key and input to retry."""
-                invocation = server.write_invocation()
+                invocation = server.audited_invocation()
                 return api.create_delegated_goal(
                     title,
                     call=invocation.call,
@@ -337,7 +375,7 @@ def create_server(
                 window_start: str | None = None,
             ) -> DelegatedGoalResult:
                 """Revise the granted goal. Omit fields to preserve them or send null to clear a nullable definition field."""
-                invocation = server.write_invocation()
+                invocation = server.audited_invocation()
                 return api.revise_delegated_goal(
                     goal_id,
                     expected_revision,

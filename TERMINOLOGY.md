@@ -26,7 +26,7 @@
 | Goal CLI and HTTP writes | Local owner writes use the workspace account as `submitted_by` for reports and `recorded_by` for completion. HTTP writes have no established caller and return null for those identities. In message-based creation, Codex drafts the definition and the CLI saves it through `GoalAPI` in the same account. |
 | Account CLI and HTTP endpoints | A numeric user or operator ID selects an existing record. Named registration assigns the owner from `--user` or HTTP `owner_user_id`, defaulting to `admin`. These operations record no separate initiating identity. |
 | Bare `operator register` | Starts Codex sign-in. Named registration creates a workspace operator record. |
-| Ordinary `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. |
+| Advisory `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. History tools require a recorded run and can read across operators in the same workspace. |
 | `operator ask --completion-grant GRANT_ID` | The assistant can also complete the specific subgoal covered by the active grant. Harness derives the registered operator from the grant. |
 | `operator ask --definition-grant GRANT_ID` | The assistant can also create a top-level goal or revise the specified goal, depending on the active grant. Harness derives the registered operator from the grant bound to the recorded run. |
 
@@ -62,7 +62,8 @@ An owner can record evidence while a goal is open. The event ID identifies the e
 | Audit record | Who performed which action in Harness, and when? | At 10:05 the owner recorded an observation made at 10:00. |
 | Operator run | Which `operator ask` session contained the activity? | A delegated run records the registered operator and exact grant. An advisory run has no bound operator or grant. |
 | Tool call | What did MCP attempt, and what outcome did it record? | The run trace keeps the requested target ID. When the goal was visible to the workspace owner at call start, the resolved target also links the call to that goal's timeline. A call can remain unfinished after the run ends. |
-| Returned reference | Which goal revision, observation records, or decision citations did a tool response expose? | A progress response returned observations 31 and 32. MCP saved their IDs before handing off the response. Assistant receipt can remain unknown. |
+| Returned reference | Which revisions, observations, decision citations, runs or calls did a tool response expose? | A progress response returned observations 31 and 32. MCP saved their IDs before handing off the response. Assistant receipt can remain unknown. |
+| History read | What did an operator see when inspecting a goal timeline or run? | A run read exposed an unfinished call with revision 2 already committed. The read retains that outcome and commit reference after the call becomes returned. |
 | Committing call | Which call saved the revision or decision? | The model saves the revision or decision and its call link in the same transaction. An identical creation or completion retry can retrieve the original record under its own call sequence. |
 
 A successful HTTP response supports only the claim defined by that endpoint. A health check can establish reachability. A file-mode check can establish the mode of the file it inspected.

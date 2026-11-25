@@ -565,6 +565,181 @@ def test_operator_creates_and_revises_draft_with_http_attribution(workspace, run
         assert saved["completion"] is None
 
 
+@pytest.mark.live
+def test_operator_reconstructs_another_operators_revision(workspace, run, goal):
+    author = json.loads(run("register", "Library planner"))
+    reviewer = json.loads(run("register", "Library reviewer"))
+    library = goal(
+        "create",
+        "--title",
+        "Join the library",
+        "--success-criteria",
+        "Membership is active",
+    )
+    goal_id = library["id"]
+    parent = goal("create", "--title", "Organize bills")
+    other = goal("create", "--title", "File receipts", "--parent", parent["id"])
+    revision_grant = goal("grant-revision", goal_id, author["id"])
+    completion_grant = goal("grant-completion", other["id"], reviewer["id"])
+    run(
+        "ask",
+        "--definition-grant",
+        revision_grant["id"],
+        f"Revise goal ID {goal_id} so success requires both active membership and a "
+        "successful first checkout. Save the revised criteria.",
+    )
+
+    with TestClient(create_app(workspace / DATABASE_PATH)) as client:
+
+        def get(url):
+            return client.get(url).raise_for_status().json()
+
+        goals_before = get("/goals")
+        question = (
+            f"Goal ID {goal_id}.\n"
+            "Who changed the success criteria for this goal, what changed, and which "
+            "run and call saved it?"
+        )
+        reply = run(
+            "ask",
+            "--completion-grant",
+            completion_grant["id"],
+            question,
+        )
+
+        history_path = f"/goals/{goal_id}/history?view=activity"
+        timeline = get(history_path)["timeline"]
+        original, revised = [item for item in timeline if item["kind"] == "revision"]
+        assert original["definition"]["success_criteria"] == "Membership is active"
+        assert revised["definition"]["revision"] == 2
+        criteria = revised["definition"]["success_criteria"].lower()
+        assert "active" in criteria and "membership" in criteria
+        assert re.search(r"check(?:ed)?[ -]?out|borrow", criteria)
+
+        commit = revised["committing_call"]
+        author_run = get(f"/runs/{commit['run_id']}")
+        assert author_run["operator_id"] == author["id"]
+        assert author_run["definition_grant"] == revision_grant
+        (author_call,) = [
+            call
+            for call in author_run["calls"]
+            if call["sequence"] == commit["sequence"]
+        ]
+        committed = {"goal_id": goal_id, "revision": 2}
+        assert author_call["tool"] == "revise_goal"
+        assert author_call["committed_revision"] == committed
+
+        reader_ids = {
+            item["run_id"]
+            for item in timeline
+            if item.get("tool") == "get_goal_activity"
+        }
+        (reader_run,) = [
+            record
+            for run_id in reader_ids
+            if (record := get(f"/runs/{run_id}"))["operator_id"] == reviewer["id"]
+        ]
+        assert reader_run["completion_grant_id"] == completion_grant["id"]
+        assert reader_run["granted_goal_id"] == other["id"]
+        activity_sequences = {
+            item["sequence"]
+            for item in timeline
+            if item.get("tool") == "get_goal_activity"
+            and item["run_id"] == reader_run["id"]
+        }
+        activity_read = next(
+            (
+                call
+                for call in reader_run["calls"]
+                if call["sequence"] in activity_sequences
+                and call["outcome"] == "returned"
+                and call["target_goal_id"] == goal_id
+                and call["returned_history"]["goal_id"] == goal_id
+                and any(
+                    item["kind"] == "revision" and item["committing_call"] == commit
+                    for item in call["returned_history"]["timeline"]
+                )
+            ),
+            None,
+        )
+        assert activity_read is not None, reader_run
+        run_read = next(
+            (
+                call
+                for call in reader_run["calls"]
+                if call["tool"] == "get_run"
+                and call["outcome"] == "returned"
+                and call["target_run_id"] == author_run["id"]
+                and call["returned_history"]["run_id"] == author_run["id"]
+                and any(
+                    item["sequence"] == commit["sequence"]
+                    and item["committed_revision"] == committed
+                    for item in call["returned_history"]["calls"]
+                )
+            ),
+            None,
+        )
+        assert run_read is not None, reader_run
+        assert get("/goals") == goals_before
+        assert all(
+            not call["committed_revision"] and not call["committed_event_id"]
+            for call in reader_run["calls"]
+        )
+
+    answer = re.sub(r"[`*_]", "", reply.lower())
+    assert "membership" in answer and "active" in answer
+    assert re.search(r"check(?:ed)?[ -]?out|borrow", answer)
+    assert re.search(rf"\boperator(?:\s+id)?[ :#]+{author['id']}\b", answer)
+    assert re.search(rf"\brun(?:\s+id)?[ :#]+{commit['run_id']}\b", answer)
+    assert re.search(
+        rf"\b(?:call(?:\s+sequence)?|sequence)[ :#]+{commit['sequence']}\b", answer
+    )
+    print(f"\nOwner's question\n{question}")
+    print(f"\nSigned-in operator B's reply\n{reply.strip()}")
+    print("\nVerified HTTP response excerpts")
+    print(
+        json.dumps(
+            {
+                history_path: {
+                    "revision_1_criteria": original["definition"]["success_criteria"],
+                    "revision_2_criteria": revised["definition"]["success_criteria"],
+                    "committing_call": commit,
+                    "activity_read": {
+                        "run_id": activity_read["run_id"],
+                        "sequence": activity_read["sequence"],
+                    },
+                },
+                f"/runs/{author_run['id']}": {
+                    "operator_id": author_run["operator_id"],
+                    "definition_grant": author_run["definition_grant"],
+                    "call": {
+                        key: author_call[key]
+                        for key in ("sequence", "tool", "outcome", "committed_revision")
+                    },
+                },
+                f"/runs/{reader_run['id']}": {
+                    "operator_id": reader_run["operator_id"],
+                    "granted_goal_id": reader_run["granted_goal_id"],
+                    "calls": [
+                        {
+                            key: call[key]
+                            for key in (
+                                "sequence",
+                                "tool",
+                                "outcome",
+                                "returned_history",
+                            )
+                        }
+                        for call in (activity_read, run_read)
+                    ],
+                },
+            },
+            indent=2,
+        )
+    )
+    print("B's run made no goal changes.")
+
+
 def _related_run_ids(history):
     return {item["run_id"] for item in history["timeline"] if item["kind"] == "call"}
 

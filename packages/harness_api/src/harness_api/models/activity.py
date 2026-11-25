@@ -11,6 +11,8 @@ type HarnessTool = Literal[
     "list_goals",
     "get_goal_tree",
     "get_goal_progress",
+    "get_goal_activity",
+    "get_run",
     "complete_goal",
     "create_goal",
     "revise_goal",
@@ -59,18 +61,69 @@ class GoalResultReference(TypedDict):
     decision: DecisionReference | None
 
 
-class RunCall(CallReference):
-    tool: HarnessTool
-    target_goal_id: int | None
-    target_revision: int | None
-    started_at: str
-    finished_at: str | None
+class CallReadReference(CallReference):
     outcome: CallOutcome
-    returned_goals: list[GoalResultReference] | None
     committed_event_id: int | None
     retrieved_event_id: int | None
     committed_revision: RevisionReference | None
     retrieved_revision: RevisionReference | None
+
+
+class RunReadReference(TypedDict):
+    run_id: int
+    outcome: RunOutcome
+    calls: list[CallReadReference]
+
+
+class CallActivity(CallReference):
+    kind: Literal["call"]
+    at: str
+    tool: HarnessTool
+    outcome: CallOutcome
+    relationship: CallRelationship
+
+
+class RevisionReadReference(TypedDict):
+    kind: Literal["revision"]
+    revision: int
+    committing_call: CallReference | None
+
+
+class ObservationReadReference(TypedDict):
+    kind: Literal["observation"]
+    evidence_id: int
+
+
+class DecisionReadReference(DecisionReference):
+    kind: Literal["decision"]
+    committing_call: CallReference | None
+
+
+type ActivityReadEntry = (
+    RevisionReadReference
+    | ObservationReadReference
+    | DecisionReadReference
+    | CallActivity
+)
+
+
+class ActivityReadReference(TypedDict):
+    goal_id: int
+    timeline: list[ActivityReadEntry]
+
+
+type HistoryReadReference = ActivityReadReference | RunReadReference
+
+
+class RunCall(CallReadReference):
+    tool: HarnessTool
+    target_goal_id: int | None
+    target_revision: int | None
+    target_run_id: int | None
+    started_at: str
+    finished_at: str | None
+    returned_goals: list[GoalResultReference] | None
+    returned_history: HistoryReadReference | None
 
 
 class OperatorRun(TypedDict):
@@ -87,12 +140,23 @@ class OperatorRun(TypedDict):
     calls: list[RunCall]
 
 
-class CallActivity(CallReference):
-    kind: Literal["call"]
-    at: str
-    tool: HarnessTool
-    outcome: CallOutcome
-    relationship: CallRelationship
+def run_read_reference(run: OperatorRun) -> RunReadReference:
+    return RunReadReference(
+        run_id=run["id"],
+        outcome=run["outcome"],
+        calls=[
+            CallReadReference(
+                run_id=call["run_id"],
+                sequence=call["sequence"],
+                outcome=call["outcome"],
+                committed_event_id=call["committed_event_id"],
+                retrieved_event_id=call["retrieved_event_id"],
+                committed_revision=call["committed_revision"],
+                retrieved_revision=call["retrieved_revision"],
+            )
+            for call in run["calls"]
+        ],
+    )
 
 
 class RunNotFoundError(LookupError):
@@ -150,7 +214,9 @@ def revision_reference(row: sqlite3.Row) -> RevisionReference | None:
     )
 
 
-def run_calls(connection: sqlite3.Connection, run_id: int) -> list[RunCall]:
+def run_calls(
+    connection: sqlite3.Connection, run_id: int, exclude_sequence: int | None
+) -> list[RunCall]:
     results: dict[int, list[GoalResultReference]] = defaultdict(list)
     for row in connection.execute(
         "SELECT * FROM run_call_goals WHERE run_id = ? ORDER BY sequence, position",
@@ -179,6 +245,7 @@ def run_calls(connection: sqlite3.Connection, run_id: int) -> list[RunCall]:
             tool=row["tool"],
             target_goal_id=row["target_goal_id"],
             target_revision=row["target_revision"],
+            target_run_id=row["target_run_id"],
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             outcome=row["outcome"],
@@ -191,7 +258,10 @@ def run_calls(connection: sqlite3.Connection, run_id: int) -> list[RunCall]:
             if row["revision_kind"] == "retrieved"
             else None,
             returned_goals=results[row["sequence"]]
-            if row["outcome"] == "returned"
+            if row["outcome"] == "returned" and row["returned_history"] is None
+            else None,
+            returned_history=json.loads(row["returned_history"])
+            if row["returned_history"] is not None
             else None,
         )
         for row in connection.execute(
@@ -199,15 +269,18 @@ def run_calls(connection: sqlite3.Connection, run_id: int) -> list[RunCall]:
             SELECT call.*, link.goal_id AS revision_goal_id, link.revision AS saved_revision,
                    link.kind AS revision_kind
             FROM run_calls AS call LEFT JOIN run_call_revisions AS link USING (run_id, sequence)
-            WHERE call.run_id = ? ORDER BY call.sequence
+            WHERE call.run_id = ? AND call.sequence IS NOT ? ORDER BY call.sequence
             """,
-            (run_id,),
+            (run_id, exclude_sequence),
         )
     ]
 
 
 def related_calls(
-    connection: sqlite3.Connection, goal_id: int, owner_id: int
+    connection: sqlite3.Connection,
+    goal_id: int,
+    owner_id: int,
+    exclude_call: CallReference | None,
 ) -> tuple[list[CallActivity], dict[int, CallReference], dict[int, CallReference]]:
     rows = connection.execute(
         """
@@ -230,6 +303,9 @@ def related_calls(
     decision_commits = {}
     revision_commits = {}
     for row in rows:
+        key = CallReference(run_id=row["run_id"], sequence=row["sequence"])
+        if key == exclude_call:
+            continue
         tool = row["tool"]
         if tool == "complete_goal":
             relationship = "completion_target"
@@ -243,7 +319,6 @@ def related_calls(
             relationship = "requested"
         else:
             relationship = "descendant"
-        key = CallReference(run_id=row["run_id"], sequence=row["sequence"])
         calls.append(
             CallActivity(
                 **key,

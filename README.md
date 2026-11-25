@@ -63,7 +63,7 @@ deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.m
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
 On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Version 10 upgrades workspaces from versions 7, 8 and 9 in
+`001_initial.sql`. Version 12 upgrades workspaces from versions 7 through 11 in
 place. Existing assignments keep their responsible operator and require an
 explicit grant for completion authority. Opening a pre-v7 or unrecognized
 workspace returns an error and leaves the file intact.
@@ -225,9 +225,10 @@ a creation or revision grant includes `definition_grant` with `id`, `operator_id
 `succeeded`, `failed`, or `unfinished`.
 A launch error, such as an existing trace file, marks the run `failed`.
 Calls are ordered by `sequence` and retain the requested goal ID and revision
-when supplied, including on denial. The call outcome is `returned`, `denied`,
-`failed`, or `unfinished`. A successful empty result has `returned_goals: []`.
-Calls without a returned result have `returned_goals: null`.
+or the requested run ID (`target_run_id`), including on denial. The call outcome
+is `returned`, `denied`, `failed`, or `unfinished`. A successful empty goal
+result has `returned_goals: []`. History reads use `returned_history`. A call
+without a returned result has both fields set to `null`.
 
 Each result reference retains its goal ID, revision and any returned status. `observation_ids`
 identifies observation records returned by a progress call. A result's `decision`
@@ -246,8 +247,23 @@ return the current revision without a commit. Direct owner and HTTP revisions
 have `committing_call: null`, as do revisions saved before definition auditing.
 
 `operator goal history GOAL_ID` and `operator run show RUN_ID` return the same
-records through `GoalAPI.get_goal_activity` and `GoalAPI.get_run`. Audit capture
-covers Harness MCP calls during `operator ask`. It stores typed references and
+records through `GoalAPI.get_goal_activity` and `GoalAPI.get_run`. Advisory and
+delegated `operator ask` sessions can use these queries through the read-only
+MCP tools `get_goal_activity` and `get_run`, including for other operators'
+runs in the same workspace. A standalone MCP server without a recorded run
+omits both tools from discovery and rejects direct calls to them.
+
+For `get_goal_activity`, `returned_history` contains the goal ID and ordered
+timeline references, including revision numbers and their committing calls,
+observation IDs, decision IDs and citations, and related call entries. For
+`get_run`, it contains the inspected run ID and its outcome, plus each call's
+run ID, sequence, outcome, and commit or retrieval references as returned at
+read time. For example, a saved read can show an `unfinished` call with a
+committed revision after the call itself becomes `returned`. The snapshot
+excludes the executing call. Inspecting an earlier history read exposes its
+saved references one level deep.
+
+Audit capture covers Harness MCP calls in recorded runs. It stores typed references and
 outcomes. Prompt text, raw tool arguments and results, and credentials are
 excluded. Direct CLI and HTTP reads fall outside capture. Owner reports entered
 through the CLI appear in the timeline with their original attribution.
@@ -266,5 +282,7 @@ same workspace to use the same SQLite database.
 
 Run `make test` for the offline suite and `make check` for lint and formatting.
 Run `make test-live` separately with Codex signed in. It populates temporary workspaces through
-the CLI, verifies plan and progress reads through MCP, and checks the replies.
+the CLI, verifies MCP reads and delegated writes, and checks the replies. The
+shared history test follows a revision to its committing call and a separate
+operator's history read over HTTP.
 Test teardown removes the workspace and its database even if an assertion fails.

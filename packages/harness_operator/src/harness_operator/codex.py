@@ -24,6 +24,10 @@ State when attribution or automatic assessment is unavailable.
 Use the returned records to answer. List each goal on its own line with its status
 and the relevant timing or evidence. Draft, active, and paused goals are open.
 Attribute completion statements according to their saved provenance.
+When goal history is relevant, use get_goal_activity to compare saved revisions
+and find a committing call. Use get_run with its run ID to identify the registered
+operator and verify the exact sequence and committed change. A change can be committed
+while the call outcome is unfinished. If asked why and no rationale was recorded, say so.
 If the tool fails, say that you could not retrieve the goals.
 """
 

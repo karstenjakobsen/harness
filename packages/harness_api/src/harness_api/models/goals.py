@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -16,17 +17,24 @@ from ..database import (
 )
 from . import GoalStatus
 from .activity import (
+    ActivityReadEntry,
+    ActivityReadReference,
     CallActivity,
     CallReference,
+    DecisionReadReference,
     DefinitionAction,
     DefinitionGrant,
     GoalResultReference,
     HarnessTool,
+    HistoryReadReference,
+    ObservationReadReference,
     OperatorRun,
+    RevisionReadReference,
     RevisionReference,
     related_calls,
     revision_reference,
     run_calls,
+    run_read_reference,
     run_record,
     run_row,
     save_result_references,
@@ -209,6 +217,39 @@ type ActivityEntry = (
 class GoalActivity(TypedDict):
     goal_id: int
     timeline: list[ActivityEntry]
+
+
+def _activity_read_reference(activity: GoalActivity) -> ActivityReadReference:
+    timeline: list[ActivityReadEntry] = []
+    for entry in activity["timeline"]:
+        if entry["kind"] == "revision":
+            timeline.append(
+                RevisionReadReference(
+                    kind="revision",
+                    revision=entry["definition"]["revision"],
+                    committing_call=entry["committing_call"],
+                )
+            )
+        elif entry["kind"] == "observation":
+            timeline.append(
+                ObservationReadReference(
+                    kind="observation", evidence_id=entry["observation"]["evidence_id"]
+                )
+            )
+        elif entry["kind"] == "decision":
+            decision = entry["decision"]
+            timeline.append(
+                DecisionReadReference(
+                    kind="decision",
+                    event_id=decision["event_id"],
+                    evidence_ids=decision["evidence_ids"],
+                    statement_evidence_id=decision.get("statement_evidence_id"),
+                    committing_call=entry["committing_call"],
+                )
+            )
+        else:
+            timeline.append(entry)
+    return ActivityReadReference(goal_id=activity["goal_id"], timeline=timeline)
 
 
 class GoalNotFoundError(LookupError):
@@ -559,14 +600,17 @@ class GoalAPI(WorkspaceDatabase):
             for row in rows
         ]
 
-    def get_goal_activity(self, goal_id: int) -> GoalActivity:
+    def get_goal_activity(
+        self, goal_id: int, *, call: CallReference | None = None
+    ) -> GoalActivity:
         """Read the owner-visible timeline in a consistent workspace snapshot."""
         with self._connection("ro") as connection:
             connection.execute("BEGIN")
             self._get_goal(connection, goal_id)
+            self._validate_history_call(connection, call, "get_goal_activity", goal_id)
             history = self._goal_history(connection, goal_id)
             calls, decision_commits, revision_commits = related_calls(
-                connection, goal_id, ADMIN_USER_ID
+                connection, goal_id, ADMIN_USER_ID, call
             )
         timeline: list[ActivityEntry] = list(calls)
         for revision in history:
@@ -648,12 +692,32 @@ class GoalAPI(WorkspaceDatabase):
                 (outcome, utc_timestamp(), run_id),
             )
 
-    def get_run(self, run_id: int) -> OperatorRun:
+    def get_run(self, run_id: int, *, call: CallReference | None = None) -> OperatorRun:
         _validate_positive_integer(run_id, "Run ID")
+        exclude_sequence = (
+            call["sequence"] if call is not None and call["run_id"] == run_id else None
+        )
         with self._connection("ro") as connection:
             connection.execute("BEGIN")
             row = run_row(connection, run_id, ADMIN_USER_ID)
-            return run_record(row, run_calls(connection, run_id))
+            self._validate_history_call(connection, call, "get_run", run_id)
+            return run_record(row, run_calls(connection, run_id, exclude_sequence))
+
+    def _validate_history_call(
+        self,
+        connection: sqlite3.Connection,
+        call: CallReference | None,
+        tool: Literal["get_goal_activity", "get_run"],
+        target_id: int,
+    ) -> None:
+        if call is None:
+            return
+        attempt = self._open_tool_call(connection, call)
+        target_field = "target_run_id" if tool == "get_run" else "target_goal_id"
+        if attempt["tool"] != tool or attempt[target_field] != target_id:
+            raise GoalValidationError(
+                "The history call does not match the requested target."
+            )
 
     def start_tool_call(
         self,
@@ -662,6 +726,7 @@ class GoalAPI(WorkspaceDatabase):
         *,
         target_goal_id: int | None = None,
         target_revision: int | None = None,
+        target_run_id: int | None = None,
     ) -> CallReference:
         _validate_positive_integer(run_id, "Run ID")
         if tool not in get_args(HarnessTool.__value__):
@@ -670,6 +735,10 @@ class GoalAPI(WorkspaceDatabase):
             _validate_positive_integer(target_goal_id, "Target goal ID")
         if target_revision is not None:
             _validate_positive_integer(target_revision, "Target revision")
+        if target_run_id is not None:
+            _validate_positive_integer(target_run_id, "Target run ID")
+            if tool != "get_run":
+                raise GoalValidationError("Only get_run can request a run ID.")
         with self._write() as connection:
             run = run_row(connection, run_id, ADMIN_USER_ID)
             if run["outcome"] != "unfinished":
@@ -681,9 +750,11 @@ class GoalAPI(WorkspaceDatabase):
             connection.execute(
                 """
                 INSERT INTO run_calls (
-                    run_id, sequence, tool, target_goal_id, target_revision, started_at, resolved_goal_id
+                    run_id, sequence, tool, target_goal_id, target_revision, target_run_id,
+                    started_at, resolved_goal_id
                 ) VALUES (
-                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :started_at,
+                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :target_run_id,
+                    :started_at,
                     (SELECT id FROM goals WHERE id = :target_goal_id
                         AND owner_user_id = :owner AND deleted_at IS NULL)
                 )
@@ -694,6 +765,7 @@ class GoalAPI(WorkspaceDatabase):
                     "tool": tool,
                     "target_goal_id": target_goal_id,
                     "target_revision": target_revision,
+                    "target_run_id": target_run_id,
                     "started_at": utc_timestamp(),
                     "owner": run["owner_user_id"],
                 },
@@ -706,23 +778,84 @@ class GoalAPI(WorkspaceDatabase):
         outcome: Literal["returned", "denied", "failed"],
         *,
         returned_goals: list[GoalResultReference] | None = None,
+        history_result: GoalActivity | OperatorRun | None = None,
     ) -> None:
-        if outcome not in ("returned", "denied", "failed") or (
+        result_count = int(returned_goals is not None) + int(history_result is not None)
+        if outcome not in ("returned", "denied", "failed") or result_count != int(
             outcome == "returned"
-        ) != (returned_goals is not None):
+        ):
             raise GoalValidationError("A returned call requires result references.")
         with self._write() as connection:
             attempt = self._open_tool_call(connection, call)
+            history_reference = None
+            if outcome == "returned" and (
+                (attempt["tool"] in ("get_goal_activity", "get_run"))
+                != (history_result is not None)
+            ):
+                raise GoalValidationError("The result type must match the tool call.")
+            if history_result is not None:
+                history_reference = self._history_read_reference(
+                    connection, attempt, history_result
+                )
             if returned_goals is not None:
                 self._validate_tool_result(connection, attempt, returned_goals)
                 save_result_references(connection, call, returned_goals)
             connection.execute(
                 """
-                UPDATE run_calls SET outcome = :outcome, finished_at = :finished_at
+                UPDATE run_calls SET outcome = :outcome, finished_at = :finished_at,
+                    returned_history = :returned_history
                 WHERE run_id = :run_id AND sequence = :sequence
                 """,
-                dict(call, outcome=outcome, finished_at=utc_timestamp()),
+                dict(
+                    call,
+                    outcome=outcome,
+                    finished_at=utc_timestamp(),
+                    returned_history=json.dumps(
+                        history_reference, separators=(",", ":")
+                    )
+                    if history_reference is not None
+                    else None,
+                ),
             )
+
+    @staticmethod
+    def _history_read_reference(
+        connection: sqlite3.Connection,
+        attempt: sqlite3.Row,
+        history: GoalActivity | OperatorRun,
+    ) -> HistoryReadReference:
+        reference: HistoryReadReference
+        calls: Iterable[CallReference]
+        if (
+            "goal_id" not in history
+            and attempt["tool"] == "get_run"
+            and attempt["target_run_id"] == history["id"]
+        ):
+            run_row(connection, history["id"], ADMIN_USER_ID)
+            reference = run_read_reference(history)
+            calls = reference["calls"]
+        elif (
+            "id" not in history
+            and attempt["tool"] == "get_goal_activity"
+            and attempt["target_goal_id"] == history["goal_id"]
+            and connection.execute(
+                "SELECT 1 FROM goals WHERE id = ? AND owner_user_id = ?",
+                (history["goal_id"], ADMIN_USER_ID),
+            ).fetchone()
+        ):
+            reference = _activity_read_reference(history)
+            calls = (item for item in reference["timeline"] if item["kind"] == "call")
+        else:
+            raise GoalValidationError(
+                "The history result must match the requested target."
+            )
+        if any(
+            item["run_id"] == attempt["run_id"]
+            and item["sequence"] == attempt["sequence"]
+            for item in calls
+        ):
+            raise GoalValidationError("A history result cannot include its own call.")
+        return reference
 
     @staticmethod
     def _validate_tool_result(

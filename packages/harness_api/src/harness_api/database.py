@@ -8,7 +8,7 @@ from typing import Literal
 
 DATABASE_PATH = Path(".harness/goals.sqlite3")
 ADMIN_USER_ID = 1
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def utc_timestamp() -> str:
@@ -46,7 +46,7 @@ class WorkspaceDatabase:
             (version,) = connection.execute("PRAGMA user_version").fetchone()
             if version == SCHEMA_VERSION:
                 return
-            if version not in (0, 7, 8, 9, 10) or (
+            if version not in (0, 7, 8, 9, 10, 11) or (
                 version == 0
                 and connection.execute(
                     "SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
@@ -54,7 +54,7 @@ class WorkspaceDatabase:
             ):
                 raise self.storage_error(
                     f"Cannot open workspace schema version {version}. "
-                    f"Use a version 7 through 10 workspace or a fresh database for schema version {SCHEMA_VERSION}."
+                    f"Use a version 7 through 11 workspace or a fresh database for schema version {SCHEMA_VERSION}."
                 )
             snapshot = (
                 files("harness_api")
@@ -68,7 +68,9 @@ class WorkspaceDatabase:
                 self._upgrade_v7(connection, snapshot)
             if version == 9:
                 self._upgrade_v9(connection)
-            if version >= 9:
+            if version == 11:
+                self._upgrade_run_calls(connection, snapshot, has_revision_links=True)
+            elif version >= 9:
                 self._upgrade_v10(connection, snapshot)
             else:
                 self._upgrade_v8(connection, snapshot)
@@ -143,17 +145,33 @@ class WorkspaceDatabase:
         definition_grant_schema = snapshot.split(
             "-- Begin definition grant schema\n", 1
         )[1].split("-- End definition grant schema\n", 1)[0]
-        run_call_schema = snapshot.split("-- Begin run call schema\n", 1)[1].split(
-            "-- End run call schema\n", 1
-        )[0]
         connection.executescript(definition_grant_schema)
-        # Rebuild the calls and their dependent results to widen the tool constraint.
         connection.executescript("""
             ALTER TABLE operator_runs ADD COLUMN definition_grant_id INTEGER
                 REFERENCES goal_definition_grants(id)
                 CHECK (definition_grant_id IS NULL OR completion_grant_id IS NULL);
-            ALTER TABLE run_call_goals RENAME TO v10_run_call_goals;
-            ALTER TABLE run_calls RENAME TO v10_run_calls;
+        """)
+        WorkspaceDatabase._upgrade_run_calls(
+            connection, snapshot, has_revision_links=False
+        )
+
+    @staticmethod
+    def _upgrade_run_calls(
+        connection: sqlite3.Connection, snapshot: str, *, has_revision_links: bool
+    ) -> None:
+        # Rebuild the calls and their dependent tables to widen the tool constraint.
+        run_call_schema = snapshot.split("-- Begin run call schema\n", 1)[1].split(
+            "-- End run call schema\n", 1
+        )[0]
+        if has_revision_links:
+            connection.executescript("""
+                ALTER TABLE run_call_revisions RENAME TO previous_run_call_revisions;
+                DROP INDEX one_committing_call_per_revision;
+                DROP INDEX run_call_revisions_by_goal;
+            """)
+        connection.executescript("""
+            ALTER TABLE run_call_goals RENAME TO previous_run_call_goals;
+            ALTER TABLE run_calls RENAME TO previous_run_calls;
             DROP INDEX run_calls_by_resolved_goal;
             DROP INDEX run_call_goals_by_goal;
         """)
@@ -164,16 +182,22 @@ class WorkspaceDatabase:
                 finished_at, outcome, committed_event_id, retrieved_event_id, resolved_goal_id
             ) SELECT run_id, sequence, tool, target_goal_id, target_revision, started_at,
                 finished_at, outcome, committed_event_id, retrieved_event_id, resolved_goal_id
-            FROM v10_run_calls;
+            FROM previous_run_calls;
             INSERT INTO run_call_goals (
                 run_id, sequence, position, goal_id, revision, status, observation_ids,
                 decision_event_id, cited_evidence_ids, statement_evidence_id
             ) SELECT run_id, sequence, position, goal_id, revision, status, observation_ids,
                      decision_event_id, cited_evidence_ids, statement_evidence_id
-            FROM v10_run_call_goals;
-            DROP TABLE v10_run_call_goals;
-            DROP TABLE v10_run_calls;
+            FROM previous_run_call_goals;
+            DROP TABLE previous_run_call_goals;
         """)
+        if has_revision_links:
+            connection.executescript("""
+                INSERT INTO run_call_revisions (run_id, sequence, goal_id, revision, kind)
+                SELECT run_id, sequence, goal_id, revision, kind FROM previous_run_call_revisions;
+                DROP TABLE previous_run_call_revisions;
+            """)
+        connection.execute("DROP TABLE previous_run_calls")
 
     @contextmanager
     def _connection(

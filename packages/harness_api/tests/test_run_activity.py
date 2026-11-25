@@ -35,6 +35,49 @@ def test_denied_read_does_not_attach_to_goal_created_later(tmp_path):
     assert revision["kind"] == "revision"
 
 
+def test_history_reads_can_exclude_only_the_matching_unfinished_call(tmp_path):
+    api = GoalAPI(tmp_path / "goals.db")
+    goal_id = api.create_goal("Library")["id"]
+    other_goal = api.create_goal("Other")["id"]
+    run_id = api.start_run()["id"]
+    other_run = api.start_run()["id"]
+    goal_call = api.start_tool_call(run_id, "get_goal_activity", target_goal_id=goal_id)
+    run_call = api.start_tool_call(run_id, "get_run", target_run_id=run_id)
+
+    with pytest.raises(GoalValidationError):
+        api.get_goal_activity(goal_id, call=run_call)
+    with pytest.raises(GoalValidationError):
+        api.get_goal_activity(other_goal, call=goal_call)
+    with pytest.raises(GoalValidationError):
+        api.get_run(other_run, call=run_call)
+
+    snapshot = api.get_run(run_id, call=run_call)
+    assert [item["sequence"] for item in snapshot["calls"]] == [goal_call["sequence"]]
+    api.finish_tool_call(run_call, "returned", history_result=snapshot)
+    with pytest.raises(GoalValidationError):
+        api.get_run(run_id, call=run_call)
+
+
+def test_finished_history_read_cannot_record_its_own_call_as_returned(tmp_path):
+    api = GoalAPI(tmp_path / "goals.db")
+    goal_id = api.create_goal("Library")["id"]
+    run_id = api.start_run()["id"]
+    goal_call = api.start_tool_call(run_id, "get_goal_activity", target_goal_id=goal_id)
+    run_call = api.start_tool_call(run_id, "get_run", target_run_id=run_id)
+
+    for call, history in (
+        (goal_call, api.get_goal_activity(goal_id)),
+        (run_call, api.get_run(run_id)),
+    ):
+        with pytest.raises(GoalValidationError):
+            api.finish_tool_call(call, "returned", history_result=history)
+
+    assert [call["outcome"] for call in api.get_run(run_id)["calls"]] == [
+        "unfinished",
+        "unfinished",
+    ]
+
+
 def test_completion_attempt_commit_and_delivery_are_independent(tmp_path):
     path = tmp_path / "goals.db"
     api = GoalAPI(path)
@@ -267,7 +310,7 @@ def test_upgrade_v8_keeps_delegated_decision_and_citation_without_run_attributio
     GoalAPI(path)
     reopened = GoalAPI(path)
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (11,)
+        assert db.execute("PRAGMA user_version").fetchone() == (12,)
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
     assert reopened.get_goal(23)["parent_goal_id"] == 22
     assert reopened.get_completion_grant(24) == {
@@ -299,7 +342,7 @@ def test_upgrade_v8_keeps_delegated_decision_and_citation_without_run_attributio
     assert last["decision"] == decision and last["committing_call"] is None
 
 
-@pytest.mark.parametrize("version", [9, 10])
+@pytest.mark.parametrize("version", [9, 10, 11])
 def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
     path = tmp_path / "goals.db"
     snapshot = Path(__file__).with_name("fixtures") / f"schema_v{version}.sql"
@@ -337,10 +380,24 @@ def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
             INSERT INTO run_call_goals (run_id, sequence, position, goal_id, revision, status, observation_ids)
             VALUES (2, 1, 0, 2, 1, 'active', '[1]');
         """)
-        if version == 10:
+        if version >= 10:
             db.execute(
                 "UPDATE run_calls SET resolved_goal_id = 2 WHERE run_id IN (2, 3)"
             )
+        if version == 11:
+            db.executescript("""
+                INSERT INTO goal_revisions (goal_id, revision, title, created_at)
+                VALUES (1, 2, 'Revised parent', '2025-01-01 10:00:10');
+                INSERT INTO goal_definition_grants (id, operator_id, goal_id, action, granted_at)
+                VALUES (1, 1, 1, 'revise_goal', '2025-01-01 10:00:09');
+                INSERT INTO operator_runs (id, owner_user_id, definition_grant_id, started_at)
+                VALUES (4, 1, 1, '2025-01-01 10:00:10');
+                INSERT INTO run_calls (run_id, sequence, tool, target_goal_id, target_revision,
+                                       started_at, resolved_goal_id)
+                VALUES (4, 1, 'revise_goal', 1, 1, '2025-01-01 10:00:10', 1);
+                INSERT INTO run_call_revisions (run_id, sequence, goal_id, revision, kind)
+                VALUES (4, 1, 1, 2, 'committed');
+            """)
 
     GoalAPI(path)
     reopened = GoalAPI(path)
@@ -369,6 +426,23 @@ def test_upgrade_keeps_confirmed_goal_relationships(tmp_path, version):
     assert revision["committing_call"] is None
     assert decision["decision"]["evidence_ids"] == [1]
     assert decision["committing_call"] == {"run_id": 3, "sequence": 1}
+    if version == 11:
+        run = reopened.get_run(4)
+        assert run["definition_grant"] == {
+            "id": 1,
+            "operator_id": 1,
+            "action": "revise_goal",
+            "goal_id": 1,
+        }
+        (call,) = run["calls"]
+        assert call["committed_revision"] == {"goal_id": 1, "revision": 2}
+        assert call["returned_history"] is None and call["target_run_id"] is None
+        revisions = [
+            entry
+            for entry in reopened.get_goal_activity(1)["timeline"]
+            if entry["kind"] == "revision"
+        ]
+        assert revisions[1]["committing_call"] == {"run_id": 4, "sequence": 1}
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (11,)
+        assert db.execute("PRAGMA user_version").fetchone() == (12,)
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []

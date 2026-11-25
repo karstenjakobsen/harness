@@ -158,11 +158,15 @@ CREATE TABLE run_calls (
     run_id INTEGER NOT NULL REFERENCES operator_runs(id),
     sequence INTEGER NOT NULL CHECK (sequence > 0),
     tool TEXT NOT NULL CHECK (tool IN (
-        'list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal', 'create_goal', 'revise_goal'
+        'list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal', 'create_goal', 'revise_goal',
+        'get_goal_activity', 'get_run'
     )),
     -- Requested IDs can be invalid or belong to a different owner.
     target_goal_id INTEGER CHECK (target_goal_id > 0),
     target_revision INTEGER CHECK (target_revision > 0),
+    target_run_id INTEGER CHECK (
+        target_run_id IS NULL OR (target_run_id > 0 AND tool = 'get_run')
+    ),
     started_at TEXT NOT NULL,
     finished_at TEXT,
     outcome TEXT NOT NULL DEFAULT 'unfinished'
@@ -171,7 +175,10 @@ CREATE TABLE run_calls (
     retrieved_event_id INTEGER,
     resolved_goal_id INTEGER REFERENCES goals(id)
         CHECK (resolved_goal_id IS NULL OR resolved_goal_id IS target_goal_id),
+    returned_history TEXT CHECK (json_type(returned_history) = 'object'),
     CHECK ((outcome = 'unfinished') = (finished_at IS NULL)),
+    CHECK ((returned_history IS NOT NULL) =
+        (outcome = 'returned' AND tool IN ('get_goal_activity', 'get_run'))),
     CHECK ((committed_event_id IS NOT NULL) + (retrieved_event_id IS NOT NULL) <= 1),
     CHECK ((committed_event_id IS NULL AND retrieved_event_id IS NULL) OR
         (tool = 'complete_goal' AND target_goal_id IS NOT NULL)),
@@ -228,4 +235,4 @@ CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
-PRAGMA user_version = 11;
+PRAGMA user_version = 12;

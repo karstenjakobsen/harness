@@ -57,6 +57,14 @@ async def test_server_initializes_an_empty_goal_list(client, tmp_path):
     result = await client.call_tool("list_goals", {})
     assert result.structuredContent == {"goals": []}
     assert (tmp_path / DATABASE_PATH).is_file()
+    api = GoalAPI(tmp_path / DATABASE_PATH)
+    goal = api.create_goal("Visible goal")
+    run = api.start_run()
+    assert (
+        await client.call_tool("get_goal_activity", {"goal_id": goal["id"]})
+    ).isError
+    assert (await client.call_tool("get_run", {"run_id": run["id"]})).isError
+    assert api.get_run(run["id"])["calls"] == []
 
 
 @pytest.mark.anyio
@@ -390,6 +398,191 @@ async def test_progress_returns_selected_model_assessment(client, tmp_path):
         "get_goal_progress", {"goal_id": goal_id, "revision": True}
     )
     assert invalid.isError
+
+
+@pytest.mark.anyio
+async def test_history_reads_keep_the_state_seen_by_another_operator(tmp_path):
+    path = tmp_path / DATABASE_PATH
+    api = GoalAPI(path)
+    operators = OperatorAPI(path)
+    author = operators.register_operator("Author")
+    reviewer = operators.register_operator("Reviewer")
+    goal_id = api.create_goal("Library", success_criteria="Membership is active")["id"]
+    other = api.create_goal("Other subgoal", parent_goal_id=goal_id)["id"]
+    report = api.record_observation(
+        goal_id, confirmation="Verified", retry_key="report"
+    )
+    revision_grant = api.grant_definition("revise_goal", author["id"], goal_id=goal_id)
+    completion_grant = api.grant_completion(other, reviewer["id"])
+    author_run = api.start_run(definition_grant_id=revision_grant["id"])["id"]
+    committing_call = api.start_tool_call(
+        author_run, "revise_goal", target_goal_id=goal_id, target_revision=1
+    )
+    revised = api.revise_delegated_goal(
+        goal_id,
+        1,
+        call=committing_call,
+        success_criteria="Membership and first checkout",
+    )
+    reader_run = api.start_run(completion_grant["id"])["id"]
+    activity_url = f"/goals/{goal_id}/history?view=activity"
+
+    def get(url):
+        return http.get(url).raise_for_status().json()
+
+    with TestClient(create_app(path)) as http:
+        activity = get(activity_url)
+        author_snapshot = get(f"/runs/{author_run}")
+        assert author_snapshot["outcome"] == "unfinished"
+        (before,) = author_snapshot["calls"]
+        assert before["outcome"] == "unfinished" and before["returned_goals"] is None
+        assert before["committed_revision"] == {"goal_id": goal_id, "revision": 2}
+
+        async with workspace_client(
+            tmp_path,
+            "--run-id",
+            str(reader_run),
+            "--completion-grant",
+            str(completion_grant["id"]),
+        ) as session:
+            tools = await session.list_tools()
+            assert {
+                tool.name for tool in tools.tools if tool.annotations.readOnlyHint
+            } >= {"get_goal_activity", "get_run"}
+            result = await session.call_tool("get_run", {"run_id": reader_run})
+            assert result.structuredContent["calls"] == []
+            result = await session.call_tool("get_goal_activity", {"goal_id": goal_id})
+            assert result.structuredContent == activity
+            result = await session.call_tool("get_run", {"run_id": author_run})
+            assert result.structuredContent == author_snapshot
+            result = await session.call_tool(
+                "revise_goal",
+                {"goal_id": goal_id, "expected_revision": 2, "title": "Denied"},
+            )
+            assert result.isError
+
+        api.finish_run(reader_run, "succeeded")
+        api.finish_tool_call(
+            committing_call,
+            "returned",
+            returned_goals=[revised | {"observation_ids": [], "decision": None}],
+        )
+        api.finish_run(author_run, "succeeded")
+        timeline = get(activity_url)["timeline"]
+        revision = next(
+            item
+            for item in timeline
+            if item["kind"] == "revision" and item["definition"]["revision"] == 2
+        )
+        assert revision["committing_call"] == committing_call
+        author_record = get(f"/runs/{revision['committing_call']['run_id']}")
+        assert author_record["operator_id"] == author["id"]
+        assert author_record["outcome"] == "succeeded"
+        (after,) = author_record["calls"]
+        assert after["outcome"] == "returned"
+        assert after["committed_revision"] == before["committed_revision"]
+
+        (activity_entry,) = [
+            item for item in timeline if item.get("tool") == "get_goal_activity"
+        ]
+        reader_record = get(f"/runs/{activity_entry['run_id']}")
+        assert reader_record["operator_id"] == reviewer["id"]
+        self_read, activity_read, run_read, denial = reader_record["calls"]
+        assert self_read["returned_history"] == {
+            "run_id": reader_run,
+            "outcome": "unfinished",
+            "calls": [],
+        }
+        assert activity_read["sequence"] == activity_entry["sequence"]
+        assert activity_read["target_goal_id"] == goal_id
+        assert activity_read["returned_history"] == {
+            "goal_id": goal_id,
+            "timeline": [
+                {"kind": "revision", "revision": 1, "committing_call": None},
+                {"kind": "observation", "evidence_id": report["evidence_id"]},
+                next(item for item in activity["timeline"] if item["kind"] == "call"),
+                {"kind": "revision", "revision": 2, "committing_call": committing_call},
+            ],
+        }
+        assert run_read["target_run_id"] == author_run
+        assert run_read["returned_history"] == {
+            "run_id": author_run,
+            "outcome": "unfinished",
+            "calls": [
+                committing_call
+                | {
+                    "outcome": "unfinished",
+                    "committed_revision": {"goal_id": goal_id, "revision": 2},
+                    "retrieved_revision": None,
+                    "committed_event_id": None,
+                    "retrieved_event_id": None,
+                }
+            ],
+        }
+        assert denial["outcome"] == "denied" and denial["committed_revision"] is None
+        assert api.get_goal(goal_id)["revision"] == 2
+        assert api.get_goal(other)["completion"] is None
+
+        audit_run = api.start_run()["id"]
+        async with workspace_client(tmp_path, "--run-id", str(audit_run)) as session:
+            tools = await session.list_tools()
+            assert {tool.name for tool in tools.tools} >= {
+                "get_goal_activity",
+                "get_run",
+            }
+            result = await session.call_tool("get_run", {"run_id": reader_run})
+            assert result.structuredContent == reader_record
+            result = await session.call_tool("get_run", {"run_id": author_run})
+            assert result.structuredContent == author_record
+        inspection, latest = get(f"/runs/{audit_run}")["calls"]
+        saved_calls = inspection["returned_history"]["calls"]
+        assert [call["sequence"] for call in saved_calls] == [1, 2, 3, 4]
+        assert all("returned_history" not in call for call in saved_calls)
+        assert latest["returned_history"]["outcome"] == "succeeded"
+        assert latest["returned_history"]["calls"][0]["outcome"] == "returned"
+        saved_call = run_read["returned_history"]["calls"][0]
+        print(
+            f"\nMCP snapshot verified over HTTP. Run {author_run}, "
+            f"call {after['sequence']} now shows {after['outcome']}."
+        )
+        print(
+            f"B's earlier read in run {reader_run}, call {run_read['sequence']} "
+            f"still shows A's run and call as {run_read['returned_history']['outcome']} "
+            f"and {saved_call['outcome']} with revision "
+            f"{saved_call['committed_revision']['revision']} committed."
+        )
+        print(
+            f"B's direct revise_goal in call {denial['sequence']} was "
+            f"{denial['outcome']}. The library goal remained at revision 2."
+        )
+
+
+@pytest.mark.anyio
+async def test_history_reads_audit_foreign_targets_without_exposing_records(tmp_path):
+    path = tmp_path / DATABASE_PATH
+    api = GoalAPI(path)
+    reader_run = api.start_run()["id"]
+    with closing(sqlite3.connect(path, autocommit=True)) as db:
+        db.executescript("""
+            INSERT INTO users (id, username, display_name) VALUES (2, 'other', 'Other');
+            INSERT INTO goals (id, owner_user_id) VALUES (2, 2);
+            INSERT INTO operator_runs (id, owner_user_id, started_at)
+            VALUES (2, 2, '2025-01-01 10:00:00');
+        """)
+    async with workspace_client(tmp_path, "--run-id", str(reader_run)) as session:
+        for tool, target in (("get_goal_activity", "goal_id"), ("get_run", "run_id")):
+            result = await session.call_tool(tool, {target: 2})
+            assert result.isError and result.structuredContent is None
+        result = await session.call_tool("get_run", {"run_id": 999})
+        assert result.isError and result.structuredContent is None
+    goal_read, run_read, missing_run_read = api.get_run(reader_run)["calls"]
+    assert goal_read["target_goal_id"] == 2 and goal_read["target_run_id"] is None
+    assert run_read["target_run_id"] == 2 and run_read["target_goal_id"] is None
+    assert missing_run_read["target_run_id"] == 999
+    assert all(
+        call["outcome"] == "denied" and call["returned_history"] is None
+        for call in (goal_read, run_read, missing_run_read)
+    )
 
 
 @pytest.mark.anyio

@@ -16,7 +16,10 @@ Add `--help` to any command or group to see its options.
 | `operator ask --definition-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can create top-level goals or revise one goal, as specified by the active grant. |
 
 Today, `operator ask` can read goals with `list_goals`, `get_goal_tree` and
-`get_goal_progress`. It can weigh the evidence, suggest completion or ask what
+`get_goal_progress`. Advisory and delegated sessions can inspect goal timelines
+and earlier runs with `get_goal_activity` and `get_run`. Both tools require a
+recorded run and save references to the records they expose.
+The assistant can weigh the evidence, suggest completion or ask what
 is missing. To act on its advice, the local owner uses `operator goal complete`.
 Named registration creates a workspace record. Ordinary ask sessions remain advisory.
 
@@ -116,5 +119,5 @@ operator goal create --title "Track food" --duration-days 7
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
-| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, and creation and revision history. |
+| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, and one operator inspecting another's revision. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |
