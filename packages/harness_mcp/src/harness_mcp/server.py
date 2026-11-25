@@ -15,11 +15,16 @@ from mcp.types import (
 from pydantic import Field, ValidationError
 
 from harness_api import (
+    AssessmentType,
     CallReference,
     DecisionReference,
     DelegatedCompletion,
+    DelegatedGoalResult,
     GoalAPI,
     GoalConflictError,
+    GoalCreationStatus,
+    GoalDefinitionChanges,
+    GoalDuration,
     GoalNotFoundError,
     GoalProgress,
     GoalResultReference,
@@ -34,6 +39,7 @@ from harness_api import (
 
 PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
 HARNESS_TOOLS = get_args(HarnessTool.__value__)
+WRITE_TOOLS = ("complete_goal", "create_goal", "revise_goal")
 
 
 class GoalList(TypedDict):
@@ -43,6 +49,7 @@ class GoalList(TypedDict):
 @dataclass
 class _Invocation:
     call: CallReference
+    supplied_fields: frozenset[str]
     error_outcome: Literal["denied", "failed"] = "failed"
 
 
@@ -90,9 +97,9 @@ def _result_references(
         GoalResultReference(
             goal_id=result["goal_id"],
             revision=result["revision"],
-            status=None,
+            status=result.get("status"),
             observation_ids=[],
-            decision=_decision_reference(result),
+            decision=_decision_reference(result) if tool == "complete_goal" else None,
         )
     ]
 
@@ -114,20 +121,18 @@ class HarnessServer(FastMCP):
                 return await dispatch(request)
             tool = cast(HarnessTool, request.params.name)
             arguments = request.params.arguments or {}
-            revision_field = (
-                "expected_revision" if tool == "complete_goal" else "revision"
-            )
+            revision_field = "expected_revision" if tool in WRITE_TOOLS else "revision"
             call = api.start_tool_call(
                 run_id,
                 tool,
                 target_goal_id=_positive_id(arguments.get("goal_id"))
-                if tool != "list_goals"
+                if tool not in ("list_goals", "create_goal")
                 else None,
                 target_revision=_positive_id(arguments.get(revision_field))
-                if tool in ("complete_goal", "get_goal_progress")
+                if tool in ("complete_goal", "revise_goal", "get_goal_progress")
                 else None,
             )
-            invocation = _Invocation(call)
+            invocation = _Invocation(call, frozenset(arguments))
             token = self._invocation.set(invocation)
             try:
                 response = await dispatch(request)
@@ -151,24 +156,24 @@ class HarnessServer(FastMCP):
     async def list_tools(self) -> list[Tool]:
         tools = await super().list_tools()
         for tool in tools:
-            if tool.name == "complete_goal":
+            if tool.name in WRITE_TOOLS:
                 tool.inputSchema["additionalProperties"] = False
         return tools
 
     async def call_tool(self, name: str, arguments: dict[str, object]):
         # FastMCP's default argument model ignores unknown fields.
         try:
-            if name == "complete_goal":
+            if name in WRITE_TOOLS:
                 tool = next(
                     (tool for tool in await self.list_tools() if tool.name == name),
                     None,
                 )
-                if tool is None:
-                    raise ToolError("Completion is unavailable in this session.")
+                if tool is None or self._invocation.get() is None:
+                    raise ToolError(f"{name} is unavailable in this session.")
                 extras = arguments.keys() - tool.inputSchema["properties"].keys()
                 if extras:
                     raise ToolError(
-                        f"Unexpected completion fields: {', '.join(sorted(extras))}"
+                        f"Unexpected {name} fields: {', '.join(sorted(extras))}"
                     )
             return await super().call_tool(name, arguments)
         except ToolError as error:
@@ -188,17 +193,44 @@ class HarnessServer(FastMCP):
                 invocation.error_outcome = "denied"
             raise
 
+    def write_invocation(self) -> _Invocation:
+        invocation = self._invocation.get()
+        if invocation is None:
+            raise ToolError("An audited invocation is required for a goal write.")
+        return invocation
+
+
+def _definition_fields(
+    invocation: _Invocation, values: dict[str, Any]
+) -> GoalDefinitionChanges:
+    return cast(
+        GoalDefinitionChanges,
+        {
+            field: values[field]
+            for field in GoalDefinitionChanges.__optional_keys__
+            & invocation.supplied_fields
+        },
+    )
+
 
 def create_server(
     api: GoalAPI,
     completion_grant_id: int | None = None,
     *,
     run_id: int | None = None,
+    definition_grant_id: int | None = None,
 ) -> FastMCP:
+    if run_id is None and (
+        completion_grant_id is not None or definition_grant_id is not None
+    ):
+        raise GoalValidationError("A grant requires a recorded run.")
     if run_id is not None:
         run = api.get_run(run_id)
+        definition_grant = run["definition_grant"]
         if (
             run["completion_grant_id"] != completion_grant_id
+            or (definition_grant["id"] if definition_grant else None)
+            != definition_grant_id
             or run["outcome"] != "unfinished"
         ):
             raise GoalValidationError("The run does not match this session.")
@@ -249,15 +281,70 @@ def create_server(
             rationale: str,
         ) -> DelegatedCompletion:
             """Complete the assigned subgoal using existing evidence when you judge it sufficient."""
-            invocation = server._invocation.get()
             return api.complete_goal(
                 goal_id,
                 expected_revision,
                 completion_grant_id=grant["id"],
                 evidence_ids=evidence_ids,
                 rationale=rationale,
-                call=invocation.call if invocation is not None else None,
+                call=server.write_invocation().call,
             )
+
+    if definition_grant_id is not None:
+        definition_grant = api.get_definition_grant(definition_grant_id)
+        if definition_grant["action"] == "create_goal":
+
+            @server.tool(
+                annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True)
+            )
+            def create_goal(
+                title: str,
+                retry_key: str,
+                status: GoalCreationStatus = "draft",
+                desired_outcome: str | None = None,
+                duration: GoalDuration | None = None,
+                duration_days: PositiveInteger | None = None,
+                assessment_type: AssessmentType | None = None,
+                success_criteria: str | None = None,
+                measurement_plan: str | None = None,
+                target_distinct_dates: PositiveInteger | None = None,
+                window_start: str | None = None,
+            ) -> DelegatedGoalResult:
+                """Save one top-level goal definition. Reuse the same key and input to retry."""
+                invocation = server.write_invocation()
+                return api.create_delegated_goal(
+                    title,
+                    call=invocation.call,
+                    retry_key=retry_key,
+                    status=status,
+                    **_definition_fields(invocation, locals()),
+                )
+
+        else:
+
+            @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+            def revise_goal(
+                goal_id: PositiveInteger,
+                expected_revision: PositiveInteger,
+                title: str | None = None,
+                desired_outcome: str | None = None,
+                duration: GoalDuration | None = None,
+                duration_days: PositiveInteger | None = None,
+                assessment_type: AssessmentType | None = None,
+                success_criteria: str | None = None,
+                measurement_plan: str | None = None,
+                target_distinct_dates: PositiveInteger | None = None,
+                window_start: str | None = None,
+            ) -> DelegatedGoalResult:
+                """Revise the granted goal. Omit fields to preserve them or send null to clear a nullable definition field."""
+                invocation = server.write_invocation()
+                return api.revise_delegated_goal(
+                    goal_id,
+                    expected_revision,
+                    call=invocation.call,
+                    title=title,
+                    **_definition_fields(invocation, locals()),
+                )
 
     return server
 
@@ -265,11 +352,15 @@ def create_server(
 def main() -> None:
     parser = ArgumentParser(description="Serve workspace goals over MCP stdio.")
     parser.add_argument("--completion-grant", type=int)
+    parser.add_argument("--definition-grant", type=int)
     parser.add_argument("--run-id", type=int)
     args = parser.parse_args()
     try:
         server = create_server(
-            GoalAPI(local_owner=False), args.completion_grant, run_id=args.run_id
+            GoalAPI(local_owner=False),
+            args.completion_grant,
+            run_id=args.run_id,
+            definition_grant_id=args.definition_grant,
         )
     except (GoalValidationError, RunNotFoundError, WorkspaceStorageError) as error:
         parser.exit(1, f"harness_mcp: {error}\n")

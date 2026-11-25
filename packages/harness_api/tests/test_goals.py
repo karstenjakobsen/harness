@@ -263,6 +263,18 @@ def test_invalid_definition_returns_validation_error_without_writing(tmp_path, c
     assert len(api.list_goals()) == 1
 
 
+def test_ellipsis_is_an_omission_marker_only_for_owner_updates(tmp_path):
+    api = GoalAPI(tmp_path / "goals.sqlite3")
+    goal = api.create_goal("Log meals", duration_days=7, measurement_plan="Review log")
+    with pytest.raises(GoalValidationError, match="Duration in days"):
+        api.create_goal("Invalid", duration_days=...)
+    updated = api.update_goal(goal["id"], duration_days=..., measurement_plan=None)
+    assert updated["duration_days"] == 7
+    assert updated["measurement_plan"] is None
+    assert updated["revision"] == 2
+    assert len(api.list_goals()) == 1
+
+
 @pytest.mark.parametrize("status", ["typo", ""])
 def test_unknown_status_is_an_invalid_filter(tmp_path, status):
     api = GoalAPI(tmp_path / "goals.sqlite3")

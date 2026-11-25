@@ -139,3 +139,62 @@ def test_launcher_records_nonzero_exit_and_start_failure(monkeypatch, tmp_path):
     for run_id in (1, 2):
         saved = GoalAPI().get_run(run_id)
         assert saved["outcome"] == "failed" and saved["finished_at"] is not None
+
+
+@pytest.mark.parametrize("action", ["create_goal", "revise_goal"])
+def test_cli_binds_one_definition_grant_and_approves_its_tool(
+    action, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    goals = GoalAPI()
+    operator_id = OperatorAPI().register_operator("Planner")["id"]
+
+    def invoke(*args):
+        monkeypatch.setattr(sys, "argv", ["operator", *map(str, args)])
+        return main()
+
+    if action == "create_goal":
+        assert invoke("goal", "grant-create", "--help") == 0
+        help_text = " ".join(capsys.readouterr().out.split())
+        assert (
+            "This operator may create top-level goals in this workspace until you withdraw the grant."
+            in help_text
+        )
+        goal_id = None
+        assert invoke("goal", "grant-create", operator_id) == 0
+    else:
+        goal_id = goals.create_goal("Library")["id"]
+        assert invoke("goal", "grant-revision", goal_id, operator_id) == 0
+    grant = json.loads(capsys.readouterr().out)
+    assert grant == {
+        "id": grant["id"],
+        "action": action,
+        "operator_id": operator_id,
+        "goal_id": goal_id,
+    }
+
+    def run(command, **options):
+        overrides = [value for flag, value in pairwise(command) if flag == "-c"]
+        server = tomllib.loads("\n".join(overrides))["mcp_servers"]["harness_mcp"]
+        assert server["args"][-4:] == [
+            "--run-id",
+            "1",
+            "--definition-grant",
+            str(grant["id"]),
+        ]
+        assert server["tools"] == {action: {"approval_mode": "approve"}}
+        assert action in options["input"]
+        assert goals.get_run(1)["definition_grant"] == grant
+        return subprocess.CompletedProcess(command, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert invoke("ask", "--definition-grant", grant["id"], "Save the definition.") == 0
+    assert (
+        invoke(
+            "ask", "--definition-grant", grant["id"], "--completion-grant", 1, "Review."
+        )
+        == 2
+    )
+    assert invoke("goal", "withdraw-definition-grant", grant["id"]) == 0
+    assert json.loads(capsys.readouterr().out) == grant
+    assert invoke("ask", "--definition-grant", grant["id"], "Save the definition.") == 1

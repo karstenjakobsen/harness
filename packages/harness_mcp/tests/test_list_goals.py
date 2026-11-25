@@ -8,8 +8,15 @@ from fastapi.testclient import TestClient
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from harness_api import DATABASE_PATH, GoalAPI, GoalConflictError, OperatorAPI
+from harness_api import (
+    DATABASE_PATH,
+    GoalAPI,
+    GoalConflictError,
+    GoalValidationError,
+    OperatorAPI,
+)
 from harness_api.app import create_app
+from harness_mcp.server import create_server
 
 
 @pytest.fixture
@@ -121,6 +128,176 @@ async def test_only_the_bound_session_can_complete_its_subgoal(client, tmp_path)
     assert commit["retrieved_event_id"] is None and retry["committed_event_id"] is None
     assert commit["outcome"] == retry["outcome"] == "returned"
     assert commit["returned_goals"] == retry["returned_goals"]
+
+
+def test_completion_mcp_requires_a_recorded_run(tmp_path):
+    path = tmp_path / DATABASE_PATH
+    api = GoalAPI(path)
+    parent_id = api.create_goal("Parent")["id"]
+    child_id = api.create_goal("Child", parent_goal_id=parent_id)["id"]
+    operator_id = OperatorAPI(path).register_operator("Reviewer")["id"]
+    grant = api.grant_completion(child_id, operator_id)
+    with pytest.raises(GoalValidationError, match="recorded run"):
+        create_server(api, grant["id"])
+
+
+@pytest.mark.anyio
+async def test_mcp_definition_writes_and_http_attribution(tmp_path):
+    path = tmp_path / DATABASE_PATH
+    api = GoalAPI(path)
+    operator = OperatorAPI(path).register_operator("Planner")
+    create_args = {
+        "title": "Join the library",
+        "retry_key": "library",
+        "success_criteria": "Membership is active",
+        "measurement_plan": "Ask the owner",
+    }
+    revise_args = {"goal_id": 1, "expected_revision": 1}
+    advisory = api.start_run()["id"]
+    async with workspace_client(tmp_path, "--run-id", str(advisory)) as session:
+        tools = await session.list_tools()
+        assert all(tool.annotations.readOnlyHint for tool in tools.tools)
+        assert (await session.call_tool("create_goal", create_args)).isError
+        assert (await session.call_tool("revise_goal", revise_args)).isError
+    assert all(call["outcome"] == "denied" for call in api.get_run(advisory)["calls"])
+
+    def definition_session(action, **scope):
+        grant = api.grant_definition(action, operator["id"], **scope)
+        run_id = api.start_run(definition_grant_id=grant["id"])["id"]
+        return (
+            grant,
+            run_id,
+            workspace_client(
+                tmp_path,
+                "--run-id",
+                str(run_id),
+                "--definition-grant",
+                str(grant["id"]),
+            ),
+        )
+
+    creation_grant, create_run, session = definition_session("create_goal")
+    async with session as creator:
+        tools = await creator.list_tools()
+        (write,) = [tool for tool in tools.tools if not tool.annotations.readOnlyHint]
+        assert (
+            write.name == "create_goal"
+            and write.inputSchema["additionalProperties"] is False
+        )
+        forbidden = await creator.call_tool(
+            "create_goal", create_args | {"parent_goal_id": 2}
+        )
+        assert forbidden.isError
+        created = await creator.call_tool("create_goal", create_args)
+        assert not created.isError, created.content
+        assert created.structuredContent == {
+            "goal_id": 1,
+            "revision": 1,
+            "status": "draft",
+        }
+        retry = await creator.call_tool("create_goal", create_args)
+        assert retry.structuredContent == created.structuredContent
+    goal_id = created.structuredContent["goal_id"]
+
+    revision_grant, revise_run, session = definition_session(
+        "revise_goal", goal_id=goal_id
+    )
+    async with session as reviser:
+        tools = await reviser.list_tools()
+        (write,) = [tool for tool in tools.tools if not tool.annotations.readOnlyHint]
+        assert (
+            write.name == "revise_goal"
+            and write.inputSchema["additionalProperties"] is False
+        )
+        assert (await reviser.call_tool("create_goal", create_args)).isError
+        patch = revise_args | {
+            "success_criteria": "Active membership and first checkout"
+        }
+        assert (await reviser.call_tool("revise_goal", patch | {"grant_id": 1})).isError
+        revised = await reviser.call_tool("revise_goal", patch)
+        assert not revised.isError, revised.content
+        assert revised.structuredContent == {
+            "goal_id": goal_id,
+            "revision": 2,
+            "status": "draft",
+        }
+        assert (await reviser.call_tool("revise_goal", patch)).isError
+        no_op = await reviser.call_tool(
+            "revise_goal", {"goal_id": goal_id, "expected_revision": 2}
+        )
+        assert no_op.structuredContent == revised.structuredContent
+
+    # Commit another revision and reopen the API before the tool result is recorded.
+    interrupted = api.start_tool_call(
+        revise_run, "revise_goal", target_goal_id=goal_id, target_revision=2
+    )
+    api.revise_delegated_goal(goal_id, 2, call=interrupted, measurement_plan=None)
+
+    with TestClient(create_app(path)) as client:
+
+        def get(url):
+            return client.get(url).raise_for_status().json()
+
+        timeline = get(f"/goals/{goal_id}/history?view=activity")["timeline"]
+        revision_entries = [entry for entry in timeline if entry["kind"] == "revision"]
+        assert [entry["definition"]["revision"] for entry in revision_entries] == [
+            1,
+            2,
+            3,
+        ]
+        assert [
+            entry["definition"]["measurement_plan"] for entry in revision_entries
+        ] == ["Ask the owner", "Ask the owner", None]
+        for revision, entry, grant, result in zip(
+            [1, 2, 3],
+            revision_entries,
+            [creation_grant, revision_grant, revision_grant],
+            [created.structuredContent, revised.structuredContent, None],
+            strict=True,
+        ):
+            link = entry["committing_call"]
+            run = get(f"/runs/{link['run_id']}")
+            assert (
+                run["operator_id"] == operator["id"]
+                and run["definition_grant"] == grant
+            )
+            (call,) = [
+                call for call in run["calls"] if call["sequence"] == link["sequence"]
+            ]
+            assert call["tool"] == grant["action"]
+            assert call["committed_revision"] == {
+                "goal_id": goal_id,
+                "revision": revision,
+            }
+            if result is None:
+                assert (
+                    call["outcome"] == "unfinished" and call["returned_goals"] is None
+                )
+            else:
+                assert call["outcome"] == "returned"
+                assert call["returned_goals"] == [
+                    result | {"observation_ids": [], "decision": None}
+                ]
+
+        assert all(entry.get("run_id") != advisory for entry in timeline)
+        denied = [entry for entry in timeline if entry.get("outcome") == "denied"]
+        assert len(denied) == 2 and all(
+            entry["relationship"] == "revision_target" for entry in denied
+        )
+        assert get(f"/runs/{create_run}")["calls"][-1]["retrieved_revision"] == {
+            "goal_id": goal_id,
+            "revision": 1,
+        }
+        no_op_record = get(f"/runs/{revise_run}")["calls"][-2]
+        assert (
+            no_op_record["outcome"] == "returned"
+            and no_op_record["committed_revision"] is None
+        )
+        assert all(
+            "committing_call" not in entry for entry in get(f"/goals/{goal_id}/history")
+        )
+        goal = get(f"/goals/{goal_id}")
+        assert goal["status"] == "draft" and goal["completion"] is None
 
 
 @pytest.mark.anyio

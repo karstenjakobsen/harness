@@ -8,12 +8,23 @@ from typing import Literal, TypedDict
 from . import GoalStatus
 
 type HarnessTool = Literal[
-    "list_goals", "get_goal_tree", "get_goal_progress", "complete_goal"
+    "list_goals",
+    "get_goal_tree",
+    "get_goal_progress",
+    "complete_goal",
+    "create_goal",
+    "revise_goal",
 ]
+type DefinitionAction = Literal["create_goal", "revise_goal"]
 type RunOutcome = Literal["unfinished", "succeeded", "failed"]
 type CallOutcome = Literal["unfinished", "returned", "denied", "failed"]
 type CallRelationship = Literal[
-    "listed", "descendant", "requested", "completion_target"
+    "listed",
+    "descendant",
+    "requested",
+    "completion_target",
+    "creation_result",
+    "revision_target",
 ]
 
 
@@ -26,6 +37,18 @@ class DecisionReference(TypedDict):
     event_id: int
     evidence_ids: list[int]
     statement_evidence_id: int | None
+
+
+class RevisionReference(TypedDict):
+    goal_id: int
+    revision: int
+
+
+class DefinitionGrant(TypedDict):
+    id: int
+    operator_id: int
+    action: DefinitionAction
+    goal_id: int | None
 
 
 class GoalResultReference(TypedDict):
@@ -46,6 +69,8 @@ class RunCall(CallReference):
     returned_goals: list[GoalResultReference] | None
     committed_event_id: int | None
     retrieved_event_id: int | None
+    committed_revision: RevisionReference | None
+    retrieved_revision: RevisionReference | None
 
 
 class OperatorRun(TypedDict):
@@ -55,6 +80,7 @@ class OperatorRun(TypedDict):
     operator_id: int | None
     completion_grant_id: int | None
     granted_goal_id: int | None
+    definition_grant: DefinitionGrant | None
     started_at: str
     finished_at: str | None
     outcome: RunOutcome
@@ -77,9 +103,12 @@ class RunNotFoundError(LookupError):
 def run_row(connection: sqlite3.Connection, run_id: int, owner_id: int) -> sqlite3.Row:
     row = connection.execute(
         """
-        SELECT run.*, grant.operator_id, grant.goal_id AS granted_goal_id
+        SELECT run.*, coalesce(grant.operator_id, definition.operator_id) AS operator_id,
+               grant.goal_id AS granted_goal_id, definition.action AS definition_action,
+               definition.goal_id AS definition_goal_id
         FROM operator_runs AS run
         LEFT JOIN goal_assignments AS grant ON grant.id = run.completion_grant_id
+        LEFT JOIN goal_definition_grants AS definition ON definition.id = run.definition_grant_id
         WHERE run.id = ? AND run.owner_user_id = ?
         """,
         (run_id, owner_id),
@@ -90,17 +119,34 @@ def run_row(connection: sqlite3.Connection, run_id: int, owner_id: int) -> sqlit
 
 
 def run_record(row: sqlite3.Row, calls: list[RunCall]) -> OperatorRun:
+    definition_grant = None
+    if row["definition_grant_id"] is not None:
+        definition_grant = DefinitionGrant(
+            id=row["definition_grant_id"],
+            operator_id=row["operator_id"],
+            action=row["definition_action"],
+            goal_id=row["definition_goal_id"],
+        )
     return OperatorRun(
         id=row["id"],
         owner_user_id=row["owner_user_id"],
-        mode="advisory" if row["completion_grant_id"] is None else "delegated",
+        mode="advisory" if row["operator_id"] is None else "delegated",
         operator_id=row["operator_id"],
         completion_grant_id=row["completion_grant_id"],
         granted_goal_id=row["granted_goal_id"],
+        definition_grant=definition_grant,
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         outcome=row["outcome"],
         calls=calls,
+    )
+
+
+def revision_reference(row: sqlite3.Row) -> RevisionReference | None:
+    if row["revision_kind"] is None:
+        return None
+    return RevisionReference(
+        goal_id=row["revision_goal_id"], revision=row["saved_revision"]
     )
 
 
@@ -138,37 +184,59 @@ def run_calls(connection: sqlite3.Connection, run_id: int) -> list[RunCall]:
             outcome=row["outcome"],
             committed_event_id=row["committed_event_id"],
             retrieved_event_id=row["retrieved_event_id"],
+            committed_revision=revision_reference(row)
+            if row["revision_kind"] == "committed"
+            else None,
+            retrieved_revision=revision_reference(row)
+            if row["revision_kind"] == "retrieved"
+            else None,
             returned_goals=results[row["sequence"]]
             if row["outcome"] == "returned"
             else None,
         )
         for row in connection.execute(
-            "SELECT * FROM run_calls WHERE run_id = ? ORDER BY sequence", (run_id,)
+            """
+            SELECT call.*, link.goal_id AS revision_goal_id, link.revision AS saved_revision,
+                   link.kind AS revision_kind
+            FROM run_calls AS call LEFT JOIN run_call_revisions AS link USING (run_id, sequence)
+            WHERE call.run_id = ? ORDER BY call.sequence
+            """,
+            (run_id,),
         )
     ]
 
 
 def related_calls(
     connection: sqlite3.Connection, goal_id: int, owner_id: int
-) -> tuple[list[CallActivity], dict[int, CallReference]]:
+) -> tuple[list[CallActivity], dict[int, CallReference], dict[int, CallReference]]:
     rows = connection.execute(
         """
         WITH related(run_id, sequence) AS (
             SELECT run_id, sequence FROM run_calls WHERE resolved_goal_id = :goal_id
             UNION
             SELECT run_id, sequence FROM run_call_goals WHERE goal_id = :goal_id
+            UNION
+            SELECT run_id, sequence FROM run_call_revisions WHERE goal_id = :goal_id
         )
-        SELECT call.* FROM related JOIN run_calls AS call USING (run_id, sequence)
+        SELECT call.*, link.kind AS revision_kind, link.revision AS saved_revision
+        FROM related JOIN run_calls AS call USING (run_id, sequence)
         JOIN operator_runs AS run ON run.id = call.run_id AND run.owner_user_id = :owner
+        LEFT JOIN run_call_revisions AS link
+            ON link.run_id = call.run_id AND link.sequence = call.sequence AND link.goal_id = :goal_id
         """,
         {"goal_id": goal_id, "owner": owner_id},
     )
     calls = []
-    commits = {}
+    decision_commits = {}
+    revision_commits = {}
     for row in rows:
         tool = row["tool"]
         if tool == "complete_goal":
             relationship = "completion_target"
+        elif tool == "create_goal":
+            relationship = "creation_result"
+        elif tool == "revise_goal":
+            relationship = "revision_target"
         elif tool == "list_goals":
             relationship = "listed"
         elif row["target_goal_id"] == goal_id:
@@ -187,8 +255,10 @@ def related_calls(
             )
         )
         if row["committed_event_id"] is not None:
-            commits[row["committed_event_id"]] = key
-    return calls, commits
+            decision_commits[row["committed_event_id"]] = key
+        if row["revision_kind"] == "committed":
+            revision_commits[row["saved_revision"]] = key
+    return calls, decision_commits, revision_commits
 
 
 def save_result_references(

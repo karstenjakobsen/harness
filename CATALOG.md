@@ -13,6 +13,7 @@ Add `--help` to any command or group to see its options.
 | `operator register` | Starts Codex device sign-in and displays the verification link and one-time code. |
 | `operator ask [--trace-file PATH] [MESSAGE]` | Opens an advisory session and prints its reply. The optional flag saves the Codex event stream, including MCP calls, to a new file. |
 | `operator ask --completion-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can complete the specific subgoal covered by the active grant. |
+| `operator ask --definition-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can create top-level goals or revise one goal, as specified by the active grant. |
 
 Today, `operator ask` can read goals with `list_goals`, `get_goal_tree` and
 `get_goal_progress`. It can weigh the evidence, suggest completion or ask what
@@ -24,6 +25,13 @@ The delegated session exposes
 Harness derives the actor from the grant bound at startup and returns the saved
 decision with its citations. The operator decides when the evidence is sufficient.
 The session's grant is checked again on every completion call.
+
+For goal definitions, an active creation grant exposes `create_goal` and an
+active revision grant exposes `revise_goal`. The owner approves each grant once.
+Harness binds one grant per session and rechecks it on every write. Creation
+defaults to `draft` and accepts a `retry_key` to retrieve revision 1 on an
+identical retry. Revision takes the current `expected_revision`. On conflict,
+read the current definition and activity before deciding how to proceed.
 
 `operator ask` records Harness MCP activity in the workspace database. The
 two history commands read its typed references and outcomes without requiring
@@ -65,13 +73,16 @@ Explicit creation and the other workspace commands print JSON.
 | `operator goal list` | Lists saved goals in this workspace. |
 | `operator goal show GOAL_ID` | Shows the current goal. Add `--tree` for its descendants and current completion decisions, or `--history` for revision creation times, evidence recorded under each revision, and saved decisions. |
 | `operator goal history GOAL_ID` | Shows revisions, observations, decisions and run calls linked by a resolved target or returned goal. |
-| `operator run show RUN_ID` | Shows one operator run with its identity, timing, outcome, ordered calls, returned references and decision links. |
+| `operator run show RUN_ID` | Shows one operator run with its identity, timing, outcome, ordered calls, returned references and revision or decision links. |
 | `operator goal revise GOAL_ID FIELDS` | Updates the supplied fields and appends a revision when the definition changes. Use `--title TITLE` to rename the goal. |
 | `operator goal observe GOAL_ID --retry-key KEY [--reported-date YYYY-MM-DD] EVIDENCE` | Records an owner confirmation or owner-supplied reference. Reuse the key for an identical retry. Use separate keys for intentional reports about the same day. |
 | `operator goal progress GOAL_ID [--revision N]` | Assesses the current or selected revision. `evidence` contains every record considered. `days` lists each qualifying date and its supporting IDs. |
 | `operator goal complete GOAL_ID --revision N EVIDENCE [--evidence-id ID]...` | Completes the current revision and cites the supplied records from this goal. Returns the saved decision on an identical retry. |
 | `operator goal grant-completion GOAL_ID OPERATOR_ID` | Assigns the subgoal with explicit completion authority. Returns a fresh grant `id`, the goal ID and operator ID. |
 | `operator goal withdraw-completion GRANT_ID` | Closes that assignment and invalidates sessions bound to the grant. |
+| `operator goal grant-create OPERATOR_ID` | This operator may create top-level goals in this workspace until you withdraw the grant. Returns the grant ID and operator ID. |
+| `operator goal grant-revision GOAL_ID OPERATOR_ID` | Grants revision of the specified goal. Returns the grant ID, goal ID and operator ID. |
+| `operator goal withdraw-definition-grant GRANT_ID` | Withdraws the creation or revision grant and invalidates sessions bound to it. |
 
 For `FIELDS`, use `--desired-outcome`, `--success-criteria`, `--measurement-plan`,
 `--assessment-type` (`objective`, `judgment`, or `mixed`), `--duration` (`one_time`
@@ -105,5 +116,5 @@ operator goal create --title "Track food" --duration-days 7
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
-| `make test-live` | Runs the signed-in acceptance tests for goal plans, progress and delegated review history. |
+| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, and creation and revision history. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |

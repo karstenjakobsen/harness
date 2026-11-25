@@ -2,9 +2,10 @@ import json
 import sqlite3
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from types import EllipsisType
-from typing import Literal, TypedDict, Unpack, get_args, overload
+from typing import Literal, TypedDict, Unpack, cast, get_args, overload
 
 from ..database import (
     ADMIN_USER_ID,
@@ -17,10 +18,14 @@ from . import GoalStatus
 from .activity import (
     CallActivity,
     CallReference,
+    DefinitionAction,
+    DefinitionGrant,
     GoalResultReference,
     HarnessTool,
     OperatorRun,
+    RevisionReference,
     related_calls,
+    revision_reference,
     run_calls,
     run_record,
     run_row,
@@ -107,6 +112,21 @@ class GoalDefinition(_GoalFields):
     window_start: str | None
 
 
+class GoalDefinitionChanges(TypedDict, total=False):
+    desired_outcome: str | None
+    duration: GoalDuration | None
+    duration_days: int | None
+    assessment_type: AssessmentType | None
+    success_criteria: str | None
+    measurement_plan: str | None
+    target_distinct_dates: int | None
+    window_start: str | None
+
+
+class DelegatedGoalResult(RevisionReference):
+    status: GoalStatus
+
+
 class GoalProgress(DateAssessment):
     goal_id: int
     revision: int | None
@@ -165,6 +185,7 @@ class RevisionActivity(TypedDict):
     kind: Literal["revision"]
     at: str
     definition: RevisionDefinition
+    committing_call: CallReference | None
 
 
 class ObservationActivity(TypedDict):
@@ -265,9 +286,37 @@ def _validate_definition(definition: GoalDefinition) -> None:
         )
 
 
-def _revised[T](current: T, change: T | EllipsisType) -> T:
-    """Omitting a field preserves it. An explicit None clears it."""
-    return current if change is ... else change
+def _merge_definition(
+    definition: GoalDefinition, changes: GoalDefinitionChanges
+) -> GoalDefinition:
+    unknown = changes.keys() - definition.keys()
+    if unknown:
+        raise GoalValidationError(
+            f"Unexpected definition fields: {', '.join(sorted(unknown))}"
+        )
+    merged: GoalDefinition = {**definition, **changes}
+    _validate_definition(merged)
+    return merged
+
+
+def _new_definition(
+    status: GoalCreationStatus, changes: GoalDefinitionChanges
+) -> GoalDefinition:
+    if status not in get_args(GoalCreationStatus.__value__):
+        raise GoalValidationError("A new goal must be draft or active.")
+    return _merge_definition(
+        GoalDefinition(
+            desired_outcome=None,
+            duration=None,
+            duration_days=None,
+            assessment_type=None,
+            success_criteria=None,
+            measurement_plan=None,
+            target_distinct_dates=None,
+            window_start=None,
+        ),
+        changes,
+    )
 
 
 def _reported_date_window(
@@ -409,32 +458,45 @@ class GoalAPI(WorkspaceDatabase):
     ) -> Goal:
         """Create a goal and its first definition in one transaction."""
         title = _normalize_title(title)
-        if status not in get_args(GoalCreationStatus.__value__):
-            raise GoalValidationError("A new goal must be draft or active.")
-        definition = GoalDefinition(
-            target_distinct_dates=target_distinct_dates,
-            window_start=window_start,
-            desired_outcome=desired_outcome,
-            duration=duration,
-            duration_days=duration_days,
-            assessment_type=assessment_type,
-            success_criteria=success_criteria,
-            measurement_plan=measurement_plan,
+        definition = _new_definition(
+            status,
+            GoalDefinitionChanges(
+                desired_outcome=desired_outcome,
+                duration=duration,
+                duration_days=duration_days,
+                assessment_type=assessment_type,
+                success_criteria=success_criteria,
+                measurement_plan=measurement_plan,
+                target_distinct_dates=target_distinct_dates,
+                window_start=window_start,
+            ),
         )
-        _validate_definition(definition)
         with self._write() as connection:
-            if parent_goal_id is not None:
-                self._get_goal(connection, parent_goal_id)
-            goal_id = connection.execute(
-                "INSERT INTO goals (owner_user_id, parent_goal_id, status) VALUES (?, ?, ?) RETURNING id",
-                (ADMIN_USER_ID, parent_goal_id, status),
-            ).fetchone()[0]
-            self._add_revision(connection, goal_id, 1, title, definition)
+            goal_id = self._insert_goal(
+                connection, title, status, definition, parent_goal_id
+            )
             if original_message is not None:
                 self._record_message(connection, goal_id, "user", original_message)
             if clarification is not None:
                 self._record_message(connection, goal_id, "operator", clarification)
             return self._get_goal(connection, goal_id)
+
+    def _insert_goal(
+        self,
+        connection: sqlite3.Connection,
+        title: str,
+        status: GoalCreationStatus,
+        definition: GoalDefinition,
+        parent_goal_id: int | None = None,
+    ) -> int:
+        if parent_goal_id is not None:
+            self._get_goal(connection, parent_goal_id)
+        (goal_id,) = connection.execute(
+            "INSERT INTO goals (owner_user_id, parent_goal_id, status) VALUES (?, ?, ?) RETURNING id",
+            (ADMIN_USER_ID, parent_goal_id, status),
+        ).fetchone()
+        self._add_revision(connection, goal_id, 1, title, definition)
+        return goal_id
 
     def get_goal(self, goal_id: int) -> Goal:
         with self._connection("ro") as connection:
@@ -503,7 +565,9 @@ class GoalAPI(WorkspaceDatabase):
             connection.execute("BEGIN")
             self._get_goal(connection, goal_id)
             history = self._goal_history(connection, goal_id)
-            calls, commits = related_calls(connection, goal_id, ADMIN_USER_ID)
+            calls, decision_commits, revision_commits = related_calls(
+                connection, goal_id, ADMIN_USER_ID
+            )
         timeline: list[ActivityEntry] = list(calls)
         for revision in history:
             definition = RevisionDefinition(
@@ -514,7 +578,10 @@ class GoalAPI(WorkspaceDatabase):
             )
             timeline.append(
                 RevisionActivity(
-                    kind="revision", at=definition["created_at"], definition=definition
+                    kind="revision",
+                    at=definition["created_at"],
+                    definition=definition,
+                    committing_call=revision_commits.get(definition["revision"]),
                 )
             )
             for observation in revision["evidence"]:
@@ -531,24 +598,38 @@ class GoalAPI(WorkspaceDatabase):
                         kind="decision",
                         at=decision["recorded_at"],
                         decision=decision,
-                        committing_call=commits.get(decision["event_id"]),
+                        committing_call=decision_commits.get(decision["event_id"]),
                     )
                 )
         return GoalActivity(
             goal_id=goal_id, timeline=sorted(timeline, key=_activity_order)
         )
 
-    def start_run(self, completion_grant_id: int | None = None) -> OperatorRun:
+    def start_run(
+        self,
+        completion_grant_id: int | None = None,
+        *,
+        definition_grant_id: int | None = None,
+    ) -> OperatorRun:
         """Bind a run to the exact grant checked at launch, or start an advisory run."""
+        if completion_grant_id is not None and definition_grant_id is not None:
+            raise GoalValidationError("A run can bind only one grant.")
         with self._write() as connection:
             if completion_grant_id is not None:
                 self._get_completion_grant(connection, completion_grant_id)
+            if definition_grant_id is not None:
+                self._get_definition_grant(connection, definition_grant_id)
             run_id = connection.execute(
                 """
-                INSERT INTO operator_runs (owner_user_id, completion_grant_id, started_at)
-                VALUES (?, ?, ?) RETURNING id
+                INSERT INTO operator_runs (owner_user_id, completion_grant_id, definition_grant_id, started_at)
+                VALUES (?, ?, ?, ?) RETURNING id
                 """,
-                (ADMIN_USER_ID, completion_grant_id, utc_timestamp()),
+                (
+                    ADMIN_USER_ID,
+                    completion_grant_id,
+                    definition_grant_id,
+                    utc_timestamp(),
+                ),
             ).fetchone()[0]
             return run_record(run_row(connection, run_id, ADMIN_USER_ID), [])
 
@@ -662,6 +743,20 @@ class GoalAPI(WorkspaceDatabase):
                 raise GoalValidationError(
                     "The completion result must reference the call's saved decision."
                 )
+        elif attempt["tool"] in ("create_goal", "revise_goal"):
+            reference = revision_reference(attempt)
+            if (
+                reference is None
+                or len(goals) != 1
+                or goals[0]["goal_id"] != reference["goal_id"]
+                or goals[0]["revision"] != reference["revision"]
+                or goals[0]["status"] not in ("draft", "active", "paused")
+                or goals[0]["observation_ids"]
+                or goals[0]["decision"] is not None
+            ):
+                raise GoalValidationError(
+                    "The result must reference the call's goal revision."
+                )
         outside_scope = connection.execute(
             """
             SELECT 1 FROM json_each(?) AS result
@@ -684,8 +779,12 @@ class GoalAPI(WorkspaceDatabase):
         _validate_positive_integer(call["sequence"], "Call sequence")
         row = connection.execute(
             """
-            SELECT call.*, run.completion_grant_id, run.outcome AS run_outcome
+            SELECT call.*, run.completion_grant_id, run.definition_grant_id,
+                   run.outcome AS run_outcome, link.kind AS revision_kind,
+                   link.goal_id AS revision_goal_id, link.revision AS saved_revision
             FROM run_calls AS call JOIN operator_runs AS run ON run.id = call.run_id
+            LEFT JOIN run_call_revisions AS link
+                ON link.run_id = call.run_id AND link.sequence = call.sequence
             WHERE run.owner_user_id = :owner AND call.run_id = :run_id
                 AND call.sequence = :sequence AND call.outcome = 'unfinished'
             """,
@@ -721,34 +820,265 @@ class GoalAPI(WorkspaceDatabase):
         window_start: str | None | EllipsisType = ...,
     ) -> Goal:
         """Append a revision for a changed definition. Omit fields to keep their values."""
+        changes = {
+            "desired_outcome": desired_outcome,
+            "duration": duration,
+            "duration_days": duration_days,
+            "assessment_type": assessment_type,
+            "success_criteria": success_criteria,
+            "measurement_plan": measurement_plan,
+            "target_distinct_dates": target_distinct_dates,
+            "window_start": window_start,
+        }
+        fields = cast(
+            GoalDefinitionChanges,
+            {field: value for field, value in changes.items() if value is not ...},
+        )
         with self._write() as connection:
             goal = self._get_goal(connection, goal_id)
-            title = goal["title"] if title is None else _normalize_title(title)
-            definition = GoalDefinition(
-                target_distinct_dates=_revised(
-                    goal["target_distinct_dates"], target_distinct_dates
-                ),
-                window_start=_revised(goal["window_start"], window_start),
-                desired_outcome=_revised(goal["desired_outcome"], desired_outcome),
-                duration=_revised(goal["duration"], duration),
-                duration_days=_revised(goal["duration_days"], duration_days),
-                assessment_type=_revised(goal["assessment_type"], assessment_type),
-                success_criteria=_revised(goal["success_criteria"], success_criteria),
-                measurement_plan=_revised(goal["measurement_plan"], measurement_plan),
-            )
-            _validate_definition(definition)
-            if title == goal["title"] and definition == _definition(goal):
+            if self._append_definition(connection, goal, title, fields) is None:
                 return goal
-            if title is None:
-                raise GoalValidationError("Add a title when updating an untitled goal.")
-            self._add_revision(
-                connection, goal_id, (goal["revision"] or 0) + 1, title, definition
-            )
             if goal["status"] == "completed":
                 connection.execute(
                     "UPDATE goals SET status = 'active' WHERE id = ?", (goal_id,)
                 )
             return self._get_goal(connection, goal_id)
+
+    def _append_definition(
+        self,
+        connection: sqlite3.Connection,
+        goal: Goal,
+        title: str | None,
+        fields: GoalDefinitionChanges,
+    ) -> int | None:
+        title = goal["title"] if title is None else _normalize_title(title)
+        current = _definition(goal)
+        definition = _merge_definition(current, fields)
+        if title == goal["title"] and definition == current:
+            return None
+        if title is None:
+            raise GoalValidationError("Add a title when updating an untitled goal.")
+        revision = (goal["revision"] or 0) + 1
+        self._add_revision(connection, goal["id"], revision, title, definition)
+        return revision
+
+    def grant_definition(
+        self, action: DefinitionAction, operator_id: int, *, goal_id: int | None = None
+    ) -> DefinitionGrant:
+        """Grant top-level creation or revision of one goal to a registered operator."""
+        if self._submitter != ADMIN_USER_ID:
+            raise GoalValidationError(
+                "Only the workspace owner can delegate goal definitions."
+            )
+        _validate_positive_integer(operator_id, "Operator ID")
+        if action not in ("create_goal", "revise_goal") or (
+            action == "revise_goal"
+        ) != (goal_id is not None):
+            raise GoalValidationError(
+                "A revision grant requires one goal. A creation grant covers top-level goals."
+            )
+        with self._write() as connection:
+            if goal_id is not None:
+                self._get_goal(connection, goal_id)
+            operator = connection.execute(
+                "SELECT id FROM operators WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL",
+                (operator_id, ADMIN_USER_ID),
+            ).fetchone()
+            if operator is None:
+                raise GoalValidationError(
+                    "Choose a registered operator owned by the workspace owner."
+                )
+            (grant_id,) = connection.execute(
+                """
+                INSERT INTO goal_definition_grants (operator_id, goal_id, action, granted_at)
+                VALUES (?, ?, ?, ?) RETURNING id
+                """,
+                (operator_id, goal_id, action, utc_timestamp()),
+            ).fetchone()
+            return DefinitionGrant(
+                id=grant_id, operator_id=operator_id, action=action, goal_id=goal_id
+            )
+
+    def get_definition_grant(self, grant_id: int) -> DefinitionGrant:
+        """Resolve an active definition grant at session startup."""
+        with self._connection("ro") as connection:
+            return self._get_definition_grant(connection, grant_id)
+
+    def withdraw_definition_grant(self, grant_id: int) -> DefinitionGrant:
+        """Withdraw definition authority without changing an assignment."""
+        if self._submitter != ADMIN_USER_ID:
+            raise GoalValidationError(
+                "Only the workspace owner can withdraw a definition grant."
+            )
+        with self._write() as connection:
+            grant = self._get_definition_grant(connection, grant_id)
+            connection.execute(
+                "UPDATE goal_definition_grants SET withdrawn_at = ? WHERE id = ?",
+                (utc_timestamp(), grant_id),
+            )
+            return grant
+
+    @staticmethod
+    def _get_definition_grant(
+        connection: sqlite3.Connection, grant_id: int
+    ) -> DefinitionGrant:
+        _validate_positive_integer(grant_id, "Definition grant ID")
+        row = connection.execute(
+            """
+            SELECT grant.id, grant.operator_id, grant.action, grant.goal_id
+            FROM goal_definition_grants AS grant
+            JOIN operators AS operator ON operator.id = grant.operator_id
+            LEFT JOIN goals AS goal ON goal.id = grant.goal_id
+            WHERE grant.id = ? AND grant.withdrawn_at IS NULL
+                AND operator.owner_user_id = ? AND operator.deleted_at IS NULL
+                AND (grant.goal_id IS NULL OR (goal.owner_user_id = operator.owner_user_id AND goal.deleted_at IS NULL))
+            """,
+            (grant_id, ADMIN_USER_ID),
+        ).fetchone()
+        if row is None:
+            raise GoalValidationError(
+                f"Definition grant {grant_id} is inactive or unavailable."
+            )
+        return DefinitionGrant(
+            id=row["id"],
+            operator_id=row["operator_id"],
+            action=row["action"],
+            goal_id=row["goal_id"],
+        )
+
+    def _definition_write_grant(
+        self,
+        connection: sqlite3.Connection,
+        call: CallReference,
+        action: DefinitionAction,
+        goal_id: int | None = None,
+        expected_revision: int | None = None,
+    ) -> DefinitionGrant:
+        attempt = self._open_tool_call(connection, call)
+        if (
+            attempt["run_outcome"] != "unfinished"
+            or attempt["tool"] != action
+            or attempt["definition_grant_id"] is None
+            or attempt["target_goal_id"] != goal_id
+            or attempt["target_revision"] != expected_revision
+        ):
+            raise GoalValidationError(
+                "The tool call does not match this delegated write."
+            )
+        grant = self._get_definition_grant(connection, attempt["definition_grant_id"])
+        if grant["action"] != action or grant["goal_id"] != goal_id:
+            raise GoalValidationError(
+                "The definition grant does not cover this action and goal."
+            )
+        if attempt["revision_kind"] is not None:
+            raise GoalConflictError(
+                "This tool call already saved a revision result. Use a new call to retry."
+            )
+        return grant
+
+    @staticmethod
+    def _link_revision(
+        connection: sqlite3.Connection,
+        call: CallReference,
+        reference: RevisionReference,
+        kind: Literal["committed", "retrieved", "unchanged"],
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO run_call_revisions (run_id, sequence, goal_id, revision, kind)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                call["run_id"],
+                call["sequence"],
+                reference["goal_id"],
+                reference["revision"],
+                kind,
+            ),
+        )
+
+    def create_delegated_goal(
+        self,
+        title: str,
+        *,
+        call: CallReference,
+        retry_key: str,
+        status: GoalCreationStatus = "draft",
+        **fields: Unpack[GoalDefinitionChanges],
+    ) -> DelegatedGoalResult:
+        """Save a top-level goal once for this grant and creation key."""
+        title = _normalize_title(title)
+        retry_key = _require_text(retry_key, "Retry key").strip()
+        if not retry_key:
+            raise GoalValidationError("Retry key must contain text.")
+        definition = _new_definition(status, fields)
+        fingerprint = sha256(
+            json.dumps([title, status, definition], sort_keys=True).encode()
+        ).hexdigest()
+        with self._write() as connection:
+            grant = self._definition_write_grant(connection, call, "create_goal")
+            existing = connection.execute(
+                "SELECT goal_id, status, fingerprint FROM goal_creation_retries WHERE grant_id = ? AND retry_key = ?",
+                (grant["id"], retry_key),
+            ).fetchone()
+            if existing is not None:
+                if existing["fingerprint"] != fingerprint:
+                    raise GoalConflictError(
+                        "This retry key already identifies a different goal definition."
+                    )
+                self._get_goal(connection, existing["goal_id"])
+                result = DelegatedGoalResult(
+                    goal_id=existing["goal_id"], revision=1, status=existing["status"]
+                )
+                self._link_revision(connection, call, result, "retrieved")
+                return result
+            goal_id = self._insert_goal(connection, title, status, definition)
+            connection.execute(
+                "INSERT INTO goal_creation_retries (grant_id, retry_key, fingerprint, goal_id, status) VALUES (?, ?, ?, ?, ?)",
+                (grant["id"], retry_key, fingerprint, goal_id, status),
+            )
+            result = DelegatedGoalResult(goal_id=goal_id, revision=1, status=status)
+            self._link_revision(connection, call, result, "committed")
+            return result
+
+    def revise_delegated_goal(
+        self,
+        goal_id: int,
+        expected_revision: int,
+        *,
+        call: CallReference,
+        title: str | None = None,
+        **fields: Unpack[GoalDefinitionChanges],
+    ) -> DelegatedGoalResult:
+        """Revise the granted open goal if the reviewed revision is still current."""
+        _validate_positive_integer(goal_id, "Goal ID")
+        _validate_positive_integer(expected_revision, "Expected revision")
+        with self._write() as connection:
+            self._definition_write_grant(
+                connection, call, "revise_goal", goal_id, expected_revision
+            )
+            goal = self._get_goal(connection, goal_id)
+            if expected_revision != goal["revision"]:
+                raise GoalConflictError(
+                    f"Stale revision. Current revision is {goal['revision']}."
+                )
+            if goal["status"] not in ("draft", "active", "paused"):
+                raise GoalConflictError(
+                    f"The owner must revise a {goal['status']} goal."
+                )
+            revision = self._append_definition(connection, goal, title, fields)
+            result = DelegatedGoalResult(
+                goal_id=goal_id,
+                revision=revision or expected_revision,
+                status=goal["status"],
+            )
+            self._link_revision(
+                connection,
+                call,
+                result,
+                "unchanged" if revision is None else "committed",
+            )
+            return result
 
     def _statement(
         self, confirmation: str | None, reference: str | None

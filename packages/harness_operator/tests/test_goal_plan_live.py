@@ -313,6 +313,12 @@ def test_ask_explains_monday_progress_before_and_after_revision(
 
 def assert_day_pass_answer(reply):
     text = " ".join(reply.casefold().replace("’", "'").replace("*", "").split())
+    if re.search(
+        r"\bif (?:your |the )?(?:gym )?membership is (?:currently )?active,? "
+        r"(?:please )?confirm (?:it|that)(?: directly)?(?=[.!?;]|$)",
+        text,
+    ):
+        return
     joining = r"join(?:ed|ing)?|sign(?:ed)? up|a (?:gym )?member"
     membership = rf"\b(?:membership|{joining})\b"
     missing = (
@@ -355,6 +361,7 @@ def assert_day_pass_answer(reply):
         "Please confirm that your gym membership is active.",
         "Is your gym membership active?",
         "You toured the gym. Did you end up joining?",
+        "I left it open. If your membership is active, confirm that directly.",
     ],
 )
 def test_day_pass_answer_accepts_a_missing_fact_or_a_question(reply):
@@ -370,6 +377,7 @@ def test_day_pass_answer_accepts_a_missing_fact_or_a_question(reply):
         "The receipt is missing, but your membership is active.",
         "Your membership is active. Do you have your membership card?",
         "The goal is still open. I need a copy of the day pass.",
+        "If your membership is active, confirm that your day-pass receipt is valid.",
     ],
 )
 def test_day_pass_answer_rejects_replies_that_miss_the_gap(reply):
@@ -479,6 +487,82 @@ def test_delegated_operator_decides_when_membership_evidence_is_sufficient(
         again = client.get(f"/runs/{first_http['id']}")
         again.raise_for_status()
         assert again.json() == first_http == first
+
+
+@pytest.mark.live
+def test_operator_creates_and_revises_draft_with_http_attribution(workspace, run, goal):
+    operator = json.loads(run("register", "Library planner"))
+    creation_grant = goal("grant-create", operator["id"])
+    created_reply = run(
+        "ask",
+        "--definition-grant",
+        creation_grant["id"],
+        "Save a draft goal to join my library. Success means the library confirms my membership is active.",
+    )
+    with TestClient(create_app(workspace / DATABASE_PATH)) as client:
+
+        def get(url):
+            response = client.get(url)
+            response.raise_for_status()
+            return response.json()
+
+        (draft,) = get("/goals")
+        goal_id = draft["id"]
+        assert draft["status"] == "draft" and draft["revision"] == 1
+        revision_grant = goal("grant-revision", goal_id, operator["id"])
+        revised_reply = run(
+            "ask",
+            "--definition-grant",
+            revision_grant["id"],
+            f"Revise goal ID {goal_id} so success requires both active membership and a successful first checkout. Save the revised criteria.",
+        )
+
+        timeline = get(f"/goals/{goal_id}/history?view=activity")["timeline"]
+        original, revised = [item for item in timeline if item["kind"] == "revision"]
+        assert "active" in original["definition"]["success_criteria"].lower()
+        assert "membership" in original["definition"]["success_criteria"].lower()
+        criteria = revised["definition"]["success_criteria"].lower()
+        assert "active" in criteria and "membership" in criteria
+        assert re.search(r"check(?:ed)?[ -]?out|borrow", criteria)
+        assert not any(item["kind"] == "decision" for item in timeline)
+
+        runs = set()
+        for revision, entry, grant, reply in (
+            (1, original, creation_grant, created_reply),
+            (2, revised, revision_grant, revised_reply),
+        ):
+            assert entry["definition"]["revision"] == revision
+            reference = entry["committing_call"]
+            run_record = get(f"/runs/{reference['run_id']}")
+            runs.add(run_record["id"])
+            assert run_record["outcome"] == "succeeded"
+            assert run_record["operator_id"] == operator["id"]
+            assert run_record["definition_grant"] == grant
+            (call,) = [
+                call
+                for call in run_record["calls"]
+                if call["sequence"] == reference["sequence"]
+            ]
+            assert call["tool"] == grant["action"] and call["outcome"] == "returned"
+            expected = {"goal_id": goal_id, "revision": revision}
+            assert call["committed_revision"] == expected
+            assert call["returned_goals"] == [
+                expected | {"status": "draft", "observation_ids": [], "decision": None}
+            ]
+            assert call["target_goal_id"] == grant["goal_id"]
+            assert call["target_revision"] == (1 if revision == 2 else None)
+            answer = re.sub(r"[`*_]", "", reply.lower())
+            assert re.search(rf"\b(?:goal(?:\s+id)?|id)[ :#]+{goal_id}\b", answer)
+            assert re.search(rf"\b(?:revision|version|rev)[ .:#]+{revision}\b", answer)
+            if revision == 2:
+                assert "membership" in answer and re.search(
+                    r"check(?:ed)?[ -]?out|borrow", answer
+                )
+
+        assert len(runs) == 2
+        saved = get(f"/goals/{goal_id}")
+        assert saved["status"] == "draft" and saved["revision"] == 2
+        assert saved["completion"] is None
 
 
 def _related_run_ids(history):

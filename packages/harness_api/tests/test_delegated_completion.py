@@ -59,7 +59,7 @@ def test_upgrade_keeps_responsibility_and_owner_completion_without_grant(v7_work
     history = api.get_goal_history(2)
     assert api.get_goal(2)["operator"] == "Reviewer"
     with closing(sqlite3.connect(path, autocommit=True)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (10,)
+        assert db.execute("PRAGMA user_version").fetchone() == (11,)
         assert db.execute("""
             SELECT id, goal_id, operator_id, claimed_at, released_at, completion_granted_at
             FROM goal_assignments
@@ -88,6 +88,27 @@ def test_upgrade_keeps_responsibility_and_owner_completion_without_grant(v7_work
         api.get_completion_grant(1)
     with pytest.raises(GoalValidationError, match="grant"):
         complete(1)
+    with pytest.raises(GoalValidationError, match="Definition grant"):
+        api.start_run(definition_grant_id=1)
+    advisory = api.start_run()["id"]
+    with pytest.raises(GoalValidationError, match="does not match"):
+        api.create_delegated_goal(
+            "Another",
+            retry_key="other",
+            call=api.start_tool_call(advisory, "create_goal"),
+        )
+    with pytest.raises(GoalValidationError, match="does not match"):
+        api.revise_delegated_goal(
+            2,
+            1,
+            title="Revised",
+            call=api.start_tool_call(
+                advisory,
+                "revise_goal",
+                target_goal_id=2,
+                target_revision=1,
+            ),
+        )
     assert api.get_goal(2)["status"] == "active"
     assert api.get_goal_history(2) == history
 

@@ -205,16 +205,24 @@ Calls use their start time. Timestamps can include fractional seconds. Entries
 with equal timestamps sort by revision, observation, call, and decision, then
 by their stable IDs. Each call gives its
 `run_id`, `sequence`, `tool`, `outcome` and `relationship` to the goal. The
-relationship is `listed`, `descendant`, `requested`, or `completion_target`.
+relationship is `listed`, `descendant`, `requested`, `completion_target`,
+`creation_result`, or `revision_target`.
 Requested targets contribute to the timeline when they resolved to an
-owner-visible goal at call start. Returned goals also contribute to the timeline.
+owner-visible goal at call start. Returned goals and committed or retrieved
+revision references also contribute to the timeline. A denied attempt appears
+in run history, and appears on the goal timeline if the target resolved at
+call start. The goal's definition, status, and decisions are preserved.
 For version 9 records, returned references and matching bound grants establish
 goal relationships. Older attempts with only a supplied ID remain in the run trace.
 The revision list remains available at `/goals/{goal_id}/history`.
 
 Follow a `run_id` to `GET /runs/{run_id}`. An advisory run has null operator and
-grant fields. A delegated run identifies the registered operator, exact grant
-and granted goal. The run outcome is `succeeded`, `failed`, or `unfinished`.
+grant fields. A delegated run identifies the registered operator and exact grant.
+Completion runs retain `completion_grant_id` and `granted_goal_id`. A run with
+a creation or revision grant includes `definition_grant` with `id`, `operator_id`,
+`action`, and `goal_id`. The action is `create_goal` for top-level creation with
+`goal_id: null`, or `revise_goal` for a single goal. The run outcome is
+`succeeded`, `failed`, or `unfinished`.
 A launch error, such as an existing trace file, marks the run `failed`.
 Calls are ordered by `sequence` and retain the requested goal ID and revision
 when supplied, including on denial. The call outcome is `returned`, `denied`,
@@ -229,6 +237,14 @@ decision and its `committing_call`. An identical authorized retry uses
 `retrieved_event_id`. The decision records the rationale, operator, and grant.
 The observation entries resolve each evidence ID to its submitter and timestamp.
 
+For goal definitions, a revision entry's `committing_call` identifies its run
+and sequence. Follow it to the call's `committed_revision`, which carries
+`goal_id` and `revision`. An identical authorized creation retry has its own call
+with `retrieved_revision` pointing to revision 1. A revision call with a stale
+`expected_revision` conflicts. A patch that leaves the definition unchanged can
+return the current revision without a commit. Direct owner and HTTP revisions
+have `committing_call: null`, as do revisions saved before definition auditing.
+
 `operator goal history GOAL_ID` and `operator run show RUN_ID` return the same
 records through `GoalAPI.get_goal_activity` and `GoalAPI.get_run`. Audit capture
 covers Harness MCP calls during `operator ask`. It stores typed references and
@@ -237,10 +253,10 @@ excluded. Direct CLI and HTTP reads fall outside capture. Owner reports entered
 through the CLI appear in the timeline with their original attribution.
 
 A read reference is saved before MCP hands the response to the transport.
-Receipt by the assistant can remain unknown if the connection drops. The
-completion transaction saves its committing call even if the call remains
+Receipt by the assistant can remain unknown if the connection drops. A revision
+or completion transaction saves its committing call even if the call remains
 `unfinished` after an interruption. Older decisions and direct owner completions
-have `committing_call: null`.
+have `committing_call: null`. All MCP goal writes require a recorded run.
 
 The `harness_api` package follows MVC. `GoalAPI`, `UserAPI`, and `OperatorAPI`
 own persistence and business rules. The FastAPI controllers call those models,

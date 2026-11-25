@@ -8,7 +8,7 @@ from typing import Literal
 
 DATABASE_PATH = Path(".harness/goals.sqlite3")
 ADMIN_USER_ID = 1
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def utc_timestamp() -> str:
@@ -46,7 +46,7 @@ class WorkspaceDatabase:
             (version,) = connection.execute("PRAGMA user_version").fetchone()
             if version == SCHEMA_VERSION:
                 return
-            if version not in (0, 7, 8, 9) or (
+            if version not in (0, 7, 8, 9, 10) or (
                 version == 0
                 and connection.execute(
                     "SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
@@ -54,7 +54,7 @@ class WorkspaceDatabase:
             ):
                 raise self.storage_error(
                     f"Cannot open workspace schema version {version}. "
-                    f"Use a version 7, 8, or 9 workspace or a fresh database for schema version {SCHEMA_VERSION}."
+                    f"Use a version 7 through 10 workspace or a fresh database for schema version {SCHEMA_VERSION}."
                 )
             snapshot = (
                 files("harness_api")
@@ -68,6 +68,8 @@ class WorkspaceDatabase:
                 self._upgrade_v7(connection, snapshot)
             if version == 9:
                 self._upgrade_v9(connection)
+            if version >= 9:
+                self._upgrade_v10(connection, snapshot)
             else:
                 self._upgrade_v8(connection, snapshot)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -134,6 +136,43 @@ class WorkspaceDatabase:
             DROP INDEX run_calls_by_target;
             CREATE INDEX run_calls_by_resolved_goal ON run_calls(resolved_goal_id)
                 WHERE resolved_goal_id IS NOT NULL;
+        """)
+
+    @staticmethod
+    def _upgrade_v10(connection: sqlite3.Connection, snapshot: str) -> None:
+        definition_grant_schema = snapshot.split(
+            "-- Begin definition grant schema\n", 1
+        )[1].split("-- End definition grant schema\n", 1)[0]
+        run_call_schema = snapshot.split("-- Begin run call schema\n", 1)[1].split(
+            "-- End run call schema\n", 1
+        )[0]
+        connection.executescript(definition_grant_schema)
+        # Rebuild the calls and their dependent results to widen the tool constraint.
+        connection.executescript("""
+            ALTER TABLE operator_runs ADD COLUMN definition_grant_id INTEGER
+                REFERENCES goal_definition_grants(id)
+                CHECK (definition_grant_id IS NULL OR completion_grant_id IS NULL);
+            ALTER TABLE run_call_goals RENAME TO v10_run_call_goals;
+            ALTER TABLE run_calls RENAME TO v10_run_calls;
+            DROP INDEX run_calls_by_resolved_goal;
+            DROP INDEX run_call_goals_by_goal;
+        """)
+        connection.executescript(run_call_schema)
+        connection.executescript("""
+            INSERT INTO run_calls (
+                run_id, sequence, tool, target_goal_id, target_revision, started_at,
+                finished_at, outcome, committed_event_id, retrieved_event_id, resolved_goal_id
+            ) SELECT run_id, sequence, tool, target_goal_id, target_revision, started_at,
+                finished_at, outcome, committed_event_id, retrieved_event_id, resolved_goal_id
+            FROM v10_run_calls;
+            INSERT INTO run_call_goals (
+                run_id, sequence, position, goal_id, revision, status, observation_ids,
+                decision_event_id, cited_evidence_ids, statement_evidence_id
+            ) SELECT run_id, sequence, position, goal_id, revision, status, observation_ids,
+                     decision_event_id, cited_evidence_ids, statement_evidence_id
+            FROM v10_run_call_goals;
+            DROP TABLE v10_run_call_goals;
+            DROP TABLE v10_run_calls;
         """)
 
     @contextmanager

@@ -173,6 +173,33 @@ def withdraw_completion(grant_id: int) -> None:
 
 
 @goal.command()
+@click.argument("operator_id", type=POSITIVE_INTEGER)
+def grant_create(operator_id: int) -> None:
+    """Grant creation authority and return the new grant.
+
+    This operator may create top-level goals in this workspace until you withdraw the grant.
+    """
+    print_record(GoalAPI().grant_definition("create_goal", operator_id))
+
+
+@goal.command()
+@click.argument("goal_id", type=POSITIVE_INTEGER)
+@click.argument("operator_id", type=POSITIVE_INTEGER)
+def grant_revision(goal_id: int, operator_id: int) -> None:
+    """Grant revision authority for the specified goal and return the new grant."""
+    print_record(
+        GoalAPI().grant_definition("revise_goal", operator_id, goal_id=goal_id)
+    )
+
+
+@goal.command()
+@click.argument("grant_id", type=POSITIVE_INTEGER)
+def withdraw_definition_grant(grant_id: int) -> None:
+    """Withdraw a creation or revision grant and invalidate sessions bound to it."""
+    print_record(GoalAPI().withdraw_definition_grant(grant_id))
+
+
+@goal.command()
 @click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.option(
     "--tree",
