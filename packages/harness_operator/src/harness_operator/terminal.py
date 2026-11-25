@@ -3,6 +3,8 @@ import sys
 
 import click
 
+POSITIVE_INTEGER = click.IntRange(1, 2**63 - 1)
+
 
 def read_message(message: str | None, prompt: str) -> str:
     if message is None:

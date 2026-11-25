@@ -74,11 +74,11 @@ async def test_lists_latest_revisions_and_current_assignments_for_admin(
     with closing(sqlite3.connect(tmp_path / DATABASE_PATH)) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript("""
-            INSERT INTO users (id, display_name) VALUES ('other', 'Other user');
+            INSERT INTO users (username, display_name) VALUES ('other', 'Other user');
             INSERT INTO operators (id, owner_user_id, name)
-                VALUES (1, 'admin', 'Alice'), (2, 'admin', 'Bob');
+                VALUES (1, 1, 'Alice'), (2, 1, 'Bob');
             INSERT INTO goals (id, owner_user_id, status)
-                VALUES (1, 'admin', 'active'), (2, 'admin', 'draft'), (3, 'other', 'active');
+                VALUES (1, 1, 'active'), (2, 1, 'draft'), (3, 2, 'active');
             INSERT INTO goal_revisions (goal_id, revision, title)
                 VALUES (1, 1, 'First title'), (1, 2, 'Current title');
             INSERT INTO goal_assignments (goal_id, operator_id, released_at)
@@ -115,7 +115,7 @@ async def test_progress_returns_selected_model_assessment(client, tmp_path):
     api = GoalAPI(tmp_path / DATABASE_PATH)
     goal = api.create_goal("Food log", status="active", target_distinct_dates=7)
     goal_id = goal["id"]
-    api.record_observation(
+    report = GoalAPI(tmp_path / DATABASE_PATH, local_owner=False).record_observation(
         goal_id,
         confirmation="Meals logged",
         reported_date="2026-11-23",
@@ -128,6 +128,8 @@ async def test_progress_returns_selected_model_assessment(client, tmp_path):
         )
         assert not result.isError
         assert result.structuredContent == api.get_goal_progress(goal_id, **args)
+        assert result.structuredContent["evidence"] == [report]
+        assert result.structuredContent["days"] == []
     invalid = await client.call_tool(
         "get_goal_progress", {"goal_id": goal_id, "revision": True}
     )

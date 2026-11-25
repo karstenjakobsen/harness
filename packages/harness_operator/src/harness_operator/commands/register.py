@@ -3,14 +3,19 @@ import click
 from harness_api import OperatorAPI
 
 from ..codex import register_codex
-from ..terminal import print_record
+from ..terminal import POSITIVE_INTEGER, print_record
 
 
 @click.command()
 @click.argument("name", required=False)
-@click.option("--user", "owner_user_id", help="Workspace owner ID. Defaults to admin.")
+@click.option(
+    "--user",
+    "owner_user_id",
+    type=POSITIVE_INTEGER,
+    help="Workspace owner ID. Defaults to admin.",
+)
 @click.option("--mission", help="What the operator is responsible for.")
-def register(name: str | None, owner_user_id: str | None, mission: str | None) -> None:
+def register(name: str | None, owner_user_id: int | None, mission: str | None) -> None:
     """Register a named workspace operator. With no arguments, sign in to Codex."""
     if name is None:
         if owner_user_id is not None or mission is not None:

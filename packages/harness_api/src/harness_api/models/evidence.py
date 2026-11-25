@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from typing import Literal, NotRequired, TypedDict
 
 type EvidenceSource = Literal[
@@ -27,9 +28,9 @@ class Evidence(TypedDict):
     reported_date: str | None
     occurred_at: str
     recorded_at: str
-    submitted_by: str | None
-    observed_by: str | None
-    requested_by: str | None
+    submitted_by: int | None
+    observed_by: int | None
+    requested_by: int | None
 
 
 class ReportedDay(TypedDict):
@@ -48,12 +49,6 @@ class DateAssessment(TypedDict):
     evidence: list[Evidence]
 
 
-def submitted_by(actor: str, source: EvidenceSource) -> str | None:
-    if source in ("unattributed_confirmation", "unattributed_reference"):
-        return None
-    return actor
-
-
 def evidence_record(row: sqlite3.Row) -> Evidence:
     payload: EvidenceStatement = json.loads(row["payload"])
     source = payload["evidence_kind"]
@@ -66,8 +61,8 @@ def evidence_record(row: sqlite3.Row) -> Evidence:
         reported_date=payload.get("reported_date"),
         occurred_at=row["occurred_at"],
         recorded_at=row["recorded_at"],
-        submitted_by=submitted_by(row["actor"], source),
-        observed_by=row["actor"] if source == "owner_confirmation" else None,
+        submitted_by=row["actor_user_id"],
+        observed_by=row["actor_user_id"] if source == "owner_confirmation" else None,
         requested_by=None,
     )
 
@@ -84,18 +79,29 @@ def add_evidence(
     connection: sqlite3.Connection,
     goal_id: int,
     revision: int,
-    actor: str,
+    actor_user_id: int | None,
     payload: EvidenceStatement,
     retry_key: str | None = None,
 ) -> Evidence:
     row = connection.execute(
         """
-        INSERT INTO goal_events (goal_id, revision, kind, actor, payload, retry_key)
+        INSERT INTO goal_events (goal_id, revision, kind, actor_user_id, payload, retry_key)
         VALUES (?, ?, 'observation', ?, ?, ?) RETURNING *
     """,
-        (goal_id, revision, actor, json.dumps(payload), retry_key),
+        (goal_id, revision, actor_user_id, json.dumps(payload), retry_key),
     ).fetchone()
     return evidence_record(row)
+
+
+def is_future_dated(record: Evidence) -> bool:
+    """Compare the claimed day to the UTC day Harness received the report."""
+    day = record["reported_date"]
+    if day is None:
+        return False
+    recorded_at = datetime.fromisoformat(record["recorded_at"])
+    if recorded_at.tzinfo is not None:
+        recorded_at = recorded_at.astimezone(UTC)
+    return day > recorded_at.date().isoformat()
 
 
 def assess_dates(
@@ -113,15 +119,17 @@ def assess_dates(
             evidence=records,
         )
     by_date: dict[str, list[int]] = {}
-    supporting = []
     for record in records:
         day = record["reported_date"]
-        if record["source"] != "owner_confirmation" or day is None:
+        if (
+            record["source"] != "owner_confirmation"
+            or day is None
+            or is_future_dated(record)
+        ):
             continue
         if window is not None and not window[0] <= day <= window[1]:
             continue
         by_date.setdefault(day, []).append(record["evidence_id"])
-        supporting.append(record)
     start, end = window or (None, None)
     return DateAssessment(
         rule="count_distinct_reported_dates",
@@ -134,5 +142,5 @@ def assess_dates(
             ReportedDay(reported_date=day, evidence_ids=by_date[day])
             for day in sorted(by_date)
         ],
-        evidence=supporting,
+        evidence=records,
     )

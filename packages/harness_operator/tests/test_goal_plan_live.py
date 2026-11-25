@@ -231,6 +231,24 @@ def test_ask_explains_saved_plan_through_mcp(live_directory, workspace, run, goa
 
 
 @pytest.mark.live
+def test_message_draft_sets_distinct_date_target_and_window(run, goal):
+    run(
+        "goal",
+        "create",
+        "Log food on seven distinct dates within a 14-day window starting December 1, 2026. I will confirm each date.",
+    )
+    [draft] = goal("list")
+    assert draft["status"] == "draft"
+    progress = goal("progress", draft["id"])
+    assert (
+        progress["count"],
+        progress["target"],
+        progress["window_start"],
+        progress["window_end"],
+    ) == (0, 7, "2026-12-01", "2026-12-14")
+
+
+@pytest.mark.live
 def test_ask_explains_monday_progress_before_and_after_revision(
     live_directory, run, goal
 ):
@@ -285,4 +303,4 @@ def test_ask_explains_monday_progress_before_and_after_revision(
         )
         [day] = answer["days"]
         assert day["reported_date"] == monday and sorted(day["evidence_ids"]) == ids
-        assert (day["source"], day["submitted_by"]) == ("owner_confirmation", "admin")
+        assert (day["source"], day["submitted_by"]) == ("owner_confirmation", 1)

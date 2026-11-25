@@ -16,12 +16,12 @@ Add `--help` to any command or group to see its options.
 ## Workspace users and operators
 
 These commands use the current workspace database and print JSON. Every operator
-record has one owner. The default owner is the protected system user `admin`.
+record has one owner. The default owner is the protected system user `admin` (ID 1). Use the numeric IDs returned by creation commands for subsequent operations.
 See how each entry point determines the target, owner and caller in [Identity and attribution](TERMINOLOGY.md#identity-and-attribution).
 
 | Command | What it does |
 | --- | --- |
-| `operator user create USER_ID [--name DISPLAY_NAME]` | Creates a user. The display name defaults to the ID. |
+| `operator user create USERNAME [--name DISPLAY_NAME]` | Creates a user and returns the generated ID. The display name defaults to the username. |
 | `operator user get USER_ID` | Gets a current user by ID. |
 | `operator user list` | Lists current users. |
 | `operator user update USER_ID --name DISPLAY_NAME` | Updates the display name and preserves the user ID. |
@@ -49,7 +49,7 @@ other goal commands access the local database directly and print JSON.
 | `operator goal show GOAL_ID` | Shows the current goal. Add `--tree` for its descendants and current completion decisions, or `--history` for revision creation times, evidence recorded under each revision, and saved decisions. |
 | `operator goal revise GOAL_ID FIELDS` | Updates the supplied fields and appends a revision when the definition changes. Use `--title TITLE` to rename the goal. |
 | `operator goal observe GOAL_ID --retry-key KEY [--reported-date YYYY-MM-DD] EVIDENCE` | Records an owner confirmation or owner-supplied reference. Reuse the key for an identical retry. Use separate keys for intentional reports about the same day. |
-| `operator goal progress GOAL_ID [--revision N]` | Assesses the current or selected revision using the evidence available now. Returns goal status, result, qualifying dates and their evidence IDs. Prose-only criteria return the available records. |
+| `operator goal progress GOAL_ID [--revision N]` | Assesses the current or selected revision. `evidence` contains every record considered. `days` lists each qualifying date and its supporting IDs. |
 | `operator goal complete GOAL_ID --revision N EVIDENCE [--evidence-id ID]...` | Completes the current revision and cites the supplied records from this goal. Returns the saved decision on an identical retry. |
 
 For `FIELDS`, use `--desired-outcome`, `--success-criteria`, `--measurement-plan`,
@@ -59,8 +59,8 @@ requires at least one field or a new title.
 
 Use `--target-distinct-dates N` to count distinct dates confirmed by the owner.
 With `--duration-days D`, the inclusive window begins on `--window-start YYYY-MM-DD`
-or the goal’s UTC creation date and lasts D calendar days. Without a duration,
-all reported dates qualify if they have owner confirmation.
+or the goal’s UTC creation date and lasts D calendar days. Without a duration, the rule has no time window. A new report can concern
+today in UTC or an earlier date. Future dates are rejected.
 
 For `EVIDENCE`, supply exactly one of `--confirmation TEXT` or `--reference REF`.
 A reference keeps its owner-supplied provenance. `complete` returns the statement’s

@@ -39,33 +39,33 @@ Use `codex login status` to check it. [Codex authentication guide](https://devel
 ## Workspace users and operators
 
 `UserAPI` and `OperatorAPI` manage accounts in the same SQLite database as
-`GoalAPI`. Each workspace starts with the protected system user `admin`.
-Register a named operator for a user with `--user`, or omit the option to use
-`admin`. For example, in a new workspace the first operator receives ID 1.
+`GoalAPI`. SQLite assigns integer IDs when it creates records. The protected system
+user `admin` has ID 1. Use the ID returned by `operator user create` with
+`--user`. Omitting the option registers the operator under `admin`.
+In this fresh-workspace example, Sam receives user ID 2 and Planner receives operator ID 1.
 
 ```sh
 operator user create sam --name "Sam Lee"
-operator register Planner --user sam
-operator list --user sam
+operator register Planner --user 2
+operator list --user 2
 operator unregister 1
-operator user delete sam
+operator user delete 2
 ```
 
 Unregistering an operator timestamps its record and releases its open goal
 assignments. After a user's last operator is unregistered, the user can be
 soft-deleted. Ownership and assignment history survive both operations, and
-deleted user IDs stay reserved. See the [CLI command catalog](CATALOG.md).
+deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.md).
 
 ## Saved goals
 
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
 On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Workspaces on schema versions 1 through 5 upgrade in place
-to version 6. Each existing completion statement receives a stable evidence ID.
-For pre-v5 workspaces the upgrade renames the original `local` owner to `admin`, including its goal
-and operator ownership and completion attribution. If a separate `admin`
-user already exists, the upgrade stops so the two identities can be resolved.
+`001_initial.sql`. Schema version 7 requires a fresh database. Opening an older or
+unrecognized workspace returns an error and leaves the file intact. To reset a
+disposable workspace, stop its Harness processes, remove `.harness/goals.sqlite3`,
+and run `operator user list` to create a new database.
 
 The schema gives each goal a stable ID, an owner, and a status. Goal revisions
 store titles and outcomes. Operator assignments have their own history, and
@@ -92,6 +92,9 @@ Codex drafts the outcome, success criteria, and measurement plan from your
 request. `duration` describes a one-time result or a standing goal.
 `duration_days` records the time window when supplied. For example, “Track food
 for seven days” saves a window of 7 days. An unspecified window is stored as null.
+“Log food on seven distinct dates within 14 days starting December 1, 2026” sets
+`target_distinct_dates` to 7, `duration_days` to 14, and `window_start` to
+`2026-12-01`. The draft can show progress as soon as it is saved.
 
 The command saves a draft, prints its ID, and asks a focused question if it
 needs clarification. Unclear details can stay open. SQLite keeps your original
@@ -153,7 +156,7 @@ curl --fail --silent --show-error http://127.0.0.1:8000/goals
 
 | Method | Path | Operation |
 | --- | --- | --- |
-| `GET`, `POST` | `/users` | List users or create one with `id` and optional `display_name` |
+| `GET`, `POST` | `/users` | List users or create one with `username` and optional `display_name`. Creation returns the generated numeric `id` |
 | `GET`, `PATCH`, `DELETE` | `/users/{user_id}` | Read a user, update their `display_name`, or soft-delete them. Deleting `admin` or a registered operator’s owner returns HTTP 409 |
 | `GET`, `POST` | `/operators` | List registered operators, optionally filtered by `owner_user_id`, or register one with `name`, optional `owner_user_id`, and optional `mission` |
 | `GET`, `DELETE` | `/operators/{operator_id}` | Read a registered operator or unregister it and release its open assignments |
@@ -168,8 +171,10 @@ curl --fail --silent --show-error http://127.0.0.1:8000/goals
 | `DELETE` | `/goals/{goal_id}` | Soft-delete a leaf and close its assignment. A parent with visible children returns HTTP 409 |
 
 An identical observation retry returns HTTP 200 with the original evidence ID.
-Reusing its key with different report content returns 409. A stale completion
-revision, conflicting completion retry, or citation from another goal returns 422.
+Reusing a saved report’s key with different content returns 409. Submitting a new
+observation dated after today in UTC returns 422 and leaves its retry key available.
+A stale completion revision, conflicting completion retry, or citation from
+another goal returns 422.
 
 The `harness_api` package follows MVC. `GoalAPI`, `UserAPI`, and `OperatorAPI`
 own persistence and business rules. The FastAPI controllers call those models,

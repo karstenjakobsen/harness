@@ -12,9 +12,9 @@ from ..models.goals import (
     GoalRevision,
     GoalStatus,
 )
+from . import PositiveInteger
 
 GoalTitle = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
 
 # These endpoints return the public model records verbatim.
 EvidenceView = Evidence
@@ -39,9 +39,7 @@ class GoalCreateRequest(GoalDefinitionFields):
 
     title: GoalTitle
     status: GoalCreationStatus = "draft"
-    parent_goal_id: Annotated[int, Field(strict=True, ge=-(2**63), lt=2**63)] | None = (
-        None
-    )
+    parent_goal_id: PositiveInteger | None = None
     original_message: str | None = None
     clarification: str | None = None
 

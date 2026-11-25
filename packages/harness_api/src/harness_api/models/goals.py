@@ -21,11 +21,11 @@ from .evidence import (
     assess_dates,
     evidence_record,
     goal_evidence,
-    submitted_by,
+    is_future_dated,
 )
 
 EVENT_COLUMNS = """
-event.id AS event_id, event.actor, event.recorded_at, statement.payload, event.statement_evidence_id,
+event.id AS event_id, event.actor_user_id, event.recorded_at, statement.payload, event.statement_evidence_id,
 (SELECT json_group_array(evidence_id) FROM completion_citations
  WHERE decision_id = event.id) AS evidence_ids
 """
@@ -71,7 +71,7 @@ class GoalSummary(TypedDict):
     operator: str | None
 
 
-class GoalDraftFields(TypedDict):
+class _GoalFields(TypedDict):
     desired_outcome: str | None
     duration: GoalDuration | None
     duration_days: int | None
@@ -80,7 +80,14 @@ class GoalDraftFields(TypedDict):
     measurement_plan: str | None
 
 
-class GoalDefinition(GoalDraftFields):
+class GoalDraftFields(_GoalFields, total=False):
+    """Draft callers may omit the structured date criteria."""
+
+    target_distinct_dates: int | None
+    window_start: str | None
+
+
+class GoalDefinition(_GoalFields):
     target_distinct_dates: int | None
     window_start: str | None
 
@@ -95,7 +102,7 @@ class Completion(TypedDict):
     event_id: int
     goal_id: int
     revision: int
-    recorded_by: str | None
+    recorded_by: int | None
     recorded_at: str
     statement_evidence_id: int
     evidence_ids: list[int]
@@ -154,11 +161,9 @@ def _normalize_title(title: str) -> str:
     return title
 
 
-def _validate_integer(value: int, label: str, minimum: int = -(2**63)) -> None:
-    if type(value) is not int or not minimum <= value < 2**63:
-        raise GoalValidationError(
-            f"{label} must be an integer between {minimum} and {2**63 - 1}."
-        )
+def _validate_positive_integer(value: int, label: str) -> None:
+    if type(value) is not int or not 1 <= value < 2**63:
+        raise GoalValidationError(f"{label} must be a positive 64-bit integer.")
 
 
 def _calendar_date(value: str, label: str) -> str:
@@ -172,8 +177,8 @@ def _calendar_date(value: str, label: str) -> str:
 
 def _validate_definition(definition: GoalDefinition) -> None:
     if definition["target_distinct_dates"] is not None:
-        _validate_integer(
-            definition["target_distinct_dates"], "Target distinct dates", minimum=1
+        _validate_positive_integer(
+            definition["target_distinct_dates"], "Target distinct dates"
         )
     if definition["window_start"] is not None:
         _calendar_date(definition["window_start"], "Window start")
@@ -185,7 +190,7 @@ def _validate_definition(definition: GoalDefinition) -> None:
         if value is not None:
             _require_text(value, field)
     if definition["duration_days"] is not None:
-        _validate_integer(definition["duration_days"], "Duration in days", minimum=1)
+        _validate_positive_integer(definition["duration_days"], "Duration in days")
     if definition["duration"] is not None and definition["duration"] not in get_args(
         GoalDuration.__value__
     ):
@@ -235,7 +240,7 @@ def _completion(row: sqlite3.Row) -> Completion | None:
         event_id=row["event_id"],
         goal_id=row["id"],
         revision=row["revision"],
-        recorded_by=submitted_by(row["actor"], statement["evidence_kind"]),
+        recorded_by=row["actor_user_id"],
         statement_evidence_id=row["statement_evidence_id"],
         evidence_ids=sorted(json.loads(row["evidence_ids"])),
         recorded_at=row["recorded_at"],
@@ -346,13 +351,13 @@ class GoalAPI(WorkspaceDatabase):
             return self._get_goal(connection, goal_id)
 
     def get_goal(self, goal_id: int) -> Goal:
-        with self._connection(read_only=True) as connection:
+        with self._connection("ro") as connection:
             return self._get_goal(connection, goal_id)
 
     def get_goal_tree(self, goal_id: int) -> GoalTree:
         """Return the visible subtree as goal records linked by parent ID."""
-        _validate_integer(goal_id, "Goal ID")
-        with self._connection(read_only=True) as connection:
+        _validate_positive_integer(goal_id, "Goal ID")
+        with self._connection("ro") as connection:
             rows = connection.execute(
                 """
                 WITH RECURSIVE subtree(id) AS (
@@ -374,7 +379,7 @@ class GoalAPI(WorkspaceDatabase):
         return GoalTree(root_id=goal_id, goals=goals)
 
     def get_goal_history(self, goal_id: int) -> list[GoalRevision]:
-        with self._connection(read_only=True) as connection:
+        with self._connection("ro") as connection:
             connection.execute("BEGIN")
             self._get_goal(connection, goal_id)
             rows = connection.execute(
@@ -403,7 +408,7 @@ class GoalAPI(WorkspaceDatabase):
     def list_goals(self, status: GoalStatus | None = None) -> list[GoalSummary]:
         if status is not None and status not in get_args(GoalStatus.__value__):
             raise GoalValidationError(f"Unknown goal status {status!r}.")
-        with self._connection(read_only=True) as connection:
+        with self._connection("ro") as connection:
             rows = connection.execute(
                 SELECT_GOALS
                 + " AND (:status IS NULL OR goal.status = :status) ORDER BY goal.id",
@@ -497,15 +502,14 @@ class GoalAPI(WorkspaceDatabase):
         retry_key = _require_text(retry_key, "Retry key").strip()
         if not retry_key:
             raise GoalValidationError("Retry key must contain text.")
-        actor = self._submitter or "unknown"
         with self._write() as connection:
             goal = self._get_goal(connection, goal_id)
             existing = connection.execute(
                 """
                 SELECT * FROM goal_events WHERE goal_id = ? AND kind = 'observation'
-                    AND actor = ? AND retry_key = ?
+                    AND actor_user_id IS ? AND retry_key = ?
             """,
-                (goal_id, actor, retry_key),
+                (goal_id, self._submitter, retry_key),
             ).fetchone()
             if existing is not None:
                 if json.loads(existing["payload"]) != payload:
@@ -515,17 +519,27 @@ class GoalAPI(WorkspaceDatabase):
                 return evidence_record(existing)
             if goal["revision"] is None:
                 raise GoalValidationError("A goal needs a revision to record evidence.")
-            return add_evidence(
-                connection, goal_id, goal["revision"], actor, payload, retry_key
+            report = add_evidence(
+                connection,
+                goal_id,
+                goal["revision"],
+                self._submitter,
+                payload,
+                retry_key,
             )
+            if is_future_dated(report):
+                raise GoalValidationError(
+                    "Reported date cannot be in the future (UTC)."
+                )
+            return report
 
     def get_goal_progress(
         self, goal_id: int, revision: int | None = None
     ) -> GoalProgress:
         """Evaluate the selected revision using all evidence available in this read transaction."""
         if revision is not None:
-            _validate_integer(revision, "Revision", minimum=1)
-        with self._connection(read_only=True) as connection:
+            _validate_positive_integer(revision, "Revision")
+        with self._connection("ro") as connection:
             connection.execute("BEGIN")
             goal = self._get_goal(connection, goal_id)
             selected = goal["revision"] if revision is None else revision
@@ -558,7 +572,7 @@ class GoalAPI(WorkspaceDatabase):
         reference: str | None = None,
         evidence_ids: list[int] | tuple[int, ...] = (),
     ) -> Completion:
-        _validate_integer(revision, "Revision", minimum=1)
+        _validate_positive_integer(revision, "Revision")
         with self._write() as connection:
             goal = self._get_goal(connection, goal_id)
             if revision != goal["revision"]:
@@ -571,7 +585,7 @@ class GoalAPI(WorkspaceDatabase):
                     "Evidence IDs must be a list or tuple of integers."
                 )
             for evidence_id in evidence_ids:
-                _validate_integer(evidence_id, "Evidence ID", minimum=1)
+                _validate_positive_integer(evidence_id, "Evidence ID")
             citations = sorted(set(evidence_ids))
             if goal["status"] == "completed":
                 saved = goal["completion"]
@@ -600,21 +614,22 @@ class GoalAPI(WorkspaceDatabase):
                     raise GoalValidationError(
                         "Every cited evidence ID must belong to this goal."
                     )
-            actor = self._submitter or "unknown"
-            statement = add_evidence(connection, goal_id, revision, actor, payload)
+            statement = add_evidence(
+                connection, goal_id, revision, self._submitter, payload
+            )
             decision_id = connection.execute(
-                """INSERT INTO goal_events (goal_id, revision, kind, actor, payload, statement_evidence_id)
+                """INSERT INTO goal_events (goal_id, revision, kind, actor_user_id, payload, statement_evidence_id)
                    VALUES (?, ?, 'completion', ?, '{}', ?) RETURNING id""",
                 (
                     goal_id,
                     revision,
-                    actor,
+                    self._submitter,
                     statement["evidence_id"],
                 ),
             ).fetchone()[0]
             connection.executemany(
-                "INSERT INTO completion_citations (decision_id, evidence_id) VALUES (?, ?)",
-                [(decision_id, evidence_id) for evidence_id in citations],
+                "INSERT INTO completion_citations (goal_id, decision_id, evidence_id) VALUES (?, ?, ?)",
+                [(goal_id, decision_id, evidence_id) for evidence_id in citations],
             )
             connection.execute(
                 "UPDATE goals SET status = 'completed' WHERE id = ?", (goal_id,)
@@ -652,7 +667,7 @@ class GoalAPI(WorkspaceDatabase):
             )
 
     def _get_goal(self, connection: sqlite3.Connection, goal_id: int) -> Goal:
-        _validate_integer(goal_id, "Goal ID")
+        _validate_positive_integer(goal_id, "Goal ID")
         row = connection.execute(
             SELECT_GOALS + " AND goal.id = :id",
             {"owner": ADMIN_USER_ID, "id": goal_id},
@@ -704,13 +719,13 @@ class GoalAPI(WorkspaceDatabase):
 
     @staticmethod
     def _record_message(
-        connection: sqlite3.Connection, goal_id: int, actor: str, text: str
+        connection: sqlite3.Connection, goal_id: int, role: str, text: str
     ) -> None:
         _require_text(text, "Goal message")
         connection.execute(
             """
-            INSERT INTO goal_events (goal_id, revision, kind, actor, payload)
+            INSERT INTO goal_events (goal_id, revision, kind, message_role, payload)
             VALUES (?, 1, 'message', ?, ?)
             """,
-            (goal_id, actor, json.dumps({"text": text}, ensure_ascii=False)),
+            (goal_id, role, json.dumps({"text": text}, ensure_ascii=False)),
         )

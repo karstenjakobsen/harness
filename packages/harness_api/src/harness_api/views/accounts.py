@@ -1,10 +1,12 @@
 from pydantic import BaseModel, ConfigDict
 
+from . import PositiveInteger
+
 
 class UserCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str
+    username: str
     display_name: str | None = None
 
 
@@ -15,7 +17,8 @@ class UserUpdateRequest(BaseModel):
 
 
 class UserView(BaseModel):
-    id: str
+    id: int
+    username: str
     display_name: str
     created_at: str
     deleted_at: str | None
@@ -25,13 +28,13 @@ class OperatorRegisterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    owner_user_id: str | None = None
+    owner_user_id: PositiveInteger | None = None
     mission: str | None = None
 
 
 class OperatorView(BaseModel):
     id: int
-    owner_user_id: str
+    owner_user_id: int
     name: str
     mission: str | None
     created_at: str

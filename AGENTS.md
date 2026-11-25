@@ -23,7 +23,7 @@ Use `OperatorAPI.unregister_operator(operator_id)` as the reference operation. C
 
 ## Schema changes
 
-Keep the complete fresh-workspace schema in [001_initial.sql](packages/harness_api/src/harness_api/migrations/001_initial.sql). When stored data or tables need transformation, implement the version-aware upgrade in [WorkspaceDatabase](packages/harness_api/src/harness_api/database.py). Test a fresh workspace and a populated prior version, including reopening the upgraded database and checking that records and relationships survive. Resume numbered migration files only when the project explicitly adopts them.
+Keep the complete fresh-workspace schema in [001_initial.sql](packages/harness_api/src/harness_api/migrations/001_initial.sql). Schema version 7 requires a fresh database. Reject pre-v7 and populated unversioned workspaces without altering their contents. For subsequent versions, when stored data or tables need transformation, implement the version-aware upgrade in [WorkspaceDatabase](packages/harness_api/src/harness_api/database.py). Test a fresh workspace and a populated prior version, including reopening the upgraded database and checking that records and relationships survive. Resume numbered migration files only when the project explicitly adopts them.
 
 ## Tests and verification
 

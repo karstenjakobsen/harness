@@ -15,7 +15,7 @@ from harness_api import (
 )
 
 from ..codex import exit_code, generate_goal_draft
-from ..terminal import print_record, read_message
+from ..terminal import POSITIVE_INTEGER, print_record, read_message
 
 
 def create_goal(message: str) -> int:
@@ -53,10 +53,6 @@ def goal() -> None:
     """Manage goals in the current workspace."""
 
 
-GOAL_ID = click.IntRange(-(2**63), 2**63 - 1)
-POSITIVE_INTEGER = click.IntRange(1, 2**63 - 1)
-
-
 def definition_options(command: Callable) -> Callable:
     """Attach the editable revision fields to both owner commands."""
     options = [
@@ -92,7 +88,7 @@ def list_workspace_goals() -> None:
 @goal.command()
 @click.argument("message", required=False)
 @click.option("--title", help="Save an active workspace goal with this exact title.")
-@click.option("--parent", "parent_goal_id", type=GOAL_ID)
+@click.option("--parent", "parent_goal_id", type=POSITIVE_INTEGER)
 @definition_options
 def create(
     message: str | None, title: str | None, parent_goal_id: int | None, **fields
@@ -117,7 +113,7 @@ def create(
 
 
 @goal.command()
-@click.argument("goal_id", type=GOAL_ID)
+@click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.option("--title", help="New goal title.")
 @definition_options
 def revise(goal_id: int, **fields) -> None:
@@ -129,7 +125,7 @@ def revise(goal_id: int, **fields) -> None:
 
 
 @goal.command()
-@click.argument("goal_id", type=GOAL_ID)
+@click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.option("--revision", type=POSITIVE_INTEGER, required=True)
 @click.option("--confirmation", help="The owner's confirmation of completion.")
 @click.option(
@@ -162,7 +158,7 @@ def complete(
 
 
 @goal.command()
-@click.argument("goal_id", type=GOAL_ID)
+@click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.option(
     "--tree",
     is_flag=True,
@@ -185,10 +181,13 @@ def show(goal_id: int, tree: bool, history: bool) -> None:
 
 
 @goal.command()
-@click.argument("goal_id", type=GOAL_ID)
+@click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.option("--confirmation", help="What the owner confirms.")
 @click.option("--reference", help="A reference supplied by the owner.")
-@click.option("--reported-date", help="The date the report concerns (YYYY-MM-DD).")
+@click.option(
+    "--reported-date",
+    help="The date the report concerns, through today in UTC (YYYY-MM-DD).",
+)
 @click.option(
     "--retry-key", required=True, help="Reuse this key when retrying this submission."
 )
@@ -198,12 +197,12 @@ def observe(goal_id: int, **report) -> None:
 
 
 @goal.command()
-@click.argument("goal_id", type=GOAL_ID)
+@click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.option(
     "--revision",
     type=POSITIVE_INTEGER,
     help="Assess this revision using the evidence available now.",
 )
 def progress(goal_id: int, revision: int | None) -> None:
-    """Assess progress and show the supporting records."""
+    """Show the assessment, all evidence considered, and the dates that counted."""
     print_record(GoalAPI().get_goal_progress(goal_id, revision))

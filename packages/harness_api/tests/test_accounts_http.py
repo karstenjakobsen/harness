@@ -1,4 +1,3 @@
-import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,36 +11,37 @@ def test_account_endpoints_share_ownership_and_deletion_rules(tmp_path):
         users = UserAPI(path)
         operators = OperatorAPI(path)
 
-        admin = users.get_user("admin")
+        admin = users.get_user(1)
         assert client.get("/users").json() == [admin]
-        assert client.delete("/users/admin").status_code == 409
-        response = client.post("/users", json={"id": "sam"})
+        assert client.delete("/users/1").status_code == 409
+        response = client.post("/users", json={"username": "sam"})
+        assert response.status_code == 201
+        owner_id = response.json()["id"]
+        user_url = response.headers["Location"]
+        assert user_url == f"/users/{owner_id}"
         assert (
-            response.status_code == 201 and response.headers["Location"] == "/users/sam"
+            response.json() == users.get_user(owner_id) == client.get(user_url).json()
         )
-        assert (
-            response.json() == users.get_user("sam") == client.get("/users/sam").json()
-        )
-        updated = client.patch("/users/sam", json={"display_name": "Sam Lee"})
+        updated = client.patch(user_url, json={"display_name": "Sam Lee"})
         assert (
             updated.status_code == 200
-            and users.get_user("sam")["display_name"] == "Sam Lee"
+            and users.get_user(owner_id)["display_name"] == "Sam Lee"
         )
-        assert updated.json() == users.get_user("sam")
+        assert updated.json() == users.get_user(owner_id)
 
         default = client.post("/operators", json={"name": "Coach"})
-        assert default.status_code == 201 and default.json()["owner_user_id"] == "admin"
+        assert default.status_code == 201 and default.json()["owner_user_id"] == 1
         registration = client.post(
-            "/operators", json={"name": "Planner", "owner_user_id": "sam"}
+            "/operators", json={"name": "Planner", "owner_user_id": owner_id}
         )
         assert registration.status_code == 201
         route = registration.headers["Location"]
         operator = operators.get_operator(registration.json()["id"])
         assert client.get(route).json() == registration.json() == operator
-        assert client.get("/operators", params={"owner_user_id": "sam"}).json() == [
+        assert client.get("/operators", params={"owner_user_id": owner_id}).json() == [
             operator
         ]
-        conflict = client.delete("/users/sam")
+        conflict = client.delete(user_url)
         assert (
             conflict.status_code == 409
             and "registered operator" in conflict.json()["detail"]
@@ -50,49 +50,48 @@ def test_account_endpoints_share_ownership_and_deletion_rules(tmp_path):
         assert client.delete(route).status_code == 204
         assert client.get(route).status_code == 404
         assert client.get("/operators").json() == [default.json()]
-        assert client.delete("/users/sam").status_code == 204
-        assert client.get("/users/sam").status_code == 404
+        assert client.delete(user_url).status_code == 204
+        assert client.get(user_url).status_code == 404
         assert client.get("/users").json() == [admin]
-        assert client.post("/users", json={"id": "sam"}).status_code == 409
+        assert client.post("/users", json={"username": "sam"}).status_code == 409
         assert (
             client.post(
-                "/operators", json={"name": "Again", "owner_user_id": "sam"}
+                "/operators", json={"name": "Again", "owner_user_id": owner_id}
             ).status_code
             == 404
         )
 
 
-@pytest.mark.parametrize("user_id", ["søren/a?b#c", "..", "team%2Fone"])
-@pytest.mark.parametrize("anyio_backend", ["asyncio"])
-@pytest.mark.anyio
-async def test_created_user_location_round_trips_text_ids(
-    tmp_path, user_id, anyio_backend
-):
-    app = create_app(tmp_path / "accounts.sqlite3")
-    # ASGITransport decodes the wire path once, as Uvicorn does.
-    async with (
-        app.router.lifespan_context(app),
-        httpx2.AsyncClient(
-            transport=httpx2.ASGITransport(app=app), base_url="http://testserver"
-        ) as client,
-    ):
-        response = await client.post("/users", json={"id": user_id})
+@pytest.mark.parametrize("username", ["søren/a?b#c", "..", "team%2Fone"])
+def test_username_is_independent_of_generated_user_location(tmp_path, username):
+    with TestClient(create_app(tmp_path / "accounts.sqlite3")) as client:
+        response = client.post("/users", json={"username": username})
         assert response.status_code == 201
         url = response.headers["Location"]
-        assert (await client.get(url)).json()["id"] == user_id
-        assert (await client.patch(url, json={"display_name": "Name"})).json()[
-            "id"
-        ] == user_id
-        assert (await client.delete(url)).status_code == 204
+        user = client.get(url).json()
+        assert user["username"] == username
+        assert url == f"/users/{user['id']}"
 
 
 def test_account_http_errors(tmp_path):
     path = tmp_path / "accounts.sqlite3"
     with TestClient(create_app(path)) as client:
-        assert client.post("/users", json={"id": " "}).status_code == 422
+        assert client.post("/users", json={"username": " "}).status_code == 422
         assert (
-            client.patch("/users/admin", json={"display_name": None}).status_code == 422
+            client.post("/users", json={"username": "sam", "id": 50}).status_code == 422
         )
+        assert (
+            client.post("/operators", json={"name": "Coach", "id": 50}).status_code
+            == 422
+        )
+        for invalid_id in ("1", True, 1.5, 0, 2**63):
+            assert (
+                client.post(
+                    "/operators", json={"name": "Coach", "owner_user_id": invalid_id}
+                ).status_code
+                == 422
+            )
+        assert client.patch("/users/1", json={"display_name": None}).status_code == 422
         assert (
             client.post(
                 "/operators", json={"name": "Coach", "deleted_at": "now"}

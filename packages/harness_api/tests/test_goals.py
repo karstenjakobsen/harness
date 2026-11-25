@@ -43,7 +43,7 @@ def test_save_draft_returns_the_clarification_it_recorded(
     assert goal["status"] == "draft" and clarification == question
     with closing(sqlite3.connect(path)) as connection:
         questions = connection.execute(
-            "SELECT json_extract(payload, '$.text') FROM goal_events WHERE goal_id = ? AND actor = 'operator'",
+            "SELECT json_extract(payload, '$.text') FROM goal_events WHERE goal_id = ? AND message_role = 'operator'",
             (goal["id"],),
         ).fetchall()
     assert questions == ([(question,)] if question else [])
@@ -80,7 +80,7 @@ def test_create_read_update_and_delete_goal(tmp_path):
 
     with closing(sqlite3.connect(path, autocommit=True)) as connection:
         connection.executescript("""
-            INSERT INTO operators (id, owner_user_id, name) VALUES (1, 'admin', 'Alice');
+            INSERT INTO operators (id, owner_user_id, name) VALUES (1, 1, 'Alice');
             INSERT INTO goal_assignments (goal_id, operator_id) VALUES (1, 1);
             """)
         assert api.get_goal(goal_id)["operator"] == "Alice"
@@ -109,21 +109,18 @@ def test_create_read_update_and_delete_goal(tmp_path):
     assert api.create_goal("Another goal")["id"] > goal_id
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4])
-def test_migrates_existing_database_and_limits_operations_to_admin(
-    legacy_database, version
-):
-    path = legacy_database(version)
+def test_goal_operations_are_scoped_to_admin(tmp_path):
+    path = tmp_path / "workspace.sqlite3"
+    api = GoalAPI(path)
     with closing(sqlite3.connect(path, autocommit=True)) as connection:
         connection.executescript("""
-            INSERT INTO users (id, display_name) VALUES ('other', 'Other user');
+            INSERT INTO users (username, display_name) VALUES ('other', 'Other user');
             INSERT INTO goals (id, owner_user_id, status)
-                VALUES (12, 'local', 'active'), (13, 'other', 'active');
+                VALUES (12, 1, 'active'), (13, 2, 'active');
             INSERT INTO goal_revisions (goal_id, revision, title)
                 VALUES (12, 1, 'Saved goal'), (13, 1, 'Other user goal');
             """)
 
-    api = GoalAPI(path)
     assert [goal["id"] for goal in api.list_goals()] == [12]
     assert api.get_goal(12)["title"] == "Saved goal"
     assert api.get_goal(12)["parent_goal_id"] is None
@@ -137,7 +134,6 @@ def test_migrates_existing_database_and_limits_operations_to_admin(
     with pytest.raises(GoalNotFoundError):
         api.delete_goal(13)
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
         assert connection.execute(
             "SELECT deleted_at FROM goals WHERE id = 13"
         ).fetchone() == (None,)
@@ -165,7 +161,7 @@ def test_identical_completion_returns_original_decision(tmp_path):
     with pytest.raises(GoalValidationError, match="different completion"):
         api.complete_goal(goal["id"], 1, reference="I reviewed the notes")
     assert api.get_goal(goal["id"])["status"] == "completed"
-    assert decision["recorded_by"] == "admin"
+    assert decision["recorded_by"] == 1
     assert decision["evidence_kind"] == "owner_confirmation"
     assert decision["recorded_at"] and decision["event_id"]
     with closing(sqlite3.connect(path)) as connection:
@@ -182,7 +178,7 @@ def test_stale_completion_cannot_complete_a_revised_goal(tmp_path):
     evidence = "tracker-app:entry/123"
     decision = api.complete_goal(child["id"], 1, reference=evidence)
     assert decision["evidence_kind"] == "owner_supplied_reference"
-    assert decision["recorded_by"] == "admin" and decision["evidence"] == evidence
+    assert decision["recorded_by"] == 1 and decision["evidence"] == evidence
     revised = api.update_goal(child["id"], duration_days=14)
     with pytest.raises(GoalValidationError, match="Stale revision"):
         api.complete_goal(child["id"], 1, reference=evidence)
@@ -234,8 +230,9 @@ def test_invalid_ids_and_revisions_cannot_select_an_existing_goal(tmp_path):
     goal = api.create_goal("Review notes")
     with pytest.raises(GoalValidationError, match="Revision"):
         api.complete_goal(goal["id"], True, confirmation="Verified")
-    with pytest.raises(GoalValidationError, match="Goal ID"):
-        api.delete_goal(True)
+    for invalid_id in (True, -1, 0):
+        with pytest.raises(GoalValidationError, match="Goal ID"):
+            api.delete_goal(invalid_id)
     with pytest.raises(GoalValidationError, match="Goal ID"):
         api.create_goal("Child", parent_goal_id=2**63)
     with pytest.raises(GoalValidationError, match="Goal ID"):

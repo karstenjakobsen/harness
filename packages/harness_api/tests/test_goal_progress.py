@@ -1,6 +1,7 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import UTC, datetime
 from threading import Barrier
 
 import pytest
@@ -67,7 +68,7 @@ def test_monday_reports_support_both_revisions_and_keep_their_submission_history
         assert progress["days"] == [{"reported_date": monday, "evidence_ids": ids}]
         assert progress["evidence"] == [first, second]
     assert first["source"] == "owner_confirmation"
-    assert first["submitted_by"] == first["observed_by"] == "admin"
+    assert first["submitted_by"] == first["observed_by"] == 1
     assert first["requested_by"] is None
     late = api.record_observation(
         goal_id,
@@ -126,10 +127,84 @@ def test_count_uses_report_dates_within_both_inclusive_bounds(tmp_path):
         "2026-11-22",
         "2026-11-23",
     )
-    assert [r["reported_date"] for r in result["evidence"]] == [
-        "2026-11-22",
-        "2026-11-23",
+    records = api.get_goal_history(goal_id)[0]["evidence"]
+    assert result["evidence"] == records
+    assert result["days"] == [
+        {"reported_date": r["reported_date"], "evidence_ids": [r["evidence_id"]]}
+        for r in records[1:3]
     ]
+
+
+def test_unattributed_report_is_visible_with_zero_qualifying_days(tmp_path):
+    path = tmp_path / "goals.db"
+    owner = GoalAPI(path)
+    goal_id = owner.create_goal("Food log", status="active", target_distinct_dates=1)[
+        "id"
+    ]
+    assert owner.get_goal_progress(goal_id)["evidence"] == []
+    report = GoalAPI(path, local_owner=False).record_observation(
+        goal_id,
+        confirmation="Logged meals",
+        reported_date="2020-02-03",
+        retry_key="log",
+    )
+    progress = owner.get_goal_progress(goal_id)
+    assert (progress["result"], progress["count"], progress["days"]) == ("unmet", 0, [])
+    assert progress["evidence"] == [report]
+    assert (
+        report["source"] == "unattributed_confirmation"
+        and report["submitted_by"] is None
+    )
+
+
+def test_future_report_is_rejected_and_today_can_use_the_same_retry_key(tmp_path):
+    api = GoalAPI(tmp_path / "goals.db")
+    goal_id = api.create_goal("Food log", target_distinct_dates=1)["id"]
+    with pytest.raises(GoalValidationError, match="future"):
+        api.record_observation(
+            goal_id,
+            confirmation="Logged meals",
+            reported_date="9999-01-01",
+            retry_key="log",
+        )
+    assert api.get_goal_history(goal_id)[0]["evidence"] == []
+    today = datetime.now(UTC).date().isoformat()
+    report = api.record_observation(
+        goal_id, confirmation="Logged meals", reported_date=today, retry_key="log"
+    )
+    progress = api.get_goal_progress(goal_id)
+    assert progress["result"] == "met"
+    assert progress["days"] == [
+        {"reported_date": today, "evidence_ids": [report["evidence_id"]]}
+    ]
+
+
+def test_previously_accepted_advance_report_is_visible_and_retryable(tmp_path):
+    path = tmp_path / "goals.db"
+    api = GoalAPI(path)
+    goal_id = api.create_goal("Food log", target_distinct_dates=1)["id"]
+    with closing(sqlite3.connect(path, autocommit=True)) as connection:
+        connection.execute(
+            """
+            INSERT INTO goal_events (goal_id, revision, kind, actor_user_id, retry_key, recorded_at, payload)
+            VALUES (?, 1, 'observation', 1, 'early', '2020-02-02 23:59:59',
+                '{"evidence_kind":"owner_confirmation","evidence":"Logged","reported_date":"2020-02-03"}')
+        """,
+            (goal_id,),
+        )
+    [original] = api.get_goal_history(goal_id)[0]["evidence"]
+    assert (
+        api.record_observation(
+            goal_id,
+            confirmation="Logged",
+            reported_date="2020-02-03",
+            retry_key="early",
+        )
+        == original
+    )
+    progress = api.get_goal_progress(goal_id)
+    assert (progress["result"], progress["count"], progress["days"]) == ("unmet", 0, [])
+    assert progress["evidence"] == [original]
 
 
 def test_decision_freezes_cited_ids_and_keeps_its_own_statement(tmp_path):
@@ -173,67 +248,6 @@ def test_decision_freezes_cited_ids_and_keeps_its_own_statement(tmp_path):
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-@pytest.mark.parametrize("version", [3, 4, 5])
-def test_migrated_completion_remains_citable_after_reopen(legacy_database, version):
-    path = legacy_database(version)
-    owner = "admin" if version == 5 else "local"
-    with closing(sqlite3.connect(path, autocommit=True)) as connection:
-        connection.execute(
-            "INSERT INTO goals (id, owner_user_id, status) VALUES (7, ?, 'completed')",
-            (owner,),
-        )
-        connection.executescript("""
-            INSERT INTO goal_revisions (goal_id, revision, title, created_at)
-            VALUES (7, 1, 'Track meals', '2020-02-01 00:00:00');
-        """)
-        connection.execute(
-            """
-            INSERT INTO goal_events (id, goal_id, revision, kind, actor, occurred_at, recorded_at, payload)
-            VALUES (19, 7, 1, 'completion', ?, '2020-02-03 12:00:00', '2020-02-04 09:00:00',
-            '{"evidence_kind":"owner_supplied_reference","evidence":"app:entry/1"}')
-        """,
-            (owner,),
-        )
-    first = GoalAPI(path).get_goal_history(7)
-    reopened = GoalAPI(path)
-    assert reopened.get_goal_history(7) == first
-    [revision] = first
-    [record] = revision["evidence"]
-    assert record["reported_date"] is None and record["observed_by"] is None
-    assert (
-        record["source"],
-        record["submitted_by"],
-        record["occurred_at"],
-        record["recorded_at"],
-    ) == (
-        "owner_supplied_reference",
-        "admin",
-        "2020-02-03 12:00:00",
-        "2020-02-04 09:00:00",
-    )
-    assert revision["created_at"] == "2020-02-01 00:00:00"
-    assert revision["completion"] == {
-        "goal_id": 7,
-        "revision": 1,
-        "event_id": 19,
-        "recorded_by": "admin",
-        "recorded_at": record["recorded_at"],
-        "evidence_kind": record["source"],
-        "evidence": "app:entry/1",
-        "statement_evidence_id": record["evidence_id"],
-        "evidence_ids": [],
-    }
-    assert (
-        reopened.complete_goal(7, 1, reference="app:entry/1") == revision["completion"]
-    )
-    reopened.update_goal(7, title="Track again")
-    cited = reopened.complete_goal(
-        7, 2, confirmation="Reviewed", evidence_ids=[record["evidence_id"]]
-    )
-    assert cited["evidence_ids"] == [record["evidence_id"]]
-    assert reopened.get_goal_history(7)[0] == revision
-
-
 def test_late_monday_report_counts_for_closed_window_on_original_revision(tmp_path):
     api = GoalAPI(tmp_path / "goals.db")
     goal_id = api.create_goal(
@@ -258,15 +272,15 @@ def test_late_monday_report_counts_for_closed_window_on_original_revision(tmp_pa
 
 
 def test_bounded_count_defaults_to_goal_creation_even_for_a_later_revision(
-    legacy_database,
+    tmp_path,
 ):
-    path = legacy_database(5)
+    path = tmp_path / "workspace.db"
+    api = GoalAPI(path)
     with closing(sqlite3.connect(path, autocommit=True)) as connection:
         connection.executescript("""
-            INSERT INTO goals (id, owner_user_id, created_at) VALUES (3, 'admin', '2020-02-29T00:59:59+01:00');
+            INSERT INTO goals (id, owner_user_id, created_at) VALUES (3, 1, '2020-02-29T00:59:59+01:00');
             INSERT INTO goal_revisions (goal_id, revision, title) VALUES (3, 1, 'Track');
         """)
-    api = GoalAPI(path)
     api.update_goal(3, target_distinct_dates=2, duration_days=3)
     first_day = api.record_observation(
         3, confirmation="Logged", reported_date="2020-02-28", retry_key="first"

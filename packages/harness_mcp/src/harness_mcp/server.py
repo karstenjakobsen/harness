@@ -6,6 +6,8 @@ from pydantic import Field
 
 from harness_api import GoalAPI, GoalProgress, GoalStatus, GoalSummary, GoalTree
 
+PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
+
 
 class GoalList(TypedDict):
     goals: list[GoalSummary]
@@ -24,7 +26,7 @@ def create_server(api: GoalAPI) -> FastMCP:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_goal_tree(
-        goal_id: Annotated[int, Field(strict=True, ge=-(2**63), lt=2**63)],
+        goal_id: PositiveInteger,
     ) -> GoalTree:
         """Read a goal and all visible descendants, linked by parent_goal_id.
 
@@ -35,12 +37,14 @@ def create_server(api: GoalAPI) -> FastMCP:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_goal_progress(
-        goal_id: Annotated[int, Field(strict=True, ge=-(2**63), lt=2**63)],
-        revision: Annotated[int, Field(strict=True, ge=1, lt=2**63)] | None = None,
+        goal_id: PositiveInteger,
+        revision: PositiveInteger | None = None,
     ) -> GoalProgress:
         """Read the model's assessment, lifecycle status, dates and evidence citations.
 
         Omit revision for the latest criteria. Every revision uses evidence available now.
+        The evidence list contains all records considered. For distinct dates, days
+        cites owner confirmations within the window and dated on or before submission (UTC).
         """
         return api.get_goal_progress(goal_id, revision)
 

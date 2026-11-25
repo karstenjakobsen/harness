@@ -8,7 +8,7 @@ from typing import TextIO
 
 from pydantic import ConfigDict, TypeAdapter, with_config
 
-from harness_api import GoalDraftFields
+from harness_api import GoalDefinition
 
 OPERATOR_INSTRUCTIONS = """\
 You are the user's goal operator. Treat goals as flexible guidelines.
@@ -16,9 +16,10 @@ Read relevant workspace files when helpful and suggest a small next step.
 Use the harness_mcp list_goals tool to find saved goal IDs. For questions about a
 plan and its subgoals or completion decisions, call get_goal_tree with the goal ID.
 For progress questions call get_goal_progress. Use its assessed revision, count,
-target and lifecycle status. Cite the evidence IDs for each reported date and
-attribute records using the returned source and submitter. State when attribution
-or automatic assessment is unavailable.
+target and lifecycle status. Cite the qualifying evidence IDs listed under days.
+The evidence list includes every report considered. When explaining a report
+that did not count, cite its ID and use its source, dates and the assessed rule.
+State when attribution or automatic assessment is unavailable.
 Use the returned records to answer. List each goal on its own line with its status
 and the relevant timing or evidence. Draft, active, and paused goals are open.
 Attribute completion statements according to their saved provenance.
@@ -32,6 +33,9 @@ Decide duration and assessment type independently.
 Duration describes the kind of goal: one_time for a result verified once, or standing for ongoing maintenance.
 Use duration_days for the stated time window in whole days. For "track food for seven days", use 7.
 Leave duration_days null if the user has not specified a time window.
+Use target_distinct_dates for an explicit count of distinct dates confirmed by the owner.
+Use window_start (YYYY-MM-DD) for the stated start of a window with a duration.
+For seven distinct dates within fourteen days, set target_distinct_dates to 7 and duration_days to 14.
 Assessment is objective for a checkable result, judgment for human judgment, or mixed if both matter.
 Describe the desired outcome, what would count as success, and how to assess it when clear.
 Leave uncertain fields null. Ask one focused question if the goal needs clarification.
@@ -41,7 +45,7 @@ Return a draft definition only. Do not carry out the goal or run checks.
 
 
 @with_config(ConfigDict(extra="forbid", strict=True))
-class GoalDraft(GoalDraftFields):
+class GoalDraft(GoalDefinition):
     title: str
     clarification: str | None
 

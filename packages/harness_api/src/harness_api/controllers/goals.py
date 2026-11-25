@@ -25,7 +25,7 @@ def get_goal_api(request: Request) -> GoalAPI:
 
 
 GoalService = Annotated[GoalAPI, Depends(get_goal_api)]
-GoalId = Annotated[int, Path(ge=-(2**63), le=2**63 - 1)]
+GoalId = Annotated[int, Path(gt=0, lt=2**63)]
 
 
 @router.get("", response_model=list[GoalSummaryView])

@@ -42,7 +42,7 @@ def test_delete_conflict_preserves_visible_tree_and_assignment(tmp_path):
         ).json()["id"]
         with closing(sqlite3.connect(path, autocommit=True)) as connection:
             connection.execute(
-                "INSERT INTO operators (id, owner_user_id, name) VALUES (1, 'admin', 'Alice')"
+                "INSERT INTO operators (id, owner_user_id, name) VALUES (1, 1, 'Alice')"
             )
             connection.execute(
                 "INSERT INTO goal_assignments (goal_id, operator_id) VALUES (?, 1)",
@@ -204,7 +204,7 @@ def test_http_observations_keep_unknown_caller_and_completion_citations(tmp_path
         }
         obs = path + "/observations"
         for forged in (
-            {"submitted_by": "admin"},
+            {"submitted_by": 1},
             {"source": "machine"},
             {"observed_by": "app"},
         ):
@@ -228,6 +228,8 @@ def test_http_observations_keep_unknown_caller_and_completion_citations(tmp_path
             client.post(obs, json=report | {"reported_date": "2026-02-29"}).status_code
             == 422
         )
+        future = report | {"retry_key": "advance", "reported_date": "9999-01-01"}
+        assert client.post(obs, json=future).status_code == 422
         api = GoalAPI(db)
         local = api.record_observation(
             goal["id"],
@@ -241,8 +243,14 @@ def test_http_observations_keep_unknown_caller_and_completion_citations(tmp_path
         assert (progress["count"], progress["target"], progress["evidence"]) == (
             1,
             7,
-            [local],
+            [evidence, local],
         )
+        assert progress["days"] == [
+            {
+                "reported_date": local["reported_date"],
+                "evidence_ids": [local["evidence_id"]],
+            }
+        ]
         assert client.get(path + "/progress?revision=999").status_code == 422
         citations = [evidence["evidence_id"], local["evidence_id"]]
         body = {"revision": 2, "reference": "app:report/1", "evidence_ids": citations}

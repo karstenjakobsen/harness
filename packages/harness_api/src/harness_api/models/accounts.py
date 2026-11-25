@@ -5,7 +5,8 @@ from ..database import ADMIN_USER_ID, WorkspaceDatabase
 
 
 class User(TypedDict):
-    id: str
+    id: int
+    username: str
     display_name: str
     created_at: str
     deleted_at: str | None
@@ -13,7 +14,7 @@ class User(TypedDict):
 
 class Operator(TypedDict):
     id: int
-    owner_user_id: str
+    owner_user_id: int
     name: str
     mission: str | None
     created_at: str
@@ -38,15 +39,16 @@ def _text(value: str, field: str) -> str:
     return value.strip()
 
 
-def _operator_id(value: int) -> int:
-    if type(value) is not int or not -(2**63) <= value < 2**63:
-        raise AccountValidationError("Operator ID must be a signed 64-bit integer.")
+def _account_id(value: int, label: str) -> int:
+    if type(value) is not int or not 1 <= value < 2**63:
+        raise AccountValidationError(f"{label} ID must be a positive 64-bit integer.")
     return value
 
 
 def _user(row: sqlite3.Row) -> User:
     return User(
         id=row["id"],
+        username=row["username"],
         display_name=row["display_name"],
         created_at=row["created_at"],
         deleted_at=row["deleted_at"],
@@ -64,7 +66,7 @@ def _operator(row: sqlite3.Row) -> Operator:
     )
 
 
-def _get_user(connection: sqlite3.Connection, user_id: str) -> User:
+def _get_user(connection: sqlite3.Connection, user_id: int) -> User:
     row = connection.execute(
         "SELECT * FROM users WHERE id = ? AND deleted_at IS NULL",
         (user_id,),
@@ -77,34 +79,36 @@ def _get_user(connection: sqlite3.Connection, user_id: str) -> User:
 class UserAPI(WorkspaceDatabase):
     """Manage users in a workspace. Deleted user IDs remain reserved."""
 
-    def create_user(self, user_id: str, display_name: str | None = None) -> User:
-        user_id = _text(user_id, "User ID")
-        name = user_id if display_name is None else _text(display_name, "Display name")
+    def create_user(self, username: str, display_name: str | None = None) -> User:
+        username = _text(username, "Username")
+        name = username if display_name is None else _text(display_name, "Display name")
         with self._write() as connection:
             row = connection.execute(
-                """INSERT INTO users (id, display_name) VALUES (?, ?)
-                    ON CONFLICT (id) DO NOTHING RETURNING *""",
-                (user_id, name),
+                """INSERT INTO users (username, display_name)
+                    SELECT :username, :name WHERE NOT EXISTS
+                        (SELECT 1 FROM users WHERE username = :username)
+                    RETURNING *""",
+                {"username": username, "name": name},
             ).fetchone()
             if row is None:
                 raise AccountConflictError(
-                    f"User ID {user_id!r} is already in use or reserved."
+                    f"Username {username!r} is already in use or reserved."
                 )
             return _user(row)
 
-    def get_user(self, user_id: str) -> User:
-        with self._connection(read_only=True) as connection:
-            return _get_user(connection, _text(user_id, "User ID"))
+    def get_user(self, user_id: int) -> User:
+        with self._connection("ro") as connection:
+            return _get_user(connection, _account_id(user_id, "User"))
 
     def list_users(self) -> list[User]:
-        with self._connection(read_only=True) as connection:
+        with self._connection("ro") as connection:
             rows = connection.execute(
                 "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY id"
             )
             return [_user(row) for row in rows]
 
-    def update_user(self, user_id: str, display_name: str) -> User:
-        user_id = _text(user_id, "User ID")
+    def update_user(self, user_id: int, display_name: str) -> User:
+        user_id = _account_id(user_id, "User")
         name = _text(display_name, "Display name")
         with self._write() as connection:
             row = connection.execute(
@@ -116,8 +120,8 @@ class UserAPI(WorkspaceDatabase):
                 raise AccountNotFoundError(f"User {user_id!r} was not found.")
             return _user(row)
 
-    def delete_user(self, user_id: str) -> User:
-        user_id = _text(user_id, "User ID")
+    def delete_user(self, user_id: int) -> User:
+        user_id = _account_id(user_id, "User")
         if user_id == ADMIN_USER_ID:
             raise AccountConflictError("The system user admin cannot be deleted.")
         with self._write() as connection:
@@ -143,13 +147,15 @@ class OperatorAPI(WorkspaceDatabase):
     def register_operator(
         self,
         name: str,
-        owner_user_id: str | None = None,
+        owner_user_id: int | None = None,
         *,
         mission: str | None = None,
     ) -> Operator:
         name = _text(name, "Operator name")
         owner_user_id = (
-            ADMIN_USER_ID if owner_user_id is None else _text(owner_user_id, "User ID")
+            ADMIN_USER_ID
+            if owner_user_id is None
+            else _account_id(owner_user_id, "User")
         )
         if mission is not None:
             mission = _text(mission, "Mission")
@@ -163,19 +169,19 @@ class OperatorAPI(WorkspaceDatabase):
             return _operator(row)
 
     def get_operator(self, operator_id: int) -> Operator:
-        with self._connection(read_only=True) as connection:
+        with self._connection("ro") as connection:
             row = connection.execute(
                 "SELECT * FROM operators WHERE id = ? AND deleted_at IS NULL",
-                (_operator_id(operator_id),),
+                (_account_id(operator_id, "Operator"),),
             ).fetchone()
             if row is None:
                 raise AccountNotFoundError(f"Operator {operator_id} was not found.")
             return _operator(row)
 
-    def list_operators(self, owner_user_id: str | None = None) -> list[Operator]:
+    def list_operators(self, owner_user_id: int | None = None) -> list[Operator]:
         if owner_user_id is not None:
-            owner_user_id = _text(owner_user_id, "User ID")
-        with self._connection(read_only=True) as connection:
+            owner_user_id = _account_id(owner_user_id, "User")
+        with self._connection("ro") as connection:
             rows = connection.execute(
                 """SELECT * FROM operators WHERE deleted_at IS NULL
                     AND (:owner IS NULL OR owner_user_id = :owner) ORDER BY id""",
@@ -189,7 +195,7 @@ class OperatorAPI(WorkspaceDatabase):
             row = connection.execute(
                 """UPDATE operators SET deleted_at = CURRENT_TIMESTAMP
                     WHERE id = ? AND deleted_at IS NULL RETURNING *""",
-                (_operator_id(operator_id),),
+                (_account_id(operator_id, "Operator"),),
             ).fetchone()
             if row is None:
                 raise AccountNotFoundError(f"Operator {operator_id} was not found.")
