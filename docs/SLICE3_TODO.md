@@ -43,14 +43,6 @@ This increment adds one delegated action through one public completion operation
 - [x] Run `make check` and `make test` for model invariants and adapter contracts.
 - [x] Run the signed-in `make test-live` acceptance. All four tests passed. The same review request left the subgoal open with the tour and day-pass evidence, then completed it after the owner confirmed active membership. The decision cited that confirmation and the parent stayed active.
 
-## 3B — Optional machine checks, deferred
-
-Start after reviewing delegated completion. Keep the existing `one_time` and `standing` goal kinds. An operator with the appropriate grant can choose an available check and when to invoke it. The check’s contract determines exactly what its result establishes. [File-check example](SLICE3.md)
-
-- [ ] **Configure the revision.** Add an optional reference to the workload and named check. A `one_time` revision can explicitly authorize completion on a passing result. By default, a pass records evidence and leaves the goal open. A `standing` goal records each result and stays active.
-- [ ] **Collect the observation.** Start with a local HTTP fixture that reads a temporary file’s actual mode. Capture the revision, workload, check, target path and expected mode before fetching outside the write transaction. Record who requested the check, which adapter observed the result, and when. Keep Nomad workload lookup and HTTP details inside the adapter. A dedicated endpoint’s HTTP 200 establishes `0600` only when its contract guarantees that mode for that file. A generic health endpoint’s 200 establishes reachability.
-- [ ] **Apply the authorized outcome.** For a trusted pass on an opted-in, still-current revision and target, use the same `GoalAPI.complete_goal` operation as delegated completion. The model applies the revision’s instruction directly. Save the named check and its observation ID as the basis for completion in history. An unmet or unknown result records the check outcome and leaves the goal open.
-
 ### Machine-check acceptance
 
 | Fixture | Expected result |

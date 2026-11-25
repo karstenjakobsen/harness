@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 import subprocess
 import sysconfig
 from pathlib import Path
@@ -306,6 +307,72 @@ def test_ask_explains_monday_progress_before_and_after_revision(
         assert (day["source"], day["submitted_by"]) == ("owner_confirmation", 1)
 
 
+def assert_day_pass_answer(reply):
+    text = " ".join(reply.casefold().replace("’", "'").replace("*", "").split())
+    joining = r"join(?:ed|ing)?|sign(?:ed)? up|a (?:gym )?member"
+    membership = rf"\b(?:membership|{joining})\b"
+    missing = (
+        r"\b(?:missing|need|awaiting|unclear|insufficient|not enough|not an active|"
+        r"no (?:\w+ )?(?:evidence|proof|confirmation)|"
+        r"(?:open because|still) .*?requir\w*\b.*?\bconfirm\w*|"
+        r"(?:not|neither(?: record)?|cannot|\w+n't) (?:yet )?"
+        r"(?:confirm|show|establish|prove|verify|tell)\w*|please confirm)\b"
+    )
+    for clause in re.findall(r"[^,.!?;]+[!?]?", text):
+        if re.search(rf"{missing}.*{membership}", clause):
+            return
+        if re.search(
+            rf"{membership} (?:is |remains )?(?:still )?"
+            r"(?:unconfirmed|unclear|unknown|unverified|"
+            r"(?:not|hasn't been) (?:yet )?(?:confirmed|verified))\b",
+            clause,
+        ):
+            return
+        if clause.endswith("?") and re.search(
+            r"\b(?:did you|have you|do you|are you|is (?:the|your)|can you|could you)\b.*"
+            rf"\b(?:{joining}|active (?:gym )?membership|membership (?:is )?(?:currently )?active)\b",
+            clause,
+        ):
+            return
+    pytest.fail(
+        f"Expected the reply to identify or ask about unconfirmed membership: {reply!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "The day pass doesn't establish that your membership is active.",
+        "An active gym membership is still unconfirmed.",
+        "Your membership hasn’t been confirmed.",
+        "The receipt shows a visit, not an active membership.",
+        "What's missing is your confirmation of an active membership.",
+        "I left it open because revision 1 requires the owner to confirm that the membership is active.",
+        "Please confirm that your gym membership is active.",
+        "Is your gym membership active?",
+        "You toured the gym. Did you end up joining?",
+    ],
+)
+def test_day_pass_answer_accepts_a_missing_fact_or_a_question(reply):
+    assert_day_pass_answer(reply)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Your membership is active.",
+        "The receipt confirms you have an active gym membership.",
+        "Your membership is active. Please confirm the date of your visit.",
+        "The receipt is missing, but your membership is active.",
+        "Your membership is active. Do you have your membership card?",
+        "The goal is still open. I need a copy of the day pass.",
+    ],
+)
+def test_day_pass_answer_rejects_replies_that_miss_the_gap(reply):
+    with pytest.raises(pytest.fail.Exception):
+        assert_day_pass_answer(reply)
+
+
 @pytest.mark.live
 def test_delegated_operator_decides_when_membership_evidence_is_sufficient(
     live_directory, run, goal
@@ -348,8 +415,7 @@ def test_delegated_operator_decides_when_membership_evidence_is_sufficient(
     )
     assert goal("show", goal_id)["status"] == "active"
     assert goal("show", goal_id)["completion"] is None
-    assert "membership" in reply.lower()
-    assert any(word in reply.lower() for word in ("active", "confirm", "join"))
+    assert_day_pass_answer(reply)
 
     confirmation = goal(
         "observe",
