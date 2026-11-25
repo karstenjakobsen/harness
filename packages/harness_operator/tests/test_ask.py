@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 import subprocess
@@ -8,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from harness_operator import ask_codex
+from harness_api import GoalAPI, OperatorAPI
+from harness_operator import ask_codex, main
 
 
 def test_ask_connects_codex_to_workspace_mcp(monkeypatch, tmp_path):
@@ -54,3 +56,47 @@ def test_trace_is_private_exclusive_and_separate_from_reply(
     with pytest.raises(FileExistsError):
         ask_codex("List goals.", trace)
     assert trace.read_text(encoding="utf-8") == '{"type":"thread.started"}\n'
+
+
+def test_cli_grants_binds_and_withdraws_completion(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    goals = GoalAPI()
+    parent = goals.create_goal("Parent")
+    child = goals.create_goal("Child", parent_goal_id=parent["id"])
+    operator = OperatorAPI().register_operator("Reviewer")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["operator", "goal", "grant-completion", str(child["id"]), str(operator["id"])],
+    )
+    assert main() == 0
+    grant = json.loads(capsys.readouterr().out)
+    assert grant["goal_id"] == child["id"] and grant["operator_id"] == operator["id"]
+    launched = []
+
+    def run(command, **options):
+        overrides = [value for flag, value in pairwise(command) if flag == "-c"]
+        config = tomllib.loads("\n".join(overrides))
+        assert config["mcp_servers"]["harness_mcp"]["args"] == [
+            "-P",
+            "-m",
+            "harness_mcp.server",
+            "--completion-grant",
+            str(grant["id"]),
+        ]
+        assert command[command.index("--sandbox") + 1] == "read-only"
+        assert f"completion of subgoal {child['id']}" in options["input"]
+        launched.append(command)
+        return subprocess.CompletedProcess(command, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    ask_args = ["operator", "ask", "--completion-grant", str(grant["id"]), "Review."]
+    monkeypatch.setattr(sys, "argv", ask_args)
+    assert main() == 0
+    monkeypatch.setattr(
+        sys, "argv", ["operator", "goal", "withdraw-completion", str(grant["id"])]
+    )
+    assert main() == 0
+    monkeypatch.setattr(sys, "argv", ask_args)
+    assert main() == 1
+    assert "inactive" in capsys.readouterr().err and len(launched) == 1

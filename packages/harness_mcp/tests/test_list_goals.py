@@ -1,13 +1,13 @@
 import sqlite3
 import sys
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from datetime import timedelta
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from harness_api import DATABASE_PATH, GoalAPI, GoalConflictError
+from harness_api import DATABASE_PATH, GoalAPI, GoalConflictError, OperatorAPI
 
 
 @pytest.fixture
@@ -17,10 +17,16 @@ def anyio_backend():
 
 @pytest.fixture
 async def client(tmp_path):
+    async with workspace_client(tmp_path) as session:
+        yield session
+
+
+@asynccontextmanager
+async def workspace_client(path, *args):
     server = StdioServerParameters(
         command=sys.executable,
-        args=["-P", "-m", "harness_mcp.server"],
-        cwd=tmp_path,
+        args=["-P", "-m", "harness_mcp.server", *args],
+        cwd=path,
     )
     async with (
         stdio_client(server) as (reader, writer),
@@ -42,6 +48,50 @@ async def test_server_initializes_an_empty_goal_list(client, tmp_path):
     result = await client.call_tool("list_goals", {})
     assert result.structuredContent == {"goals": []}
     assert (tmp_path / DATABASE_PATH).is_file()
+
+
+@pytest.mark.anyio
+async def test_only_the_bound_session_can_complete_its_subgoal(client, tmp_path):
+    path = tmp_path / DATABASE_PATH
+    api = GoalAPI(path)
+    operator = OperatorAPI(path).register_operator("Reviewer")
+    parent = api.create_goal("Parent", status="active")
+    child = api.create_goal("Child", status="active", parent_goal_id=parent["id"])
+    report = api.record_observation(
+        child["id"], confirmation="Verified", retry_key="report"
+    )
+    first = api.grant_completion(child["id"], operator["id"])
+    request = {
+        "goal_id": child["id"],
+        "expected_revision": child["revision"],
+        "evidence_ids": [report["evidence_id"]],
+        "rationale": "Owner verified",
+    }
+    assert (await client.call_tool("complete_goal", request)).isError
+    async with workspace_client(
+        tmp_path, "--completion-grant", str(first["id"])
+    ) as old:
+        tools = await old.list_tools()
+        (write,) = [tool for tool in tools.tools if not tool.annotations.readOnlyHint]
+        assert write.name == "complete_goal"
+        assert write.inputSchema["properties"].keys() == request.keys()
+        assert write.inputSchema["additionalProperties"] is False
+        forged = await old.call_tool("complete_goal", request | {"operator_id": 999})
+        assert forged.isError
+        api.withdraw_completion(first["id"])
+        second = api.grant_completion(child["id"], operator["id"])
+        assert (await old.call_tool("complete_goal", request)).isError
+        assert api.get_goal(child["id"])["status"] == "active"
+    async with workspace_client(
+        tmp_path, "--completion-grant", str(second["id"])
+    ) as fresh:
+        result = await fresh.call_tool("complete_goal", request)
+        assert not result.isError, result.content
+        (history,) = GoalAPI(path).get_goal_history(child["id"])
+        assert result.structuredContent == history["completion"]
+        assert result.structuredContent["recorded_by_operator_id"] == operator["id"]
+        assert history["evidence"] == [report]
+        assert api.get_goal(parent["id"]) == parent
 
 
 @pytest.mark.anyio

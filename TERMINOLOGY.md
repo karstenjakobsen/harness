@@ -8,7 +8,7 @@
 | Owner | The user related to a particular resource by its `owner_user_id`. |
 | Registered operator | A workspace record with its own numeric ID, an owning user and optional goal assignments. |
 | Assignment | The recorded relationship between a goal and the registered operator responsible for it. Unregistering the operator releases its open assignments. Completion authority requires an explicit grant. |
-| Delegation | The owner’s explicit grant of a specific action on a specific goal to a registered operator. The first planned grant permits completion of one assigned subgoal. |
+| Delegation | The owner’s explicit grant of a specific action on a specific goal to a registered operator. A completion grant uses the ID of the assignment created when the owner grants completion of one subgoal. |
 | Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
 | Workspace | The context for a set of goals. Local commands use the workspace database. HTTP commands address the workspace served by the selected API server. |
 | Schema snapshot | The complete SQLite schema and initial system user in `001_initial.sql`. SQLite’s `user_version` records the schema version installed in each workspace. |
@@ -21,9 +21,10 @@
 | Goal CLI and HTTP endpoints | `GoalAPI` scopes goals to the workspace account identified by `ADMIN_USER_ID`. Local owner writes use that account as `submitted_by` for reports and `recorded_by` for completion. HTTP writes have no established caller and return null for those identities. In message-based creation, Codex drafts the definition and the CLI saves it through `GoalAPI` in the same account. |
 | Account CLI and HTTP endpoints | A numeric user or operator ID selects an existing record. Named registration assigns the owner from `--user` or HTTP `owner_user_id`, defaulting to `admin`. These operations record no separate initiating identity. |
 | Bare `operator register` | Starts Codex sign-in. Named registration creates a workspace operator record. |
-| `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. Asking selects no registered operator ID. |
+| Ordinary `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. |
+| `operator ask --completion-grant GRANT_ID` | The assistant can also complete the specific subgoal covered by the active grant. Harness derives the registered operator from the grant. |
 
-In the planned delegated session, Harness binds the assistant to a registered operator and a specific grant at startup. A replacement grant requires a fresh session. The **decision maker** is the actor who exercises the delegated authority. The **evidence submitter** is the actor who supplied a cited record. If the owner confirms “My membership is active” and an operator uses that confirmation to complete the subgoal, the evidence keeps the owner’s user ID and the decision records the registered operator’s ID. These IDs refer to different tables and can have the same numeric value. [Delegated completion plan](docs/SLICE3_TODO.md#delegated-completion)
+In a delegated session, Harness binds the assistant to a registered operator and a specific grant at startup. A replacement grant requires a fresh session. The **decision maker** is the actor who exercises the delegated authority. The **evidence submitter** is the actor who supplied a cited record. If the owner confirms “My membership is active” and an operator uses that confirmation to complete the subgoal, the evidence keeps the owner’s user ID and the decision records the registered operator’s ID. These IDs refer to different tables and can have the same numeric value. [Delegated completion plan](docs/SLICE3_TODO.md#delegated-completion)
 
 The current HTTP endpoints do not establish who initiated a request. A resource ID identifies its target, `owner_user_id` identifies its owner, and `ADMIN_USER_ID` identifies the workspace account. For evidence writes, store the established submitter’s integer user ID or null for unknown attribution. Draft message roles (`user` and `operator`) describe the speaker’s role. Record the requester of a check and the observer that produced the result separately when known. Leave unknown identities explicit. An owner pasting an app link supplies a reference. Attributing an observation to the app requires a report from the app itself.
 
@@ -40,8 +41,8 @@ The current HTTP endpoints do not establish who initiated a request. A resource 
 | Timing | `duration` distinguishes a one-time outcome (`one_time`) from an ongoing condition (`standing`). `duration_days` expresses a length in days. |
 | Goal status | A stored lifecycle value of `draft`, `active`, `paused`, `completed`, or `revoked`. Use the exact value in API contracts and test assertions. |
 | Operator judgment | Interpreting the available evidence against the owner’s criteria and choosing to act, ask for clarification or leave the goal open. A day pass shows a gym visit. The operator can ask whether the member joined. |
-| Completion | A recorded decision that a specific goal revision met its criteria. It identifies the revision, decision time, decision maker when known and exact evidence cited. Today the caller supplies a confirmation or reference with its own evidence ID. |
-| Rationale | The decision maker’s explanation of why the cited evidence satisfies the revision. In the planned delegated completion it belongs to the decision, alongside the IDs of the existing observations. |
+| Completion | A recorded decision that a specific goal revision met its criteria. It identifies the revision, decision time, decision maker when known and exact evidence cited. Owner and HTTP completion calls supply a confirmation or reference with its own evidence ID. Delegated completions cite existing observations. |
+| Rationale | The decision maker’s explanation of why the cited evidence satisfies the revision. A delegated completion stores it alongside the IDs of the existing observations. |
 
 ## Evidence, assessment, and audit
 
@@ -64,4 +65,4 @@ Progress returns every record considered in `evidence`. Only the IDs grouped und
 
 An observation’s reported date may be at most the UTC calendar date when Harness records it. Earlier versions accepted advance reports. These retain their IDs, retry results and citations, and are excluded from the count even after the reported date passes.
 
-Historical progress applies the selected revision’s criteria to the evidence available at read time and returns the goal’s current lifecycle status. A saved completion keeps its original `statement_evidence_id` for its confirmation or reference and its `evidence_ids` for the additional records cited when the decision was made.
+Historical progress applies the selected revision’s criteria to the evidence available at read time and returns the goal’s current lifecycle status. A completion with a confirmation or reference keeps its original `statement_evidence_id` and the additional citations in `evidence_ids`. A delegated completion stores `recorded_by_operator_id`, `completion_grant_id`, `rationale` and the exact cited IDs in `evidence_ids`.

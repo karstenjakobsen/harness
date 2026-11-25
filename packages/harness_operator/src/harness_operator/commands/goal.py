@@ -159,6 +159,21 @@ def complete(
 
 @goal.command()
 @click.argument("goal_id", type=POSITIVE_INTEGER)
+@click.argument("operator_id", type=POSITIVE_INTEGER)
+def grant_completion(goal_id: int, operator_id: int) -> None:
+    """Delegate completion of one subgoal and return the new grant."""
+    print_record(GoalAPI().grant_completion(goal_id, operator_id))
+
+
+@goal.command()
+@click.argument("grant_id", type=POSITIVE_INTEGER)
+def withdraw_completion(grant_id: int) -> None:
+    """Withdraw completion authority for a specific grant."""
+    print_record(GoalAPI().withdraw_completion(grant_id))
+
+
+@goal.command()
+@click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.option(
     "--tree",
     is_flag=True,

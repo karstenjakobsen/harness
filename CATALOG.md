@@ -12,20 +12,18 @@ Add `--help` to any command or group to see its options.
 | --- | --- |
 | `operator register` | Starts Codex device sign-in and displays the verification link and one-time code. |
 | `operator ask [--trace-file PATH] [MESSAGE]` | Opens an advisory session and prints its reply. The optional flag saves the Codex event stream, including MCP calls, to a new file. |
+| `operator ask --completion-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can complete the specific subgoal covered by the active grant. |
 
 Today, `operator ask` can read goals with `list_goals`, `get_goal_tree` and
 `get_goal_progress`. It can weigh the evidence, suggest completion or ask what
 is missing. To act on its advice, the local owner uses `operator goal complete`.
 Named registration creates a workspace record. Ordinary ask sessions remain advisory.
 
-**Planned delegated session.** The owner will be able to grant a registered
-operator explicit permission to complete one assigned subgoal and start a
-session bound to that grant. Existing assignments carry forward as records of
-responsibility. The proposed MCP action is
+The delegated session exposes
 `complete_goal(goal_id, expected_revision, evidence_ids, rationale)`.
-Harness will supply the actor from the session and return the saved decision
-with its citations. The grant and session commands will be added to the command
-table when they ship. [Slice 3 implementation plan](docs/SLICE3_TODO.md)
+Harness derives the actor from the grant bound at startup and returns the saved
+decision with its citations. The operator decides when the evidence is sufficient.
+The session's grant is checked again on every completion call.
 
 ## Workspace users and operators
 
@@ -65,6 +63,8 @@ other goal commands access the local database directly and print JSON.
 | `operator goal observe GOAL_ID --retry-key KEY [--reported-date YYYY-MM-DD] EVIDENCE` | Records an owner confirmation or owner-supplied reference. Reuse the key for an identical retry. Use separate keys for intentional reports about the same day. |
 | `operator goal progress GOAL_ID [--revision N]` | Assesses the current or selected revision. `evidence` contains every record considered. `days` lists each qualifying date and its supporting IDs. |
 | `operator goal complete GOAL_ID --revision N EVIDENCE [--evidence-id ID]...` | Completes the current revision and cites the supplied records from this goal. Returns the saved decision on an identical retry. |
+| `operator goal grant-completion GOAL_ID OPERATOR_ID` | Assigns the subgoal with explicit completion authority. Returns a fresh grant `id`, the goal ID and operator ID. |
+| `operator goal withdraw-completion GRANT_ID` | Closes that assignment and invalidates sessions bound to the grant. |
 
 For `FIELDS`, use `--desired-outcome`, `--success-criteria`, `--measurement-plan`,
 `--assessment-type` (`objective`, `judgment`, or `mixed`), `--duration` (`one_time`

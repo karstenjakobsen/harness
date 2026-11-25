@@ -18,7 +18,7 @@ QUESTION = (
 )
 
 
-def assert_read_call(trace, tool, goal_id, expected):
+def assert_tool_result(trace, tool, goal_id, expected):
     for line in trace.read_text(encoding="utf-8").splitlines():
         event = json.loads(line)
         item = event.get("item", {})
@@ -58,7 +58,7 @@ def test_trace_accepts_a_matching_read_after_an_earlier_revision(tmp_path):
                 "result": {"structuredContent": {"revision": revision}},
             }
             print(json.dumps({"type": "item.completed", "item": item}), file=stream)
-    assert_read_call(trace, "get_goal_progress", 7, {"revision": 2})
+    assert_tool_result(trace, "get_goal_progress", 7, {"revision": 2})
 
 
 def assert_plan_answer(answer):
@@ -226,7 +226,7 @@ def test_ask_explains_saved_plan_through_mcp(live_directory, workspace, run, goa
 
     trace = live_directory / "ask.jsonl"
     reply = run("ask", "--trace-file", trace, QUESTION)
-    assert_read_call(trace, "get_goal_tree", parent_id, tree)
+    assert_tool_result(trace, "get_goal_tree", parent_id, tree)
     assert_plan_answer(reply)
 
 
@@ -288,7 +288,7 @@ def test_ask_explains_monday_progress_before_and_after_revision(
         assert progress["evidence"] == reports
         trace = live_directory / f"revision-{progress['revision']}.jsonl"
         reply = run("ask", "--trace-file", trace, question)
-        assert_read_call(trace, "get_goal_progress", goal_id, progress)
+        assert_tool_result(trace, "get_goal_progress", goal_id, progress)
         answer = json.loads(
             reply.strip()
             .removeprefix("```json")
@@ -304,3 +304,75 @@ def test_ask_explains_monday_progress_before_and_after_revision(
         [day] = answer["days"]
         assert day["reported_date"] == monday and sorted(day["evidence_ids"]) == ids
         assert (day["source"], day["submitted_by"]) == ("owner_confirmation", 1)
+
+
+@pytest.mark.live
+def test_delegated_operator_decides_when_membership_evidence_is_sufficient(
+    live_directory, run, goal
+):
+    parent = goal("create", "--title", "Build an exercise routine")
+    child = goal(
+        "create",
+        "--title",
+        "Get a gym membership",
+        "--parent",
+        parent["id"],
+        "--success-criteria",
+        "The membership is active",
+        "--measurement-plan",
+        "An owner confirmation of active membership is sufficient",
+    )
+    goal_id = child["id"]
+    operator = json.loads(run("register", "Reviewer"))
+    grant = goal("grant-completion", goal_id, operator["id"])
+    tour = goal(
+        "observe", goal_id, "--confirmation", "I toured the gym", "--retry-key", "tour"
+    )
+    day_pass = goal(
+        "observe", goal_id, "--reference", "receipt:day-pass", "--retry-key", "receipt"
+    )
+    review = (
+        "Review this goal. If you judge the evidence sufficient, complete it. "
+        "Otherwise tell me what’s missing."
+    )
+    first_trace = live_directory / "before.jsonl"
+    reply = run(
+        "ask", "--completion-grant", grant["id"], "--trace-file", first_trace, review
+    )
+    assert_tool_result(
+        first_trace, "get_goal_progress", goal_id, goal("progress", goal_id)
+    )
+    assert all(
+        json.loads(line).get("item", {}).get("tool") != "complete_goal"
+        for line in first_trace.read_text(encoding="utf-8").splitlines()
+    )
+    assert goal("show", goal_id)["status"] == "active"
+    assert goal("show", goal_id)["completion"] is None
+    assert "membership" in reply.lower()
+    assert any(word in reply.lower() for word in ("active", "confirm", "join"))
+
+    confirmation = goal(
+        "observe",
+        goal_id,
+        "--confirmation",
+        "My gym membership is active.",
+        "--retry-key",
+        "membership",
+    )
+    final_trace = live_directory / "after.jsonl"
+    reply = run(
+        "ask", "--completion-grant", grant["id"], "--trace-file", final_trace, review
+    )
+    (revision,) = goal("show", goal_id, "--history")
+    assert revision["evidence"] == [tour, day_pass, confirmation]
+    assert confirmation["source"] == "owner_confirmation"
+    assert confirmation["submitted_by"] == 1
+    decision = revision["completion"]
+    assert decision["completion_grant_id"] == grant["id"]
+    assert decision["recorded_by_operator_id"] == operator["id"]
+    assert confirmation["evidence_id"] in decision["evidence_ids"]
+    assert decision["rationale"].strip()
+    assert_tool_result(final_trace, "complete_goal", goal_id, decision)
+    assert goal("show", goal_id)["status"] == "completed"
+    assert goal("show", parent["id"]) == parent
+    assert "complet" in reply.lower() and "membership" in reply.lower()

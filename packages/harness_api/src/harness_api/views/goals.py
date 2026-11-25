@@ -6,6 +6,7 @@ from ..models.evidence import Evidence
 from ..models.goals import (
     AssessmentType,
     Completion,
+    DelegatedCompletion,
     GoalCreationStatus,
     GoalDuration,
     GoalProgress,
@@ -60,7 +61,7 @@ class GoalSummaryView(BaseModel):
 
 class GoalView(GoalSummaryView, GoalDefinitionFields):
     parent_goal_id: int | None
-    completion: Completion | None
+    completion: Completion | DelegatedCompletion | None
 
 
 class StatementRequest(BaseModel):

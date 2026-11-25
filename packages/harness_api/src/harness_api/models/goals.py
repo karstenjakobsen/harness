@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Literal, TypedDict, Unpack, get_args
+from typing import Literal, TypedDict, Unpack, get_args, overload
 
 from ..database import (
     ADMIN_USER_ID,
@@ -26,6 +26,7 @@ from .evidence import (
 
 EVENT_COLUMNS = """
 event.id AS event_id, event.actor_user_id, event.recorded_at, statement.payload, event.statement_evidence_id,
+event.completion_grant_id, grant.operator_id, json_extract(event.payload, '$.rationale') AS rationale,
 (SELECT json_group_array(evidence_id) FROM completion_citations
  WHERE decision_id = event.id) AS evidence_ids
 """
@@ -34,6 +35,7 @@ LEFT JOIN goal_events AS event
     ON event.goal_id = revision.goal_id AND event.revision = revision.revision
     AND event.kind = 'completion'
 LEFT JOIN goal_events AS statement ON statement.id = event.statement_evidence_id
+LEFT JOIN goal_assignments AS grant ON grant.id = event.completion_grant_id
 """
 
 SELECT_GOALS = f"""
@@ -98,21 +100,36 @@ class GoalProgress(DateAssessment):
     status: GoalStatus
 
 
-class Completion(TypedDict):
+class _CompletionFields(TypedDict):
     event_id: int
     goal_id: int
     revision: int
-    recorded_by: int | None
     recorded_at: str
-    statement_evidence_id: int
     evidence_ids: list[int]
+
+
+class Completion(_CompletionFields):
+    recorded_by: int | None
+    statement_evidence_id: int
     evidence_kind: EvidenceSource
     evidence: str
 
 
+class DelegatedCompletion(_CompletionFields):
+    completion_grant_id: int
+    recorded_by_operator_id: int
+    rationale: str
+
+
+class CompletionGrant(TypedDict):
+    id: int
+    goal_id: int
+    operator_id: int
+
+
 class Goal(GoalSummary, GoalDefinition):
     parent_goal_id: int | None
-    completion: Completion | None
+    completion: Completion | DelegatedCompletion | None
 
 
 class GoalTree(TypedDict):
@@ -125,7 +142,7 @@ class GoalRevision(GoalDefinition):
     evidence: list[Evidence]
     revision: int
     title: str
-    completion: Completion | None
+    completion: Completion | DelegatedCompletion | None
 
 
 class GoalNotFoundError(LookupError):
@@ -232,18 +249,28 @@ def _reported_date_window(
     return start, end.isoformat()
 
 
-def _completion(row: sqlite3.Row) -> Completion | None:
+def _completion(row: sqlite3.Row) -> Completion | DelegatedCompletion | None:
     if row["event_id"] is None:
         return None
-    statement: EvidenceStatement = json.loads(row["payload"])
-    return Completion(
+    fields = _CompletionFields(
         event_id=row["event_id"],
         goal_id=row["id"],
         revision=row["revision"],
-        recorded_by=row["actor_user_id"],
-        statement_evidence_id=row["statement_evidence_id"],
         evidence_ids=sorted(json.loads(row["evidence_ids"])),
         recorded_at=row["recorded_at"],
+    )
+    if row["completion_grant_id"] is not None:
+        return DelegatedCompletion(
+            **fields,
+            completion_grant_id=row["completion_grant_id"],
+            recorded_by_operator_id=row["operator_id"],
+            rationale=row["rationale"],
+        )
+    statement: EvidenceStatement = json.loads(row["payload"])
+    return Completion(
+        **fields,
+        recorded_by=row["actor_user_id"],
+        statement_evidence_id=row["statement_evidence_id"],
         evidence_kind=statement["evidence_kind"],
         evidence=statement["evidence"],
     )
@@ -563,6 +590,92 @@ class GoalAPI(WorkspaceDatabase):
                 goal_id=goal_id, revision=selected, status=goal["status"], **assessment
             )
 
+    def grant_completion(self, goal_id: int, operator_id: int) -> CompletionGrant:
+        """Give a registered operator a new completion grant for one subgoal."""
+        if self._submitter != ADMIN_USER_ID:
+            raise GoalValidationError("Only the workspace owner can grant completion.")
+        _validate_positive_integer(operator_id, "Operator ID")
+        with self._write() as connection:
+            goal = self._get_goal(connection, goal_id)
+            if goal["parent_goal_id"] is None:
+                raise GoalValidationError(
+                    "Completion can only be granted for a subgoal."
+                )
+            operator = connection.execute(
+                """
+                SELECT id FROM operators
+                WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL
+                """,
+                (operator_id, ADMIN_USER_ID),
+            ).fetchone()
+            if operator is None:
+                raise GoalValidationError(
+                    "Choose a registered operator owned by the workspace owner."
+                )
+            connection.execute(
+                """
+                UPDATE goal_assignments SET released_at = CURRENT_TIMESTAMP
+                WHERE goal_id = ? AND released_at IS NULL
+                """,
+                (goal_id,),
+            )
+            (grant_id,) = connection.execute(
+                """
+                INSERT INTO goal_assignments (goal_id, operator_id, completion_granted_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP) RETURNING id
+                """,
+                (goal_id, operator_id),
+            ).fetchone()
+            return CompletionGrant(
+                id=grant_id, goal_id=goal_id, operator_id=operator_id
+            )
+
+    def get_completion_grant(self, grant_id: int) -> CompletionGrant:
+        """Resolve a completion grant at session startup."""
+        with self._connection("ro") as connection:
+            return self._get_completion_grant(connection, grant_id)
+
+    def withdraw_completion(self, grant_id: int) -> CompletionGrant:
+        """Close the granted assignment and invalidate sessions bound to it."""
+        if self._submitter != ADMIN_USER_ID:
+            raise GoalValidationError(
+                "Only the workspace owner can withdraw completion."
+            )
+        with self._write() as connection:
+            grant = self._get_completion_grant(connection, grant_id)
+            connection.execute(
+                "UPDATE goal_assignments SET released_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (grant_id,),
+            )
+            return grant
+
+    @staticmethod
+    def _get_completion_grant(
+        connection: sqlite3.Connection, grant_id: int
+    ) -> CompletionGrant:
+        _validate_positive_integer(grant_id, "Completion grant ID")
+        row = connection.execute(
+            """
+            SELECT assignment.id, assignment.goal_id, assignment.operator_id
+            FROM goal_assignments AS assignment
+            JOIN goals AS goal ON goal.id = assignment.goal_id AND goal.deleted_at IS NULL
+            JOIN operators AS operator ON operator.id = assignment.operator_id
+                AND operator.owner_user_id = goal.owner_user_id AND operator.deleted_at IS NULL
+            WHERE assignment.id = ? AND assignment.released_at IS NULL
+                AND assignment.completion_granted_at IS NOT NULL
+                AND goal.owner_user_id = ? AND goal.parent_goal_id IS NOT NULL
+            """,
+            (grant_id, ADMIN_USER_ID),
+        ).fetchone()
+        if row is None:
+            raise GoalValidationError(
+                f"Completion grant {grant_id} is inactive or unavailable."
+            )
+        return CompletionGrant(
+            id=row["id"], goal_id=row["goal_id"], operator_id=row["operator_id"]
+        )
+
+    @overload
     def complete_goal(
         self,
         goal_id: int,
@@ -571,15 +684,63 @@ class GoalAPI(WorkspaceDatabase):
         confirmation: str | None = None,
         reference: str | None = None,
         evidence_ids: list[int] | tuple[int, ...] = (),
-    ) -> Completion:
+    ) -> Completion: ...
+
+    @overload
+    def complete_goal(
+        self,
+        goal_id: int,
+        revision: int,
+        *,
+        completion_grant_id: int,
+        rationale: str,
+        evidence_ids: list[int] | tuple[int, ...],
+    ) -> DelegatedCompletion: ...
+
+    def complete_goal(
+        self,
+        goal_id: int,
+        revision: int,
+        *,
+        confirmation: str | None = None,
+        reference: str | None = None,
+        evidence_ids: list[int] | tuple[int, ...] = (),
+        completion_grant_id: int | None = None,
+        rationale: str | None = None,
+    ) -> Completion | DelegatedCompletion:
         _validate_positive_integer(revision, "Revision")
         with self._write() as connection:
             goal = self._get_goal(connection, goal_id)
+            if completion_grant_id is not None:
+                grant = self._get_completion_grant(connection, completion_grant_id)
+                if grant["goal_id"] != goal_id:
+                    raise GoalValidationError(
+                        "This completion grant belongs to a different subgoal."
+                    )
             if revision != goal["revision"]:
                 raise GoalValidationError(
                     f"Stale revision. Current revision is {goal['revision']}."
                 )
-            payload = self._statement(confirmation, reference)
+            if completion_grant_id is None:
+                if rationale is not None:
+                    raise GoalValidationError(
+                        "A rationale requires a completion grant."
+                    )
+                statement = self._statement(confirmation, reference)
+                actor = self._submitter
+                decision_fields: dict[str, object] = {"recorded_by": actor, **statement}
+            else:
+                rationale = _require_text(rationale, "Rationale").strip()
+                if not rationale or confirmation is not None or reference is not None:
+                    raise GoalValidationError(
+                        "Delegated completion requires a rationale and existing evidence IDs."
+                    )
+                statement = None
+                actor = None
+                decision_fields = {
+                    "completion_grant_id": completion_grant_id,
+                    "rationale": rationale,
+                }
             if not isinstance(evidence_ids, (list, tuple)):
                 raise GoalValidationError(
                     "Evidence IDs must be a list or tuple of integers."
@@ -587,14 +748,19 @@ class GoalAPI(WorkspaceDatabase):
             for evidence_id in evidence_ids:
                 _validate_positive_integer(evidence_id, "Evidence ID")
             citations = sorted(set(evidence_ids))
+            if statement is None and not citations:
+                raise GoalValidationError(
+                    "Delegated completion must cite at least one observation."
+                )
             if goal["status"] == "completed":
                 saved = goal["completion"]
                 if (
                     saved
-                    and saved["recorded_by"] == self._submitter
-                    and saved["evidence_kind"] == payload["evidence_kind"]
-                    and saved["evidence"] == payload["evidence"]
                     and saved["evidence_ids"] == citations
+                    and all(
+                        saved.get(key) == value
+                        for key, value in decision_fields.items()
+                    )
                 ):
                     return saved
                 raise GoalValidationError(
@@ -614,17 +780,24 @@ class GoalAPI(WorkspaceDatabase):
                     raise GoalValidationError(
                         "Every cited evidence ID must belong to this goal."
                     )
-            statement = add_evidence(
-                connection, goal_id, revision, self._submitter, payload
-            )
+            statement_id = None
+            if statement is not None:
+                statement_id = add_evidence(
+                    connection, goal_id, revision, actor, statement
+                )["evidence_id"]
             decision_id = connection.execute(
-                """INSERT INTO goal_events (goal_id, revision, kind, actor_user_id, payload, statement_evidence_id)
-                   VALUES (?, ?, 'completion', ?, '{}', ?) RETURNING id""",
+                """INSERT INTO goal_events (
+                    goal_id, revision, kind, actor_user_id, payload, statement_evidence_id, completion_grant_id
+                ) VALUES (?, ?, 'completion', ?, ?, ?, ?) RETURNING id""",
                 (
                     goal_id,
                     revision,
-                    self._submitter,
-                    statement["evidence_id"],
+                    actor,
+                    json.dumps({"rationale": rationale})
+                    if rationale is not None
+                    else "{}",
+                    statement_id,
+                    completion_grant_id,
                 ),
             ).fetchone()[0]
             connection.executemany(

@@ -54,7 +54,9 @@ CREATE TABLE goal_assignments (
     goal_id INTEGER NOT NULL REFERENCES goals(id),
     operator_id INTEGER NOT NULL REFERENCES operators(id),
     claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    released_at TEXT
+    released_at TEXT,
+    completion_granted_at TEXT,
+    completion_grant_id INTEGER AS (CASE WHEN completion_granted_at IS NOT NULL THEN id END)
 ) STRICT;
 
 CREATE UNIQUE INDEX one_active_operator_per_goal
@@ -64,6 +66,9 @@ CREATE UNIQUE INDEX one_active_operator_per_goal
 CREATE INDEX open_assignments_by_operator ON goal_assignments(operator_id)
     WHERE released_at IS NULL;
 
+CREATE UNIQUE INDEX assignment_completion_grant ON goal_assignments(goal_id, completion_grant_id);
+
+-- Begin goal event schema
 CREATE TABLE goal_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
     goal_id INTEGER NOT NULL REFERENCES goals(id),
@@ -76,6 +81,7 @@ CREATE TABLE goal_events (
     payload TEXT NOT NULL CHECK (json_valid(payload)),
     retry_key TEXT,
     statement_evidence_id INTEGER,
+    completion_grant_id INTEGER,
     -- Only observations can serve as evidence, and only completions can own citations.
     evidence_id INTEGER AS (CASE WHEN kind = 'observation' THEN id END),
     decision_id INTEGER AS (CASE WHEN kind = 'completion' THEN id END),
@@ -84,7 +90,10 @@ CREATE TABLE goal_events (
     UNIQUE (revision, evidence_id),
     CHECK ((kind = 'message') = (message_role IS NOT NULL)),
     CHECK (kind != 'message' OR actor_user_id IS NULL),
-    CHECK ((kind = 'completion') = (statement_evidence_id IS NOT NULL)),
+    CHECK ((statement_evidence_id IS NOT NULL) + (completion_grant_id IS NOT NULL) = (kind = 'completion')),
+    CHECK (completion_grant_id IS NULL OR
+        (actor_user_id IS NULL AND json_type(payload, '$.rationale') IS 'text')),
+    FOREIGN KEY (goal_id, completion_grant_id) REFERENCES goal_assignments(goal_id, completion_grant_id),
     FOREIGN KEY (goal_id, statement_evidence_id) REFERENCES goal_events(goal_id, evidence_id),
     FOREIGN KEY (revision, statement_evidence_id) REFERENCES goal_events(revision, evidence_id),
     FOREIGN KEY (goal_id, revision) REFERENCES goal_revisions (goal_id, revision)
@@ -107,6 +116,7 @@ CREATE TABLE completion_citations (
     FOREIGN KEY (goal_id, evidence_id) REFERENCES goal_events(goal_id, evidence_id),
     PRIMARY KEY (decision_id, evidence_id)
 ) STRICT, WITHOUT ROWID;
+-- End goal event schema
 
 INSERT INTO users (username, display_name) VALUES ('admin', 'admin');
 
@@ -114,4 +124,4 @@ CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
-PRAGMA user_version = 7;
+PRAGMA user_version = 8;

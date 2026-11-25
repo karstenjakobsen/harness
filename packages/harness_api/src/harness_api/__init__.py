@@ -12,6 +12,8 @@ from .models.evidence import Evidence
 from .models.goals import (
     AssessmentType,
     Completion,
+    CompletionGrant,
+    DelegatedCompletion,
     Goal,
     GoalAPI,
     GoalConflictError,
@@ -36,6 +38,8 @@ __all__ = [
     "AccountValidationError",
     "AssessmentType",
     "Completion",
+    "CompletionGrant",
+    "DelegatedCompletion",
     "Evidence",
     "Goal",
     "GoalAPI",

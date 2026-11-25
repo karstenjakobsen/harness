@@ -4,8 +4,43 @@ from contextlib import closing
 import pytest
 from fastapi.testclient import TestClient
 
-from harness_api import GoalAPI
+from harness_api import GoalAPI, OperatorAPI
 from harness_api.app import create_app
+
+
+def test_http_reads_delegated_decision_and_rejects_grant_arguments(tmp_path):
+    path = tmp_path / "goals.sqlite3"
+    api = GoalAPI(path)
+    parent = api.create_goal("Parent")
+    child = api.create_goal("Child", parent_goal_id=parent["id"])
+    goal_id = child["id"]
+    operator_id = OperatorAPI(path).register_operator("Reviewer")["id"]
+    grant = api.grant_completion(goal_id, operator_id)
+    report = api.record_observation(
+        goal_id, confirmation="Verified", retry_key="report"
+    )
+    with TestClient(create_app(path)) as client:
+        response = client.post(
+            f"/goals/{goal_id}/completion",
+            json={
+                "revision": 1,
+                "confirmation": "Verified",
+                "completion_grant_id": grant["id"],
+            },
+        )
+        assert response.status_code == 422
+        assert api.get_goal(goal_id)["completion"] is None
+        decision = api.complete_goal(
+            goal_id,
+            1,
+            completion_grant_id=grant["id"],
+            rationale="Verified",
+            evidence_ids=[report["evidence_id"]],
+        )
+        assert client.get(f"/goals/{goal_id}").json()["completion"] == decision
+        assert client.get(f"/goals/{goal_id}/history").json() == api.get_goal_history(
+            goal_id
+        )
 
 
 @pytest.mark.parametrize(

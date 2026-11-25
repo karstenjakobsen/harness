@@ -2,7 +2,8 @@
 
 `operator ask` sends one message to Codex and prints its reply. Use it to read
 relevant workspace files, think through a goal, or suggest a small next step.
-The operator treats goal changes as proposals. Each invocation starts a fresh
+An ordinary session offers advice. The workspace owner can delegate completion
+of one subgoal for an explicit session. Each invocation starts a fresh
 conversation using the Codex read-only sandbox. It uses your existing Codex
 sign-in and skips your personal Codex configuration.
 
@@ -62,10 +63,10 @@ deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.m
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
 On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Schema version 7 requires a fresh database. Opening an older or
-unrecognized workspace returns an error and leaves the file intact. To reset a
-disposable workspace, stop its Harness processes, remove `.harness/goals.sqlite3`,
-and run `operator user list` to create a new database.
+`001_initial.sql`. Version 8 upgrades version 7 workspaces in place. Existing
+assignments keep their responsible operator and require an explicit grant for
+completion authority. Opening a pre-v7 or unrecognized workspace returns an
+error and leaves the file intact.
 
 The schema gives each goal a stable ID, an owner, and a status. Goal revisions
 store titles and outcomes. Operator assignments have their own history, and
@@ -81,6 +82,24 @@ For questions about a plan, the operator calls `get_goal_tree` with the goal ID
 to read each descendant’s current requirements, status, and completion evidence.
 For progress it calls `get_goal_progress` and explains the model’s assessment
 using the returned evidence IDs, dates and provenance.
+
+### Delegate completion of a subgoal
+
+Register an operator, record evidence on the subgoal and run
+`operator goal grant-completion GOAL_ID OPERATOR_ID`. Pass the returned grant
+`id` to the next review session.
+
+```sh
+operator ask --completion-grant GRANT_ID \
+  "Review this goal. If you judge the evidence sufficient, complete it. Otherwise tell me what's missing."
+```
+
+The operator chooses whether to complete the assigned subgoal. A saved
+completion records the operator’s ID, rationale and cited observations. Use
+`operator goal show GOAL_ID --history` to see the decision and the evidence
+with its original attribution. Withdraw authority with
+`operator goal withdraw-completion GRANT_ID`. A new grant requires a new session.
+[Command catalog](CATALOG.md#workspace-goals)
 
 ### Create a draft goal
 

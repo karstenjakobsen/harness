@@ -8,7 +8,7 @@ from typing import TextIO
 
 from pydantic import ConfigDict, TypeAdapter, with_config
 
-from harness_api import GoalDefinition
+from harness_api import GoalAPI, GoalDefinition
 
 OPERATOR_INSTRUCTIONS = """\
 You are the user's goal operator. Treat goals as flexible guidelines.
@@ -24,7 +24,19 @@ Use the returned records to answer. List each goal on its own line with its stat
 and the relevant timing or evidence. Draft, active, and paused goals are open.
 Attribute completion statements according to their saved provenance.
 If the tool fails, say that you could not retrieve the goals.
-Keep this turn advisory. Describe goal changes as proposals.
+"""
+
+ADVISORY_INSTRUCTIONS = "Keep this turn advisory. Describe goal changes as proposals.\n"
+
+DELEGATED_INSTRUCTIONS = """\
+The owner delegated completion of subgoal {goal_id} for this session.
+Read that subgoal's current definition with get_goal_tree and its observations
+with get_goal_progress before deciding. Weigh the evidence and its provenance
+against the revision's criteria. If the user asks you to act and you judge the
+evidence sufficient, call complete_goal with the revision you reviewed, the
+supporting evidence IDs and your rationale. If evidence is insufficient, leave
+the goal open and explain what is missing or ask for clarification. Report the
+result and distinguish the cited evidence from your decision.
 """
 
 DRAFT_INSTRUCTIONS = """\
@@ -69,7 +81,11 @@ def _run_codex(
     schema: Path | None = None,
     trace: TextIO | None = None,
     reply_path: Path | None = None,
+    completion_grant_id: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    mcp_args = ["-P", "-m", "harness_mcp.server"]
+    if completion_grant_id is not None:
+        mcp_args.extend(["--completion-grant", str(completion_grant_id)])
     command = [
         "codex",
         "--ask-for-approval",
@@ -79,7 +95,7 @@ def _run_codex(
         "-c",
         f"mcp_servers.harness_mcp.command={json.dumps(sys.executable, ensure_ascii=False)}",
         "-c",
-        'mcp_servers.harness_mcp.args=["-P", "-m", "harness_mcp.server"]',
+        f"mcp_servers.harness_mcp.args={json.dumps(mcp_args)}",
         "-c",
         f"mcp_servers.harness_mcp.cwd={json.dumps(str(Path.cwd()), ensure_ascii=False)}",
         "-c",
@@ -106,9 +122,24 @@ def _run_codex(
     return result
 
 
-def ask_codex(message: str, trace_file: Path | None = None) -> int:
+def ask_codex(
+    message: str,
+    trace_file: Path | None = None,
+    *,
+    completion_grant_id: int | None = None,
+) -> int:
+    instructions = OPERATOR_INSTRUCTIONS
+    if completion_grant_id is None:
+        instructions += ADVISORY_INSTRUCTIONS
+    else:
+        grant = GoalAPI().get_completion_grant(completion_grant_id)
+        instructions += DELEGATED_INSTRUCTIONS.format(goal_id=grant["goal_id"])
     if trace_file is None:
-        return exit_code(_run_codex(message, OPERATOR_INSTRUCTIONS).returncode)
+        return exit_code(
+            _run_codex(
+                message, instructions, completion_grant_id=completion_grant_id
+            ).returncode
+        )
     with (
         open(
             trace_file,
@@ -120,7 +151,11 @@ def ask_codex(message: str, trace_file: Path | None = None) -> int:
     ):
         reply_path = Path(directory) / "reply.txt"
         result = _run_codex(
-            message, OPERATOR_INSTRUCTIONS, trace=trace, reply_path=reply_path
+            message,
+            instructions,
+            trace=trace,
+            reply_path=reply_path,
+            completion_grant_id=completion_grant_id,
         )
         if result.returncode == 0:
             print(reply_path.read_text(encoding="utf-8").rstrip())
