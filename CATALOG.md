@@ -19,8 +19,9 @@ is missing. To act on its advice, the local owner uses `operator goal complete`.
 Named registration creates a workspace record. Ordinary ask sessions remain advisory.
 
 **Planned delegated session.** The owner will be able to grant a registered
-operator permission to complete one assigned subgoal and start a session bound
-to that assignment. Its proposed MCP action is
+operator explicit permission to complete one assigned subgoal and start a
+session bound to that grant. Existing assignments carry forward as records of
+responsibility. The proposed MCP action is
 `complete_goal(goal_id, expected_revision, evidence_ids, rationale)`.
 Harness will supply the actor from the session and return the saved decision
 with its citations. The grant and session commands will be added to the command

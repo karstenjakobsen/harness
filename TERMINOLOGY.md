@@ -7,8 +7,8 @@
 | User | A workspace account with a database-generated integer ID, a unique username and a display name. The protected system account is `admin` (ID 1). |
 | Owner | The user related to a particular resource by its `owner_user_id`. |
 | Registered operator | A workspace record with its own numeric ID, an owning user and optional goal assignments. |
-| Assignment | The recorded relationship between a goal and the registered operator responsible for it. Unregistering the operator releases its open assignments. |
-| Delegation | The owner’s grant of a specific action on a specific goal to a registered operator. The first planned grant permits completion of one assigned subgoal. |
+| Assignment | The recorded relationship between a goal and the registered operator responsible for it. Unregistering the operator releases its open assignments. Completion authority requires an explicit grant. |
+| Delegation | The owner’s explicit grant of a specific action on a specific goal to a registered operator. The first planned grant permits completion of one assigned subgoal. |
 | Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
 | Workspace | The context for a set of goals. Local commands use the workspace database. HTTP commands address the workspace served by the selected API server. |
 | Schema snapshot | The complete SQLite schema and initial system user in `001_initial.sql`. SQLite’s `user_version` records the schema version installed in each workspace. |
@@ -23,7 +23,7 @@
 | Bare `operator register` | Starts Codex sign-in. Named registration creates a workspace operator record. |
 | `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. Asking selects no registered operator ID. |
 
-In the planned delegated session, Harness binds the assistant to a registered operator and its assignment at startup. The **decision maker** is the actor who exercises the delegated authority. The **evidence submitter** is the actor who supplied a cited record. If the owner confirms “My membership is active” and an operator uses that confirmation to complete the subgoal, the evidence keeps the owner’s user ID and the decision records the registered operator’s ID. These IDs refer to different tables and can have the same numeric value. [Delegated completion plan](docs/SLICE3_TODO.md#delegated-completion)
+In the planned delegated session, Harness binds the assistant to a registered operator and a specific grant at startup. A replacement grant requires a fresh session. The **decision maker** is the actor who exercises the delegated authority. The **evidence submitter** is the actor who supplied a cited record. If the owner confirms “My membership is active” and an operator uses that confirmation to complete the subgoal, the evidence keeps the owner’s user ID and the decision records the registered operator’s ID. These IDs refer to different tables and can have the same numeric value. [Delegated completion plan](docs/SLICE3_TODO.md#delegated-completion)
 
 The current HTTP endpoints do not establish who initiated a request. A resource ID identifies its target, `owner_user_id` identifies its owner, and `ADMIN_USER_ID` identifies the workspace account. For evidence writes, store the established submitter’s integer user ID or null for unknown attribution. Draft message roles (`user` and `operator`) describe the speaker’s role. Record the requester of a check and the observer that produced the result separately when known. Leave unknown identities explicit. An owner pasting an app link supplies a reference. Attributing an observation to the app requires a report from the app itself.
 
