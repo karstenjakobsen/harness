@@ -368,6 +368,16 @@ def test_delegated_operator_decides_when_membership_evidence_is_sufficient(
     assert confirmation["source"] == "owner_confirmation"
     assert confirmation["submitted_by"] == 1
     decision = revision["completion"]
+    if decision is None:
+        calls = [
+            item
+            for line in final_trace.read_text(encoding="utf-8").splitlines()
+            if (event := json.loads(line))["type"] == "item.completed"
+            and (item := event.get("item", {})).get("tool") == "complete_goal"
+        ]
+        pytest.fail(
+            f"No delegated completion was saved. Reply {reply!r}. Completion calls {calls!r}."
+        )
     assert decision["completion_grant_id"] == grant["id"]
     assert decision["recorded_by_operator_id"] == operator["id"]
     assert confirmation["evidence_id"] in decision["evidence_ids"]

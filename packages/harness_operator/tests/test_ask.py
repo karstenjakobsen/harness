@@ -77,13 +77,16 @@ def test_cli_grants_binds_and_withdraws_completion(monkeypatch, tmp_path, capsys
     def run(command, **options):
         overrides = [value for flag, value in pairwise(command) if flag == "-c"]
         config = tomllib.loads("\n".join(overrides))
-        assert config["mcp_servers"]["harness_mcp"]["args"] == [
+        server = config["mcp_servers"]["harness_mcp"]
+        assert server["args"] == [
             "-P",
             "-m",
             "harness_mcp.server",
             "--completion-grant",
             str(grant["id"]),
         ]
+        assert server["tools"] == {"complete_goal": {"approval_mode": "approve"}}
+        assert command[command.index("--ask-for-approval") + 1] == "never"
         assert command[command.index("--sandbox") + 1] == "read-only"
         assert f"completion of subgoal {child['id']}" in options["input"]
         launched.append(command)

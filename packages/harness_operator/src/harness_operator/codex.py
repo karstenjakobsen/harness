@@ -105,6 +105,13 @@ def _run_codex(
         "--ephemeral",
         "--skip-git-repo-check",
     ]
+    if completion_grant_id is not None:
+        command.extend(
+            [
+                "-c",
+                'mcp_servers.harness_mcp.tools.complete_goal.approval_mode="approve"',
+            ]
+        )
     if schema is not None:
         command.extend(["--output-schema", str(schema)])
     if reply_path is not None:

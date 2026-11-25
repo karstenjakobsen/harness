@@ -41,7 +41,7 @@ This increment adds one delegated action through one public completion operation
 - [x] Give contributors a review question and a test boundary. Goal-specific interpretation belongs to the operator. Exact calculations and authorized state transitions must be callable and testable through the model. [Engineering guidance](../AGENTS.md#definitions-and-state) · [Verification rules](../AGENTS.md#tests-and-verification)
 - [x] Document the grant, withdrawal and session commands and the returned decision fields. [Command catalog](../CATALOG.md#workspace-goals) · [Terminology](../TERMINOLOGY.md#goals-and-decisions)
 - [x] Run `make check` and `make test` for model invariants and adapter contracts.
-- [ ] Run the signed-in `make test-live` acceptance for the two judgment turns and report the result separately.
+- [x] Run the signed-in `make test-live` acceptance. All four tests passed. The same review request left the subgoal open with the tour and day-pass evidence, then completed it after the owner confirmed active membership. The decision cited that confirmation and the parent stayed active.
 
 ## 3B — Optional machine checks, deferred
 
