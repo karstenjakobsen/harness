@@ -10,6 +10,7 @@ from .controllers.goals import router
 from .models.goals import (
     DATABASE_PATH,
     GoalAPI,
+    GoalConflictError,
     GoalNotFoundError,
     GoalStorageError,
     GoalValidationError,
@@ -37,6 +38,12 @@ def create_app(database_path: Path | str = DATABASE_PATH) -> FastAPI:
         return JSONResponse(
             status_code=HTTPStatus.UNPROCESSABLE_CONTENT,
             content={"detail": str(error)},
+        )
+
+    @api.exception_handler(GoalConflictError)
+    def goal_conflict(_request: Request, error: GoalConflictError) -> JSONResponse:
+        return JSONResponse(
+            status_code=HTTPStatus.CONFLICT, content={"detail": str(error)}
         )
 
     @api.exception_handler(GoalStorageError)

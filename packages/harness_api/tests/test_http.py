@@ -1,7 +1,68 @@
+import sqlite3
+from contextlib import closing
+
+import pytest
 from fastapi.testclient import TestClient
 
 from harness_api import GoalAPI
 from harness_api.app import create_app
+
+
+@pytest.mark.parametrize(
+    ("intent", "expected"),
+    [({}, "draft"), ({"status": "draft"}, "draft"), ({"status": "active"}, "active")],
+)
+def test_http_goal_creation_intent(tmp_path, intent, expected):
+    with TestClient(create_app(tmp_path / "goals.sqlite3")) as client:
+        definition = {"title": "Log meals", "duration_days": 7}
+        response = client.post("/goals", json={**definition, **intent})
+        assert response.status_code == 201
+        goal = response.json()
+        assert (goal["status"], goal["revision"], goal["duration_days"]) == (
+            expected,
+            1,
+            7,
+        )
+        assert client.get(response.headers["Location"]).json() == goal
+        assert (
+            client.post(
+                "/goals", json={**definition, "status": "completed"}
+            ).status_code
+            == 422
+        )
+        assert [row["id"] for row in client.get("/goals").json()] == [goal["id"]]
+
+
+def test_delete_conflict_preserves_visible_tree_and_assignment(tmp_path):
+    path = tmp_path / "goals.sqlite3"
+    with TestClient(create_app(path)) as client:
+        parent = client.post("/goals", json={"title": "Parent"}).json()["id"]
+        child = client.post(
+            "/goals", json={"title": "Child", "parent_goal_id": parent}
+        ).json()["id"]
+        with closing(sqlite3.connect(path, autocommit=True)) as connection:
+            connection.execute(
+                "INSERT INTO operators (id, owner_user_id, name) VALUES (1, 'local', 'Alice')"
+            )
+            connection.execute(
+                "INSERT INTO goal_assignments (goal_id, operator_id) VALUES (?, 1)",
+                (parent,),
+            )
+            conflict = client.delete(f"/goals/{parent}")
+            assert conflict.status_code == 409
+            assert "children" in conflict.json()["detail"]
+            assert client.get(f"/goals/{parent}").json()["operator"] == "Alice"
+            assert client.get(f"/goals/{child}").json()["parent_goal_id"] == parent
+            assert [goal["id"] for goal in client.get("/goals").json()] == [
+                parent,
+                child,
+            ]
+            assert client.delete(f"/goals/{child}").status_code == 204
+            assert client.delete(f"/goals/{parent}").status_code == 204
+            assert connection.execute(
+                "SELECT released_at FROM goal_assignments WHERE goal_id = ?", (parent,)
+            ).fetchone()[0]
+            assert client.get("/goals").json() == []
 
 
 def test_http_crud_shares_goal_model(tmp_path):

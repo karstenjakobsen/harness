@@ -2,7 +2,13 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from ..models.goals import AssessmentType, Completion, GoalDuration, GoalStatus
+from ..models.goals import (
+    AssessmentType,
+    Completion,
+    GoalCreationStatus,
+    GoalDuration,
+    GoalStatus,
+)
 
 GoalTitle = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -20,6 +26,7 @@ class GoalCreateRequest(GoalDefinitionFields):
     model_config = ConfigDict(extra="forbid")
 
     title: GoalTitle
+    status: GoalCreationStatus = "draft"
     parent_goal_id: Annotated[int, Field(strict=True, ge=-(2**63), lt=2**63)] | None = (
         None
     )

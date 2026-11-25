@@ -1,56 +1,88 @@
 import json
+import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
+import uvicorn
 from click.testing import CliRunner
 
-from harness_api import DATABASE_PATH
+from harness_api import DATABASE_PATH, GoalAPI
+from harness_api.app import create_app
 from harness_operator import cli
 
 
-def test_explicit_goal_commands_require_api_prefix(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    runner = CliRunner()
-
-    def unexpected_codex(*_args, **_kwargs):
-        pytest.fail("Explicit goal commands should not start Codex.")
-
-    monkeypatch.setattr(subprocess, "run", unexpected_codex)
-    for args in (
+@pytest.mark.parametrize(
+    "args",
+    [
         ["create", "--title", "My goal"],
-        ["revise", "1", "--title", "Revised"],
-        ["complete", "1", "--revision", "1", "--confirmation", "Verified"],
-        ["show", "1"],
-    ):
-        assert runner.invoke(cli, ["goal", *args]).exit_code == 2
-    assert not DATABASE_PATH.exists()
-
-    result = runner.invoke(cli, ["api", "goals", "create", "--title", "My goal"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["status"] == "active"
-    assert DATABASE_PATH.is_file()
-
-
-def test_explicit_api_url_cannot_redirect_a_write_to_local_workspace(
-    monkeypatch, tmp_path
+        ["revise", "3", "--title", "Revised"],
+        ["complete", "3", "--revision", "1", "--confirmation", "Verified"],
+        ["show", "3"],
+    ],
+)
+def test_retired_workspace_spelling_exits_before_accessing_either_destination(
+    monkeypatch, tmp_path, args
 ):
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(
-        cli,
-        [
-            "api",
-            "--url",
-            "http://localhost:9000",
-            "goals",
-            "create",
-            "--title",
-            "My goal",
-        ],
-    )
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("A retired command must exit before calling HTTP or Codex.")
+
+    monkeypatch.setattr(httpx, "get", unexpected)
+    monkeypatch.setattr(subprocess, "run", unexpected)
+    result = CliRunner().invoke(cli, ["api", "goals", *args])
     assert result.exit_code == 2
-    assert "--url applies to 'goals list'" in result.stderr
+    assert f"operator goal {args[0]}" in result.stderr
     assert not DATABASE_PATH.exists()
+
+
+def test_workspace_and_http_commands_use_distinct_databases(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    runner = CliRunner()
+
+    def invoke_json(*args):
+        result = runner.invoke(cli, args)
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)
+
+    remote_path = tmp_path / "remote" / DATABASE_PATH
+    remote = GoalAPI(remote_path)
+    for index in range(1, 4):
+        invoke_json("goal", "create", "--title", f"Workspace {index}")
+        remote.create_goal(f"Server {index}", status="active")
+
+    with socket.socket() as listener, ThreadPoolExecutor(max_workers=1) as pool:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        monkeypatch.setenv(
+            "HARNESS_API_URL", f"http://127.0.0.1:{listener.getsockname()[1]}"
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(create_app(remote_path), ws="none", log_config=None)
+        )
+        serving = pool.submit(server.run, sockets=[listener])
+        try:
+            local_rows = invoke_json("goal", "list")
+            remote_rows = invoke_json("api", "goals", "list", "--json")
+            assert {r["id"]: r["title"] for r in local_rows}[3] == "Workspace 3"
+            assert {r["id"]: r["title"] for r in remote_rows}[3] == "Server 3"
+            invoke_json(
+                "goal", "complete", "3", "--revision", "1", "--confirmation", "Verified"
+            )
+            assert invoke_json("goal", "show", "3")["status"] == "completed"
+            assert remote.get_goal(3)["status"] == "active"
+            assert remote.get_goal(3)["completion"] is None
+        finally:
+            server.should_exit = True
+        serving.result()
+    unavailable = runner.invoke(cli, ["api", "goals", "list"])
+    assert unavailable.exit_code == 1
+    assert "Could not reach the Harness API" in unavailable.stderr
+    assert not unavailable.stdout
 
 
 def test_api_goals_list_uses_http_without_auth(monkeypatch, tmp_path):

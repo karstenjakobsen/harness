@@ -61,15 +61,16 @@ uv run --package harness-operator operator goal create "Keep the sample config f
 ```
 
 Codex drafts the outcome, success criteria, and measurement plan from your
-request. It considers duration separately from how to judge success. In this
-example, the goal is standing and success is an objective permissions check.
+request. `duration` describes a one-time result or a standing goal.
+`duration_days` records the time window when supplied. For example, “Track food
+for seven days” saves a window of 7 days. An unspecified window is stored as null.
 
 The command saves a draft, prints its ID, and asks a focused question if it
 needs clarification. Unclear details can stay open. SQLite keeps your original
 request and any question alongside the first revision. View the draft with
 `operator ask "List draft goals."`
 
-### Manage a goal directly
+### Manage workspace goals
 
 The commands below call the workspace’s Python goal API directly. They work
 with FastAPI stopped. Explicit creation saves an active goal and prints JSON
@@ -78,18 +79,23 @@ Use the returned IDs in later commands. For example, if the parent ID is 1 and
 the new child ID is 2, the following commands revise and complete the child.
 
 ```sh
-operator api goals create --title "Lose 20 lb"
-operator api goals create --parent 1 --title "Track food" --duration-days 7 \
+operator goal create --title "Lose 20 lb"
+operator goal create --parent 1 --title "Track food" --duration-days 7 \
   --success-criteria "A food entry each day" --measurement-plan "Review the log"
-operator api goals revise 2 --duration-days 14
-operator api goals complete 2 --revision 2 --confirmation "I reviewed all fourteen entries."
-operator api goals show 2 --history
-operator api goals show 1 --tree
+operator goal revise 2 --duration-days 14
+operator goal complete 2 --revision 2 --confirmation "I reviewed all fourteen entries."
+operator goal show 2 --history
+operator goal show 1 --tree
+operator goal list
 ```
 
 Use `--reference REF` to record an owner-supplied app reference. Repeating the
 same completion returns the saved decision. Changing a completed definition
 reopens that goal and keeps the earlier evidence in its revision history.
+
+To migrate scripts, change the prefix on the former workspace commands
+(`create`, `revise`, `complete`, and `show`) from `operator api goals` to
+`operator goal`. The old spellings exit with a usage error.
 
 ## FastAPI
 
@@ -111,10 +117,10 @@ The command uses `http://127.0.0.1:8000` by default. Use `HARNESS_API_URL` or
 | Method | Path | Operation |
 | --- | --- | --- |
 | `GET` | `/goals` | List goals, optionally filtered by `status` |
-| `POST` | `/goals` | Create a draft |
+| `POST` | `/goals` | Create revision 1 with `status` set to `draft` (default) or `active` |
 | `GET` | `/goals/{goal_id}` | Read the latest definition |
 | `PATCH` | `/goals/{goal_id}` | Revise the title, outcome, timing, success criteria, or verification method |
-| `DELETE` | `/goals/{goal_id}` | Hide the goal and close its current assignment while preserving history |
+| `DELETE` | `/goals/{goal_id}` | Soft-delete a leaf and close its assignment. A parent with visible children returns HTTP 409 |
 
 The `harness_api` package follows MVC. The model owns SQLite and goal rules,
 the FastAPI controllers handle requests, and the Pydantic views define the JSON

@@ -2,16 +2,18 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TextIO
+from typing import TextIO, get_args
 
 import click
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import ConfigDict, TypeAdapter, ValidationError, with_config
 
 from harness_api import (
     AssessmentType,
     GoalAPI,
+    GoalDefinition,
     GoalDuration,
     GoalNotFoundError,
     GoalStorageError,
@@ -35,7 +37,9 @@ Keep this turn advisory. Describe goal changes as proposals.
 DRAFT_INSTRUCTIONS = """\
 Draft a goal from the user's request. Keep the definition light and provisional.
 Decide duration and assessment type independently.
-Duration is one_time if the user wants a result verified once, or standing if they want it maintained.
+Duration describes the kind of goal: one_time for a result verified once, or standing for ongoing maintenance.
+Use duration_days for the stated time window in whole days. For "track food for seven days", use 7.
+Leave duration_days null if the user has not specified a time window.
 Assessment is objective for a checkable result, judgment for human judgment, or mixed if both matter.
 Describe the desired outcome, what would count as success, and how to assess it when clear.
 Leave uncertain fields null. Ask one focused question if the goal needs clarification.
@@ -44,16 +48,13 @@ Return a draft definition only. Do not carry out the goal or run checks.
 """
 
 
-class GoalDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@with_config(ConfigDict(extra="forbid", strict=True))
+class GoalDraft(GoalDefinition):
     title: str
-    desired_outcome: str | None
-    duration: GoalDuration | None
-    assessment_type: AssessmentType | None
-    success_criteria: str | None
-    measurement_plan: str | None
     clarification: str | None
+
+
+GOAL_DRAFT = TypeAdapter(GoalDraft)
 
 
 def _exit_code(returncode: int) -> int:
@@ -133,49 +134,41 @@ def ask_codex(message: str, trace_file: Path | None = None) -> int:
 def create_goal(message: str) -> int:
     with TemporaryDirectory(prefix="harness-goal-") as directory:
         schema = Path(directory) / "draft.json"
-        schema.write_text(json.dumps(GoalDraft.model_json_schema()), encoding="utf-8")
+        schema.write_text(json.dumps(GOAL_DRAFT.json_schema()), encoding="utf-8")
         result = _run_codex(message, DRAFT_INSTRUCTIONS, schema=schema)
     if result.returncode:
         return _exit_code(result.returncode)
 
     try:
-        draft = GoalDraft.model_validate_json(result.stdout)
+        draft = GOAL_DRAFT.validate_json(result.stdout)
     except ValidationError:
         print("operator: Codex returned an invalid goal draft.", file=sys.stderr)
         return 1
 
-    clarification = (draft.clarification or "").strip() or None
-    if clarification is None and draft.duration is None:
+    clarification = (draft["clarification"] or "").strip() or None
+    if clarification is None and draft["duration"] is None:
         clarification = (
             "Once I verify this, are we done, or do you want me to keep checking?"
         )
-    if clarification is None and draft.assessment_type is None:
+    if clarification is None and draft["assessment_type"] is None:
         clarification = "What would show that this goal is being met?"
 
+    draft["clarification"] = clarification
     try:
-        goal = GoalAPI().create_goal(
-            draft.title,
-            desired_outcome=draft.desired_outcome,
-            duration=draft.duration,
-            assessment_type=draft.assessment_type,
-            success_criteria=draft.success_criteria,
-            measurement_plan=draft.measurement_plan,
-            original_message=message,
-            clarification=clarification,
-        )
+        goal = GoalAPI().create_goal(**draft, status="draft", original_message=message)
     except (GoalValidationError, GoalStorageError) as error:
         print(f"operator: Could not save the draft. {error}", file=sys.stderr)
         return 1
 
     print(f"Saved draft goal #{goal['id']} — {goal['title']}")
     duration = {"one_time": "One-time", "standing": "Standing"}.get(
-        draft.duration, "Duration open"
+        draft["duration"], "Duration open"
     )
     assessment = {
         "objective": "Objective check",
         "judgment": "Human judgment",
         "mixed": "Objective check and human judgment",
-    }.get(draft.assessment_type, "Assessment open")
+    }.get(draft["assessment_type"], "Assessment open")
     print(f"{duration} · {assessment}")
     if clarification:
         print(clarification)
@@ -224,14 +217,114 @@ def register() -> None:
 
 @cli.group()
 def goal() -> None:
-    """Manage saved goals with Codex."""
+    """Manage goals in the current workspace."""
+
+
+GOAL_ID = click.IntRange(-(2**63), 2**63 - 1)
+POSITIVE_INTEGER = click.IntRange(1, 2**63 - 1)
+
+
+def definition_options(command: Callable) -> Callable:
+    """Attach the editable revision fields to both owner commands."""
+    options = [
+        click.option("--desired-outcome", help="Result the owner wants."),
+        click.option("--duration", type=click.Choice(get_args(GoalDuration.__value__))),
+        click.option("--duration-days", type=POSITIVE_INTEGER),
+        click.option(
+            "--assessment-type", type=click.Choice(get_args(AssessmentType.__value__))
+        ),
+        click.option("--success-criteria", help="What counts as success."),
+        click.option("--measurement-plan", help="How success will be verified."),
+    ]
+    for option in reversed(options):
+        command = option(command)
+    return command
+
+
+def _print_record(record: object) -> None:
+    click.echo(json.dumps(record, ensure_ascii=False, indent=2))
+
+
+@goal.command("list")
+def list_workspace_goals() -> None:
+    """List goals from the current workspace as JSON."""
+    _print_record(GoalAPI().list_goals())
 
 
 @goal.command()
 @click.argument("message", required=False)
-def create(message: str | None) -> None:
-    """Ask Codex to draft a goal from a message and save it."""
-    click.get_current_context().exit(create_goal(_read_message(message, "New goal: ")))
+@click.option("--title", help="Save an active workspace goal with this exact title.")
+@click.option("--parent", "parent_goal_id", type=GOAL_ID)
+@definition_options
+def create(
+    message: str | None, title: str | None, parent_goal_id: int | None, **fields
+) -> None:
+    """Draft a workspace goal from a message, or create an active one with --title."""
+    if title is not None:
+        if message is not None:
+            raise click.UsageError("Choose a message or an explicit --title.")
+        _print_record(
+            GoalAPI().create_goal(
+                title, status="active", parent_goal_id=parent_goal_id, **fields
+            )
+        )
+    else:
+        if parent_goal_id is not None or any(
+            value is not None for value in fields.values()
+        ):
+            raise click.UsageError("Supply --title with explicit goal fields.")
+        click.get_current_context().exit(
+            create_goal(_read_message(message, "New goal: "))
+        )
+
+
+@goal.command()
+@click.argument("goal_id", type=GOAL_ID)
+@click.option("--title", help="New goal title.")
+@definition_options
+def revise(goal_id: int, **fields) -> None:
+    """Revise the supplied fields and return the current goal."""
+    changes = {key: value for key, value in fields.items() if value is not None}
+    if not changes:
+        raise click.UsageError("Supply at least one field to revise.")
+    _print_record(GoalAPI().update_goal(goal_id, **changes))
+
+
+@goal.command()
+@click.argument("goal_id", type=GOAL_ID)
+@click.option("--revision", type=POSITIVE_INTEGER, required=True)
+@click.option("--confirmation", help="The owner's confirmation of completion.")
+@click.option(
+    "--reference", help="An external evidence reference supplied by the owner."
+)
+def complete(
+    goal_id: int, revision: int, confirmation: str | None, reference: str | None
+) -> None:
+    """Complete the verified revision and return its evidence record."""
+    _print_record(
+        GoalAPI().complete_goal(
+            goal_id, revision, confirmation=confirmation, reference=reference
+        )
+    )
+
+
+@goal.command()
+@click.argument("goal_id", type=GOAL_ID)
+@click.option("--tree", is_flag=True, help="Include descendants and current evidence.")
+@click.option(
+    "--history", is_flag=True, help="List this goal's revisions and their evidence."
+)
+def show(goal_id: int, tree: bool, history: bool) -> None:
+    """Read a saved goal."""
+    if tree and history:
+        raise click.UsageError("Choose either --tree or --history.")
+    api = GoalAPI()
+    if tree:
+        _print_record(api.get_goal_tree(goal_id))
+    elif history:
+        _print_record(api.get_goal_history(goal_id))
+    else:
+        _print_record(api.get_goal(goal_id))
 
 
 def main() -> int:

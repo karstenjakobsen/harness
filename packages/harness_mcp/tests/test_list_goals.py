@@ -7,7 +7,7 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from harness_api import DATABASE_PATH, GoalAPI
+from harness_api import DATABASE_PATH, GoalAPI, GoalConflictError
 
 
 @pytest.fixture
@@ -56,8 +56,11 @@ async def test_tree_includes_grandchild_and_owner_supplied_evidence(client, tmp_
         "root_id": root["id"],
         "goals": [root, child, {**leaf, "status": "completed", "completion": decision}],
     }
-    api.delete_goal(child["id"])
-    assert api.get_goal_tree(root["id"])["goals"] == [root]
+    with pytest.raises(GoalConflictError):
+        api.delete_goal(child["id"])
+    after = await client.call_tool("get_goal_tree", {"goal_id": root["id"]})
+    assert not after.isError
+    assert after.structuredContent == result.structuredContent
 
 
 @pytest.mark.anyio

@@ -45,6 +45,7 @@ WHERE goal.owner_user_id = :owner AND goal.deleted_at IS NULL
 """
 
 type GoalStatus = Literal["draft", "active", "paused", "completed", "revoked"]
+type GoalCreationStatus = Literal["draft", "active"]
 type GoalDuration = Literal["one_time", "standing"]
 type AssessmentType = Literal["objective", "judgment", "mixed"]
 
@@ -99,6 +100,10 @@ class GoalNotFoundError(LookupError):
 
 class GoalValidationError(ValueError):
     """The requested goal definition is invalid."""
+
+
+class GoalConflictError(RuntimeError):
+    """The current state of a goal prevents the requested operation."""
 
 
 class GoalStorageError(RuntimeError):
@@ -194,7 +199,7 @@ class GoalAPI:
         title: str,
         *,
         parent_goal_id: int | None = None,
-        status: Literal["draft", "active"] = "draft",
+        status: GoalCreationStatus = "draft",
         desired_outcome: str | None = None,
         duration: GoalDuration | None = None,
         duration_days: int | None = None,
@@ -206,7 +211,7 @@ class GoalAPI:
     ) -> Goal:
         """Create a goal and its first definition in one transaction."""
         title = _normalize_title(title)
-        if status not in ("draft", "active"):
+        if status not in get_args(GoalCreationStatus.__value__):
             raise GoalValidationError("A new goal must be draft or active.")
         definition = GoalDefinition(
             desired_outcome=desired_outcome,
@@ -387,18 +392,25 @@ class GoalAPI:
             return decision
 
     def delete_goal(self, goal_id: int) -> None:
-        """Remove a goal from API reads while retaining its ID and history."""
-        _validate_integer(goal_id, "Goal ID")
+        """Hide a visible leaf and close its assignment in the same transaction."""
         with self._write() as connection:
-            result = connection.execute(
+            self._get_goal(connection, goal_id)
+            child = connection.execute(
                 """
-                UPDATE goals SET deleted_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL
+                SELECT 1 FROM goals
+                WHERE parent_goal_id = ? AND owner_user_id = ? AND deleted_at IS NULL
+                LIMIT 1
                 """,
                 (goal_id, LOCAL_USER_ID),
+            ).fetchone()
+            if child is not None:
+                raise GoalConflictError(
+                    f"Goal {goal_id} has visible children. Delete its children first."
+                )
+            connection.execute(
+                "UPDATE goals SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (goal_id,),
             )
-            if result.rowcount == 0:
-                raise GoalNotFoundError(goal_id)
             connection.execute(
                 """
                 UPDATE goal_assignments SET released_at = CURRENT_TIMESTAMP

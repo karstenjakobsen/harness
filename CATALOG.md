@@ -13,10 +13,11 @@ alias for `harness-operator`.
 | `harness-operator ask [MESSAGE]` | Sends a message to Codex and prints its reply. |
 | `operator ask --trace-file PATH [MESSAGE]` | Saves the Codex JSON event stream to a new file and prints the final reply. |
 | `harness-operator goal create [MESSAGE]` | Asks Codex to draft a goal and prints its saved ID, duration, assessment type, and any clarification question. |
-| `operator api goals create --title TITLE [--parent ID] [OPTIONS]` | Saves an active goal and prints its ID, revision, and definition as JSON. |
-| `operator api goals revise ID [OPTIONS]` | Appends a revision when a definition field changes. |
-| `operator api goals complete ID --revision N` | Records completion with either `--confirmation TEXT` or `--reference REF`. |
-| `operator api goals show ID [--tree or --history]` | Prints the latest goal, the subtree with current evidence, or one goal’s revision history. |
+| `operator goal list` | Lists saved goals from the current workspace as JSON. |
+| `operator goal create --title TITLE [--parent ID] [OPTIONS]` | Saves an active goal and prints its ID, revision, and definition as JSON. |
+| `operator goal revise ID [OPTIONS]` | Appends a revision when a definition field changes. |
+| `operator goal complete ID --revision N` | Records completion with either `--confirmation TEXT` or `--reference REF`. |
+| `operator goal show ID [--tree or --history]` | Prints the latest goal, the subtree with current evidence, or one goal’s revision history. |
 | `harness-operator api goals list [--json]` | Calls FastAPI directly and lists saved goals. `--json` prints the complete API response. No sign-in is required. |
 
 `ask` and message-based `goal create` use the Codex sign-in. Supply a quoted message, pipe it
@@ -29,8 +30,8 @@ harness-operator ask "List draft goals."
 harness-operator goal create "Keep the sample config file at mode 0600."
 ```
 
-`operator api goals create`, `revise`, `complete`, and `show` use the local
-workspace database. Start `make api` in a separate terminal for `operator api goals list`.
+All `operator goal` commands use the current workspace database. Start `make api`
+in a separate terminal for `operator api goals list`, which reads from the HTTP server.
 The API defaults to `http://127.0.0.1:8000`. Use `HARNESS_API_URL` or set
 `--url` on the `api` group to list goals from another instance.
 

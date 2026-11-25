@@ -130,7 +130,7 @@ def test_ask_explains_saved_plan_through_mcp(tmp_path, workspace):
         return result.stdout
 
     def goal(*args):
-        return json.loads(run("api", "goals", *args))
+        return json.loads(run("goal", *args))
 
     database = workspace / ".harness/goals.sqlite3"
     assert not database.exists()
