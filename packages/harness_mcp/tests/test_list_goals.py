@@ -64,7 +64,7 @@ async def test_tree_includes_grandchild_and_owner_supplied_evidence(client, tmp_
 
 
 @pytest.mark.anyio
-async def test_lists_latest_revisions_and_current_assignments_for_local_user(
+async def test_lists_latest_revisions_and_current_assignments_for_admin(
     client, tmp_path
 ):
     with closing(sqlite3.connect(tmp_path / DATABASE_PATH)) as connection:
@@ -72,9 +72,9 @@ async def test_lists_latest_revisions_and_current_assignments_for_local_user(
         connection.executescript("""
             INSERT INTO users (id, display_name) VALUES ('other', 'Other user');
             INSERT INTO operators (id, owner_user_id, name)
-                VALUES (1, 'local', 'Alice'), (2, 'local', 'Bob');
+                VALUES (1, 'admin', 'Alice'), (2, 'admin', 'Bob');
             INSERT INTO goals (id, owner_user_id, status)
-                VALUES (1, 'local', 'active'), (2, 'local', 'draft'), (3, 'other', 'active');
+                VALUES (1, 'admin', 'active'), (2, 'admin', 'draft'), (3, 'other', 'active');
             INSERT INTO goal_revisions (goal_id, revision, title)
                 VALUES (1, 1, 'First title'), (1, 2, 'Current title');
             INSERT INTO goal_assignments (goal_id, operator_id, released_at)

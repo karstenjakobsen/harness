@@ -42,7 +42,7 @@ def test_delete_conflict_preserves_visible_tree_and_assignment(tmp_path):
         ).json()["id"]
         with closing(sqlite3.connect(path, autocommit=True)) as connection:
             connection.execute(
-                "INSERT INTO operators (id, owner_user_id, name) VALUES (1, 'local', 'Alice')"
+                "INSERT INTO operators (id, owner_user_id, name) VALUES (1, 'admin', 'Alice')"
             )
             connection.execute(
                 "INSERT INTO goal_assignments (goal_id, operator_id) VALUES (?, 1)",
@@ -121,6 +121,12 @@ def test_http_rejects_invalid_input_and_reports_missing_goals(tmp_path):
             == 422
         )
         assert client.get("/goals", params={"status": "unknown"}).status_code == 422
+        assert (
+            client.post(
+                "/goals", json={"title": "Draft", "desired_outcome": 123}
+            ).status_code
+            == 422
+        )
         missing = client.get("/goals/999")
         assert missing.status_code == 404
         assert missing.json() == {"detail": "Goal 999 was not found."}

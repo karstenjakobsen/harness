@@ -1,54 +1,76 @@
 # CLI command catalog
 
-Run these commands from the workspace root after `make setup`. Activate the
-Python 3.14 virtual environment with `source .venv/bin/activate`, or prefix an
-operator command with `uv run --package harness-operator`. `operator` is an
-alias for `harness-operator`.
+Run `make setup` from the repository root, then activate the environment with
+`source .venv/bin/activate`. This catalog uses `operator` throughout.
+`harness-operator` is an equivalent executable. From the repository root you
+can also run commands with `uv run --package harness-operator operator`.
+Add `--help` to any command or group to see its options.
 
-## Operator commands
+## Codex
 
 | Command | What it does |
 | --- | --- |
-| `harness-operator register` | Starts Codex device sign-in and prints a verification link and one-time code. |
-| `harness-operator ask [MESSAGE]` | Sends a message to Codex and prints its reply. |
-| `operator ask --trace-file PATH [MESSAGE]` | Saves the Codex JSON event stream to a new file and prints the final reply. |
-| `harness-operator goal create [MESSAGE]` | Asks Codex to draft a goal and prints its saved ID, duration, assessment type, and any clarification question. |
-| `operator goal list` | Lists saved goals from the current workspace as JSON. |
-| `operator goal create --title TITLE [--parent ID] [OPTIONS]` | Saves an active goal and prints its ID, revision, and definition as JSON. |
-| `operator goal revise ID [OPTIONS]` | Appends a revision when a definition field changes. |
-| `operator goal complete ID --revision N` | Records completion with either `--confirmation TEXT` or `--reference REF`. |
-| `operator goal show ID [--tree or --history]` | Prints the latest goal, the subtree with current evidence, or one goal’s revision history. |
-| `harness-operator api goals list [--json]` | Calls FastAPI directly and lists saved goals. `--json` prints the complete API response. No sign-in is required. |
+| `operator register` | Starts Codex device sign-in and displays the verification link and one-time code. |
+| `operator ask [--trace-file PATH] [MESSAGE]` | Asks Codex a question and prints its reply. The optional flag saves the Codex event stream to a new file. |
 
-`ask` and message-based `goal create` use the Codex sign-in. Supply a quoted message, pipe it
-on standard input, or omit it to type at the terminal prompt. Add `--help` to
-any command or group to see its options.
+## Workspace users and operators
+
+These commands use the current workspace database and print JSON. Every operator
+has one owner. The default owner is the protected system user `admin`.
+
+| Command | What it does |
+| --- | --- |
+| `operator user create USER_ID [--name DISPLAY_NAME]` | Creates a user. The display name defaults to the ID. |
+| `operator user get USER_ID` | Gets a current user by ID. |
+| `operator user list` | Lists current users. |
+| `operator user update USER_ID --name DISPLAY_NAME` | Updates the display name and preserves the user ID. |
+| `operator user delete USER_ID` | Marks the user as deleted. The command rejects `admin` and users who still own a registered operator. |
+| `operator register NAME [--user USER_ID] [--mission TEXT]` | Registers a named operator and returns its numeric ID. |
+| `operator get OPERATOR_ID` | Gets a registered operator and its owner. |
+| `operator list [--user USER_ID]` | Lists registered operators, optionally filtered by owner. |
+| `operator unregister OPERATOR_ID` | Marks the operator as deleted and releases its open goal assignments. |
+
+Both deletion commands return the record with its `deleted_at` timestamp.
+Get and list show active records. The database retains deleted user IDs,
+operator ownership, and assignment history.
+
+## Workspace goals
+
+`operator goal` uses `.harness/goals.sqlite3` in the current working directory.
+Message-based creation uses Codex to draft the goal. Explicit creation and the
+other goal commands access the local database directly and print JSON.
+
+| Command | What it does |
+| --- | --- |
+| `operator goal create [MESSAGE]` | Saves a Codex-generated draft and prints its ID, goal kind, assessment type, and any clarification question. |
+| `operator goal create --title TITLE [--parent GOAL_ID] [FIELDS]` | Creates an active goal. Supply a parent ID to create a subgoal. |
+| `operator goal list` | Lists saved goals in this workspace. |
+| `operator goal show GOAL_ID` | Shows the current goal. Add `--tree` for its descendants and current evidence, or `--history` for its revisions and their evidence. |
+| `operator goal revise GOAL_ID FIELDS` | Updates the supplied fields and appends a revision when the definition changes. Use `--title TITLE` to rename the goal. |
+| `operator goal complete GOAL_ID --revision N EVIDENCE` | Completes the specified revision. Supply exactly one of `--confirmation TEXT` or `--reference REF`. |
+
+For `FIELDS`, use `--desired-outcome`, `--success-criteria`, `--measurement-plan`,
+`--assessment-type` (`objective`, `judgment`, or `mixed`), `--duration` (`one_time`
+or `standing`), or `--duration-days` (a positive whole number). A revision
+requires at least one field or a new title.
+
+Both `operator ask` and message-based `operator goal create` accept a quoted
+message, piped input, or a message typed at the prompt.
 
 ```sh
-harness-operator register
-harness-operator ask "List draft goals."
-harness-operator goal create "Keep the sample config file at mode 0600."
+operator ask "Which goals are still open?"
+operator goal create "Help me track food for seven days."
+operator goal create --title "Track food" --duration-days 7
 ```
 
-All `operator goal` commands use the current workspace database. Start `make api`
-in a separate terminal for `operator api goals list`, which reads from the HTTP server.
-The API defaults to `http://127.0.0.1:8000`. Use `HARNESS_API_URL` or set
-`--url` on the `api` group to list goals from another instance.
-
-```sh
-harness-operator api goals list
-harness-operator api goals list --json
-harness-operator api --url http://127.0.0.1:9000 goals list
-```
-
-## Workspace commands
+## Development commands
 
 | Command | What it does |
 | --- | --- |
 | `make setup` | Installs the workspace packages into `.venv` using `uv`. |
 | `make api` | Starts FastAPI at `http://127.0.0.1:8000`. |
-| `make check` | Runs Ruff lint and format checks. |
+| `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
-| `make test` | Runs the offline pytest suite. |
+| `make test` | Runs the offline test suite. |
 | `make test-live` | Runs the signed-in CLI and MCP acceptance test. |
-| `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio for an MCP client. |
+| `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |

@@ -36,21 +36,46 @@ Open the link shown in the terminal and enter the one-time code. Keep the
 terminal open until Codex confirms sign-in. `operator ask` uses that sign-in.
 Use `codex login status` to check it. [Codex authentication guide](https://developers.openai.com/codex/auth#login-on-headless-devices)
 
+## Workspace users and operators
+
+`UserAPI` and `OperatorAPI` manage accounts in the same SQLite database as
+`GoalAPI`. Each workspace starts with the protected system user `admin`.
+Register a named operator for a user with `--user`, or omit the option to use
+`admin`. For example, in a new workspace the first operator receives ID 1.
+
+```sh
+operator user create sam --name "Sam Lee"
+operator register Planner --user sam
+operator list --user sam
+operator unregister 1
+operator user delete sam
+```
+
+Unregistering an operator timestamps its record and releases its open goal
+assignments. After a user's last operator is unregistered, the user can be
+soft-deleted. Ownership and assignment history survive both operations, and
+deleted user IDs stay reserved. See the [CLI command catalog](CATALOG.md).
+
 ## Saved goals
 
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
-On first run, the API applies its SQLite migrations and creates a local user
-with an empty goal list.
+On first run, the API creates the database from the full schema snapshot in
+`001_initial.sql`. Workspaces on schema versions 1 through 4 upgrade in place
+to version 5. The upgrade renames the original `local` owner to `admin`, including its goal
+and operator ownership and completion attribution. If a separate `admin`
+user already exists, the upgrade stops so the two identities can be resolved.
 
 The schema gives each goal a stable ID, an owner, and a status. Goal revisions
 store titles and outcomes. Operator assignments have their own history, and
 SQLite allows one open assignment per goal.
 
-`harness_mcp` exposes the read-only `list_goals` tool. It returns the local
-user's goal IDs, statuses, latest revision numbers and titles, and current
+`harness_mcp` exposes the read-only `list_goals` tool. It returns the workspace
+administrator's goal IDs, statuses, latest revision numbers and titles, and current
 operators. The optional `status` argument accepts `draft`, `active`, `paused`,
 `completed`, or `revoked`. Try `operator ask "List active goals."`
+The Python API raises `GoalValidationError` for unknown status filters and for
+non-text values in goal text fields. The corresponding HTTP requests return 422.
 For questions about a plan, the operator calls `get_goal_tree` with the goal ID
 to read each descendant’s current requirements, status, and completion evidence.
 
@@ -93,41 +118,35 @@ Use `--reference REF` to record an owner-supplied app reference. Repeating the
 same completion returns the saved decision. Changing a completed definition
 reopens that goal and keeps the earlier evidence in its revision history.
 
-To migrate scripts, change the prefix on the former workspace commands
-(`create`, `revise`, `complete`, and `show`) from `operator api goals` to
-`operator goal`. The old spellings exit with a usage error.
-
 ## FastAPI
 
-Run `make api` from the workspace root to serve the goal API. Open
+Run `make api` from the workspace root to serve the workspace API. Open
 [the API docs](http://127.0.0.1:8000/docs) to try the endpoints.
 
-In a second terminal, list goals directly over HTTP. This command requires no
-sign-in.
+Use `operator goal list` to list the current workspace’s goals. To list goals
+from a running HTTP server, request its `/goals` endpoint directly.
 
 ```sh
-uv run --package harness-operator harness-operator api goals list
-uv run --package harness-operator harness-operator api goals list --json
+curl --fail --silent --show-error http://127.0.0.1:8000/goals
 ```
-
-`--json` prints the complete FastAPI response to standard output.
-The command uses `http://127.0.0.1:8000` by default. Use `HARNESS_API_URL` or
-`harness-operator api --url URL goals list` to point it at another instance.
 
 | Method | Path | Operation |
 | --- | --- | --- |
+| `GET`, `POST` | `/users` | List users or create one with `id` and optional `display_name` |
+| `GET`, `PATCH`, `DELETE` | `/users/{user_id}` | Read a user, update their `display_name`, or soft-delete them. Deleting `admin` or a registered operator’s owner returns HTTP 409 |
+| `GET`, `POST` | `/operators` | List registered operators, optionally filtered by `owner_user_id`, or register one with `name`, optional `owner_user_id`, and optional `mission` |
+| `GET`, `DELETE` | `/operators/{operator_id}` | Read a registered operator or unregister it and release its open assignments |
 | `GET` | `/goals` | List goals, optionally filtered by `status` |
 | `POST` | `/goals` | Create revision 1 with `status` set to `draft` (default) or `active` |
 | `GET` | `/goals/{goal_id}` | Read the latest definition |
 | `PATCH` | `/goals/{goal_id}` | Revise the title, outcome, timing, success criteria, or verification method |
 | `DELETE` | `/goals/{goal_id}` | Soft-delete a leaf and close its assignment. A parent with visible children returns HTTP 409 |
 
-The `harness_api` package follows MVC. The model owns SQLite and goal rules,
-the FastAPI controllers handle requests, and the Pydantic views define the JSON
-contract. FastAPI, `goal create`, and the MCP tools call the shared Python goal
-model. The `api goals list` command reads from FastAPI over HTTP. Start FastAPI
-and run the Codex-backed commands from the same workspace to use the same
-SQLite database.
+The `harness_api` package follows MVC. `GoalAPI`, `UserAPI`, and `OperatorAPI`
+own persistence and business rules. The FastAPI controllers call those models,
+and Pydantic views define the HTTP request and response bodies. Workspace CLI
+commands call the same Python models. Start FastAPI and run the CLI from the
+same workspace to use the same SQLite database.
 
 Run `make test` for the offline suite and `make check` for lint and formatting.
 Run `make test-live` separately with Codex signed in. It creates a plan through

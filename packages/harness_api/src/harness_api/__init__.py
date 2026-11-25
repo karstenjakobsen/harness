@@ -1,5 +1,14 @@
+from .database import ADMIN_USER_ID, DATABASE_PATH, WorkspaceStorageError
+from .models.accounts import (
+    AccountConflictError,
+    AccountNotFoundError,
+    AccountValidationError,
+    Operator,
+    OperatorAPI,
+    User,
+    UserAPI,
+)
 from .models.goals import (
-    DATABASE_PATH,
     AssessmentType,
     Completion,
     Goal,
@@ -17,7 +26,11 @@ from .models.goals import (
 )
 
 __all__ = [
+    "ADMIN_USER_ID",
     "DATABASE_PATH",
+    "AccountConflictError",
+    "AccountNotFoundError",
+    "AccountValidationError",
     "AssessmentType",
     "Completion",
     "Goal",
@@ -32,4 +45,9 @@ __all__ = [
     "GoalSummary",
     "GoalTree",
     "GoalValidationError",
+    "Operator",
+    "OperatorAPI",
+    "User",
+    "UserAPI",
+    "WorkspaceStorageError",
 ]

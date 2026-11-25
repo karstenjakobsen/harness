@@ -64,7 +64,15 @@ def assert_plan_answer(answer):
     negated_done = r"\b(?:not|isn['’]t|hasn['’]t) (?:(?:yet|been|marked|as) )*" + done
     open_status = r"\b(?:open|active|in progress|pending|incomplete|unfinished)\b"
     gym = " ".join(sections["gym"])
-    assert re.search(done, gym) and not re.search(negated_done, gym), gym
+    # Require completion as the gym goal's own status. Evidence may describe
+    # a different state, such as an active membership or completed paperwork.
+    gym_goal = r"\bgym(?:[ -]membership)?(?: goal)?\b"
+    label = r"(?:\s*\((?:goal\s*)?#?\d+\))?[\s:|–—-]*"
+    predicate = r"(?:(?:status|is|has been|was|marked|as|now|currently)\b[\s:–—-]*)*"
+    gym_completed = rf"{gym_goal}{label}{predicate}{done}"
+    completed_gym = rf"{done}\s*[:|–—-]\s*(?:get (?:a |the )?)?{gym_goal}"
+    assert re.search(gym_completed, gym) or re.search(completed_gym, gym), gym
+    assert not re.search(negated_done, gym), gym
     attribution = r"(?:\b(?:owner|user|you|your)\b.{0,30}\bconfirm\w*|\bconfirm\w*.{0,30}\b(?:owner|user|you)\b)"
     unconfirmed = r"\b(?:not|never|no|without|didn['’]t) (?:(?:yet|been|any|an?|the|owner|user|your|explicit) )*confirm\w*"
     assert re.search(attribution, re.sub(unconfirmed, "", gym)), gym
@@ -89,11 +97,13 @@ def assert_plan_answer(answer):
 @pytest.mark.parametrize(
     "gym,food",
     [
+        ("Open. The owner confirmed the paperwork is complete", "Open for 14 days"),
+        ("The owner confirmed the paperwork is complete", "Open for 14 days"),
         ("Complete, never confirmed by the owner", "Open for 14 days"),
         ("Complete, you confirmed it", "Open, previously 14 days and now seven days"),
     ],
 )
-def test_answer_rejects_wrong_evidence_or_current_duration(gym, food):
+def test_answer_rejects_wrong_status_evidence_or_current_duration(gym, food):
     reply = f"Gym membership — {gym}.\nPersonal tracker — active.\nFood tracking — {food}.\nParent — still open."
     with pytest.raises(AssertionError):
         assert_plan_answer(reply)
@@ -103,6 +113,14 @@ def test_answer_accepts_historical_duration_and_open_status_wording():
     assert_plan_answer(
         "Parent — not yet marked complete.\nFood tracking — active, extended from seven days to fourteen days.\n"
         "Gym membership — completed by owner confirmation.\nPersonal tracker — still open."
+    )
+
+
+def test_answer_distinguishes_a_completed_goal_from_an_active_membership():
+    assert_plan_answer(
+        "Get a gym membership is complete. You confirmed that your gym membership is active.\n"
+        "Build a personal tracker is still open.\n"
+        "Track food for fourteen days — active.\nLose 20 lb (parent) — not yet complete."
     )
 
 

@@ -1,20 +1,9 @@
 import json
 import sqlite3
-from collections.abc import Generator
-from contextlib import closing, contextmanager
-from importlib.resources import files
-from pathlib import Path
 from types import EllipsisType
-from typing import Literal, TypedDict, get_args
+from typing import Literal, TypedDict, Unpack, get_args
 
-DATABASE_PATH = Path(".harness/goals.sqlite3")
-LOCAL_USER_ID = "local"
-MIGRATIONS = (
-    "001_initial.sql",
-    "002_goal_deletion.sql",
-    "003_goal_definition.sql",
-    "004_goal_tree.sql",
-)
+from ..database import ADMIN_USER_ID, WorkspaceDatabase, WorkspaceStorageError
 
 EVENT_COLUMNS = """
 event.id AS event_id, event.actor, event.recorded_at, event.payload
@@ -40,6 +29,7 @@ LEFT JOIN goal_assignments AS assignment
     ON assignment.goal_id = goal.id AND assignment.released_at IS NULL
 LEFT JOIN operators AS operator
     ON operator.id = assignment.operator_id AND operator.owner_user_id = goal.owner_user_id
+    AND operator.deleted_at IS NULL
 {COMPLETION_JOIN}
 WHERE goal.owner_user_id = :owner AND goal.deleted_at IS NULL
 """
@@ -106,15 +96,21 @@ class GoalConflictError(RuntimeError):
     """The current state of a goal prevents the requested operation."""
 
 
-class GoalStorageError(RuntimeError):
+class GoalStorageError(WorkspaceStorageError):
     """The goal database could not be accessed."""
 
-    def __init__(self) -> None:
-        super().__init__("The goals database is unavailable.")
+    def __init__(self, message: str = "The goals database is unavailable.") -> None:
+        super().__init__(message)
+
+
+def _require_text(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise GoalValidationError(f"{field} must be text.")
+    return value
 
 
 def _normalize_title(title: str) -> str:
-    title = title.strip()
+    title = _require_text(title, "Goal title").strip()
     if not title:
         raise GoalValidationError("A goal title is required.")
     return title
@@ -128,6 +124,10 @@ def _validate_integer(value: int, label: str, minimum: int = -(2**63)) -> None:
 
 
 def _validate_definition(definition: GoalDefinition) -> None:
+    for field in ("desired_outcome", "success_criteria", "measurement_plan"):
+        value = definition[field]
+        if value is not None:
+            _require_text(value, field)
     if definition["duration_days"] is not None:
         _validate_integer(definition["duration_days"], "Duration in days", minimum=1)
     if definition["duration"] is not None and definition["duration"] not in get_args(
@@ -171,28 +171,36 @@ def _definition(row: sqlite3.Row | Goal) -> GoalDefinition:
     )
 
 
-class GoalAPI:
-    """SQLite-backed operations for the workspace's local user."""
+class GoalAPI(WorkspaceDatabase):
+    """SQLite-backed operations for the workspace administrator."""
 
-    def __init__(self, path: Path | str = DATABASE_PATH) -> None:
-        self._path = Path(path).absolute()
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            raise GoalStorageError() from error
-        with self._connection() as connection:
-            if connection.execute("PRAGMA user_version").fetchone()[0] == len(
-                MIGRATIONS
-            ):
-                return
+    storage_error = GoalStorageError
 
-        with self._write() as connection:
-            (version,) = connection.execute("PRAGMA user_version").fetchone()
-            if version > len(MIGRATIONS):
-                raise RuntimeError(f"Unsupported goal database version {version}.")
-            for filename in MIGRATIONS[version:]:
-                migration = files("harness_api").joinpath("migrations", filename)
-                connection.executescript(migration.read_text(encoding="utf-8"))
+    def save_goal_draft(
+        self,
+        original_message: str,
+        *,
+        title: str,
+        clarification: str | None,
+        **definition: Unpack[GoalDefinition],
+    ) -> tuple[Goal, str | None]:
+        """Save the proposed definition and return the recorded clarification, if any."""
+        if clarification is not None:
+            clarification = _require_text(clarification, "Clarification").strip()
+        question = clarification or None
+        if question is None:
+            if definition["duration"] is None:
+                question = "Once I verify this, are we done, or do you want me to keep checking?"
+            elif definition["assessment_type"] is None:
+                question = "What would show that this goal is being met?"
+        goal = self.create_goal(
+            title,
+            status="draft",
+            original_message=_require_text(original_message, "Original message"),
+            clarification=question,
+            **definition,
+        )
+        return goal, question
 
     def create_goal(
         self,
@@ -227,7 +235,7 @@ class GoalAPI:
                 self._get_goal(connection, parent_goal_id)
             goal_id = connection.execute(
                 "INSERT INTO goals (owner_user_id, parent_goal_id, status) VALUES (?, ?, ?) RETURNING id",
-                (LOCAL_USER_ID, parent_goal_id, status),
+                (ADMIN_USER_ID, parent_goal_id, status),
             ).fetchone()[0]
             self._add_revision(connection, goal_id, 1, title, definition)
             if original_message is not None:
@@ -257,7 +265,7 @@ class GoalAPI:
                 """
                 + SELECT_GOALS
                 + " AND goal.id IN subtree ORDER BY goal.id",
-                {"id": goal_id, "owner": LOCAL_USER_ID},
+                {"id": goal_id, "owner": ADMIN_USER_ID},
             )
             goals = [self._goal(row) for row in rows]
         if not goals:
@@ -287,11 +295,13 @@ class GoalAPI:
             ]
 
     def list_goals(self, status: GoalStatus | None = None) -> list[GoalSummary]:
+        if status is not None and status not in get_args(GoalStatus.__value__):
+            raise GoalValidationError(f"Unknown goal status {status!r}.")
         with self._connection(read_only=True) as connection:
             rows = connection.execute(
                 SELECT_GOALS
                 + " AND (:status IS NULL OR goal.status = :status) ORDER BY goal.id",
-                {"owner": LOCAL_USER_ID, "status": status},
+                {"owner": ADMIN_USER_ID, "status": status},
             )
             return [self._summary(row) for row in rows]
 
@@ -352,7 +362,10 @@ class GoalAPI:
                 raise GoalValidationError(
                     "Supply exactly one confirmation or reference."
                 )
-            evidence = (confirmation or reference or "").strip()
+            evidence = _require_text(
+                confirmation if confirmation is not None else reference,
+                "Completion evidence",
+            ).strip()
             if not evidence:
                 raise GoalValidationError("Completion evidence must contain text.")
             kind = (
@@ -364,7 +377,7 @@ class GoalAPI:
                 saved = goal["completion"]
                 if (
                     saved
-                    and saved["recorded_by"] == LOCAL_USER_ID
+                    and saved["recorded_by"] == ADMIN_USER_ID
                     and saved["evidence_kind"] == kind
                     and saved["evidence"] == evidence
                 ):
@@ -380,7 +393,7 @@ class GoalAPI:
                 (
                     goal_id,
                     revision,
-                    LOCAL_USER_ID,
+                    ADMIN_USER_ID,
                     json.dumps({"evidence_kind": kind, "evidence": evidence}),
                 ),
             )
@@ -401,7 +414,7 @@ class GoalAPI:
                 WHERE parent_goal_id = ? AND owner_user_id = ? AND deleted_at IS NULL
                 LIMIT 1
                 """,
-                (goal_id, LOCAL_USER_ID),
+                (goal_id, ADMIN_USER_ID),
             ).fetchone()
             if child is not None:
                 raise GoalConflictError(
@@ -419,29 +432,11 @@ class GoalAPI:
                 (goal_id,),
             )
 
-    @contextmanager
-    def _connection(self, *, read_only: bool = False) -> Generator[sqlite3.Connection]:
-        uri = self._path.as_uri() + ("?mode=ro" if read_only else "?mode=rwc")
-        try:
-            with closing(sqlite3.connect(uri, uri=True, autocommit=True)) as connection:
-                connection.row_factory = sqlite3.Row
-                yield connection
-        except (OSError, sqlite3.Error) as error:
-            raise GoalStorageError() from error
-
-    @contextmanager
-    def _write(self) -> Generator[sqlite3.Connection]:
-        with self._connection() as connection:
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
-            connection.execute("COMMIT")
-
     def _get_goal(self, connection: sqlite3.Connection, goal_id: int) -> Goal:
         _validate_integer(goal_id, "Goal ID")
         row = connection.execute(
             SELECT_GOALS + " AND goal.id = :id",
-            {"owner": LOCAL_USER_ID, "id": goal_id},
+            {"owner": ADMIN_USER_ID, "id": goal_id},
         ).fetchone()
         if row is None:
             raise GoalNotFoundError(goal_id)
@@ -491,6 +486,7 @@ class GoalAPI:
     def _record_message(
         connection: sqlite3.Connection, goal_id: int, actor: str, text: str
     ) -> None:
+        _require_text(text, "Goal message")
         connection.execute(
             """
             INSERT INTO goal_events (goal_id, revision, kind, actor, payload)

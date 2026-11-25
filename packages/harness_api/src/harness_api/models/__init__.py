@@ -1,1 +1,1 @@
-"""Goal data and persistence rules."""
+"""Workspace records and their persistence rules."""

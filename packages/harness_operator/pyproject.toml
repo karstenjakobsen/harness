@@ -3,7 +3,7 @@ name = "harness-operator"
 version = "0.1.0"
 description = "A small CLI for talking to a Codex goal operator."
 requires-python = ">=3.14,<3.15"
-dependencies = ["click>=8.1,<9", "harness-api", "harness-mcp", "httpx>=0.28,<1", "pydantic>=2,<3"]
+dependencies = ["click>=8.1,<9", "harness-api", "harness-mcp", "pydantic>=2,<3"]
 
 [project.scripts]
 harness-operator = "harness_operator:main"
