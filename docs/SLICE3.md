@@ -50,3 +50,21 @@ For the next slice, I’d add a small HTTP test fixture that reads a temporary f
 
 ## SLICE 3
 
+### Proposed operations
+
+Consider `GoalAPI.record_observation(...)` for recording evidence against a stable goal and `GoalAPI.get_goal_progress(goal_id, revision=None)` for assessing it. Both names and signatures are provisional. A submission retains its source, the date or time the report concerns, and when Harness received it. Derive the submitter from established caller context and preserve the requester and observer separately when known. [Identity and attribution](../TERMINOLOGY.md#identity-and-attribution)
+
+### Open decision for historical progress
+
+Settle the meaning of `get_goal_progress(goal_id, revision=N)` before implementing that read. Suppose revision N ends Monday night. On Tuesday Harness receives a qualifying report about Monday.
+
+| Possible contract | What revision N would show |
+| --- | --- |
+| Evaluate N’s criteria against all evidence available today | Tuesday’s report can make Monday count toward N. The answer identifies the criteria revision and the evidence used. |
+| Reproduce what Harness knew at a historical cutoff | With a cutoff of Monday night, Tuesday’s submission is excluded even though it concerns Monday. Define the cutoff in the API contract and use the recording time to decide what was known. |
+
+Under either contract, a saved completion decision retains the revision and exact evidence it cited when recorded. A later submission can support a new assessment. It cannot change that decision’s citations.
+
+### Proposed Monday acceptance example
+
+Use a plain Python model test first. Create an active goal whose criteria accept owner-confirmed food logs on seven distinct days. Record two qualifying reports for the same Monday and verify that progress is one of seven, cites both evidence IDs, and leaves the goal active. Revise the current target to fourteen and verify one of fourteen from the same reports. Then check that MCP returns the model’s result and the assistant explains who supplied it. [Slice 3 implementation plan](SLICE3_TODO.md)

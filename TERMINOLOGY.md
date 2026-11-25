@@ -4,11 +4,24 @@
 
 | Term | Meaning in Harness |
 | --- | --- |
-| Owner | The person who defines goals, approves changes, and can record a completion decision. |
-| Operator | The assistant that reads goals, explains progress, and proposes changes to the owner. In command examples, `operator` is also the CLI executable. |
+| User | A workspace account with a user ID. The protected system account is `admin`. |
+| Owner | The user related to a particular resource by its `owner_user_id`. |
+| Registered operator | A workspace record with its own numeric ID, an owning user and optional goal assignments. |
+| Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
 | Workspace | The context for a set of goals. Local commands use the workspace database. HTTP commands address the workspace served by the selected API server. |
 | Schema snapshot | The complete SQLite schema and initial system user in `001_initial.sql`. SQLite’s `user_version` records the schema version installed in each workspace. |
 | GoalAPI | The public Python interface for goal operations. It owns the rules shared by the HTTP, CLI, and MCP adapters. Use “HTTP API” when referring specifically to the network interface. |
+
+## Identity and attribution
+
+| Current entry point | What the application establishes |
+| --- | --- |
+| Goal CLI and HTTP endpoints | `GoalAPI` scopes goals to the workspace account identified by `ADMIN_USER_ID`. CLI completion stores that account as `recorded_by`. In message-based creation, Codex drafts the definition and the CLI saves it through `GoalAPI` in the same account. |
+| Account CLI and HTTP endpoints | A user or operator ID selects the target record. Named registration assigns the owner from `--user` or HTTP `owner_user_id`, defaulting to `admin`. These operations record no separate initiating identity. |
+| Bare `operator register` | Starts Codex sign-in. Named registration creates a workspace operator record. |
+| `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. Asking selects no registered operator ID. |
+
+The current HTTP endpoints do not establish who initiated a request. A resource ID identifies its target, `owner_user_id` identifies its owner, and `ADMIN_USER_ID` identifies the workspace account. For evidence writes, record a submitter only from established caller context. Record the requester of a check and the observer that produced the result separately when known. Leave unknown identities explicit. An owner pasting an app link supplies a reference. Attributing an observation to the app requires a report from the app itself.
 
 ## Goals and decisions
 

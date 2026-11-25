@@ -1,5 +1,5 @@
+import csv
 import json
-import re
 import subprocess
 import sysconfig
 from pathlib import Path
@@ -10,7 +10,11 @@ import pytest
 QUESTION = (
     "For my Lose 20 lb goal, list each subgoal, tell me which is complete and how "
     "we know, give the current food-tracking duration, and tell me whether the "
-    "parent goal is complete."
+    "parent goal is complete. Return only CSV, one row for the parent and each "
+    "subgoal, with the header title,status,evidence_kind,evidence,duration_days. "
+    "Use the exact current goal title and report the status as open or complete. "
+    "Copy the saved completion evidence kind and text, and give the current duration "
+    "in whole days. Leave fields empty when there is no value."
 )
 
 
@@ -41,87 +45,61 @@ def assert_tree_call(trace, expected_tree):
 
 
 def assert_plan_answer(answer):
-    subjects = {
-        "gym": r"\bgym\b",
-        "tracker": r"\btracker\b",
-        "food": r"\bfood\b",
-        "parent": r"\bparent\b|\blose 20\s*[- ]?(?:lb|pound)",
-    }
-    sections = {name: [] for name in subjects}
-    current = None
-    normalized = re.sub(r"[*_`]", "", answer.lower())
-    for clause in re.split(r"\n+|(?<=[.!?;])\s+", normalized):
-        matches = [
-            name for name, pattern in subjects.items() if re.search(pattern, clause)
-        ]
-        if matches:
-            # A summary mentioning two goals cannot prove either one's status.
-            current = matches[0] if len(matches) == 1 else None
-        if current:
-            sections[current].append(clause)
+    lines = answer.strip().splitlines()
+    if lines and lines[0] in ("```", "```csv") and lines[-1] == "```":
+        lines = lines[1:-1]
+    reader = csv.reader(lines)
+    assert next(reader, None) == [
+        "title",
+        "status",
+        "evidence_kind",
+        "evidence",
+        "duration_days",
+    ]
+    assert sorted(reader) == [
+        ["Build a personal tracker", "open", "", "", ""],
+        [
+            "Get a gym membership",
+            "complete",
+            "owner_confirmation",
+            "I confirm my gym membership is active.",
+            "",
+        ],
+        ["Lose 20 lb", "open", "", "", ""],
+        ["Track food for fourteen days", "open", "", "", "14"],
+    ]
 
-    done = r"\b(?:complete[d]?|done|finished)\b"
-    negated_done = r"\b(?:not|isn['’]t|hasn['’]t) (?:(?:yet|been|marked|as) )*" + done
-    open_status = r"\b(?:open|active|in progress|pending|incomplete|unfinished)\b"
-    gym = " ".join(sections["gym"])
-    # Require completion as the gym goal's own status. Evidence may describe
-    # a different state, such as an active membership or completed paperwork.
-    gym_goal = r"\bgym(?:[ -]membership)?(?: goal)?\b"
-    label = r"(?:\s*\((?:goal\s*)?#?\d+\))?[\s:|–—-]*"
-    predicate = r"(?:(?:status|is|has been|was|marked|as|now|currently)\b[\s:–—-]*)*"
-    gym_completed = rf"{gym_goal}{label}{predicate}{done}"
-    completed_gym = rf"{done}\s*[:|–—-]\s*(?:get (?:a |the )?)?{gym_goal}"
-    assert re.search(gym_completed, gym) or re.search(completed_gym, gym), gym
-    assert not re.search(negated_done, gym), gym
-    attribution = r"(?:\b(?:owner|user|you|your)\b.{0,30}\bconfirm\w*|\bconfirm\w*.{0,30}\b(?:owner|user|you)\b)"
-    unconfirmed = r"\b(?:not|never|no|without|didn['’]t) (?:(?:yet|been|any|an?|the|owner|user|your|explicit) )*confirm\w*"
-    assert re.search(attribution, re.sub(unconfirmed, "", gym)), gym
-    for name in ("tracker", "food", "parent"):
-        section = " ".join(sections[name])
-        assert re.search(open_status, section) or re.search(negated_done, section), (
-            name,
-            section,
-        )
-        assert not re.search(done, re.sub(negated_done, "", section)), (name, section)
-    food = " ".join(sections["food"])
-    previous_duration = r"\b(?:formerly|originally|previously|from|used to be|instead of) (?:14|fourteen)[\s-]+days?\b"
-    assert re.search(
-        r"\b(?:14|fourteen)[\s-]+days?\b", re.sub(previous_duration, "", food)
-    ), food
-    assert not re.search(
-        r"\b(?:now|currently|current (?:duration|requirement))\s*(?:is|:)?\s*(?:7|seven)[\s-]+days?\b",
-        food,
-    ), food
+
+PLAN_ROWS = """\
+title,status,evidence_kind,evidence,duration_days
+Track food for fourteen days,open,,,14
+Build a personal tracker,open,,,
+Lose 20 lb,open,,,
+Get a gym membership,complete,owner_confirmation,I confirm my gym membership is active.,
+"""
+
+
+def test_answer_accepts_goal_rows_in_any_order():
+    assert_plan_answer(PLAN_ROWS)
 
 
 @pytest.mark.parametrize(
-    "gym,food",
+    "correct,wrong",
     [
-        ("Open. The owner confirmed the paperwork is complete", "Open for 14 days"),
-        ("The owner confirmed the paperwork is complete", "Open for 14 days"),
-        ("Complete, never confirmed by the owner", "Open for 14 days"),
-        ("Complete, you confirmed it", "Open, previously 14 days and now seven days"),
+        ("membership,complete", "membership,open"),
+        ("tracker,open", "tracker,complete"),
+        ("days,open", "days,complete"),
+        ("lb,open", "lb,complete"),
+        ("owner_confirmation", "owner_supplied_reference"),
+        ("I confirm my gym membership is active.", ""),
+        ("open,,,14", "open,,,7"),
+        ("Build a personal tracker,open,,,\n", ""),
+        ("Lose 20 lb,open,,,", "Lose 20 lb,open,,,\nLose 20 lb,open,,,"),
     ],
 )
-def test_answer_rejects_wrong_status_evidence_or_current_duration(gym, food):
-    reply = f"Gym membership — {gym}.\nPersonal tracker — active.\nFood tracking — {food}.\nParent — still open."
+def test_answer_rejects_incorrect_or_missing_goal_facts(correct, wrong):
     with pytest.raises(AssertionError):
-        assert_plan_answer(reply)
-
-
-def test_answer_accepts_historical_duration_and_open_status_wording():
-    assert_plan_answer(
-        "Parent — not yet marked complete.\nFood tracking — active, extended from seven days to fourteen days.\n"
-        "Gym membership — completed by owner confirmation.\nPersonal tracker — still open."
-    )
-
-
-def test_answer_distinguishes_a_completed_goal_from_an_active_membership():
-    assert_plan_answer(
-        "Get a gym membership is complete. You confirmed that your gym membership is active.\n"
-        "Build a personal tracker is still open.\n"
-        "Track food for fourteen days — active.\nLose 20 lb (parent) — not yet complete."
-    )
+        assert_plan_answer(PLAN_ROWS.replace(correct, wrong))
 
 
 @pytest.fixture

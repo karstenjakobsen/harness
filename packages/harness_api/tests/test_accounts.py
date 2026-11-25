@@ -165,6 +165,7 @@ def legacy_workspace(legacy_database):
 def test_migrates_legacy_owner_assignments_and_completion_once(legacy_workspace):
     operators = OperatorAPI(legacy_workspace)
     assert operators.get_operator(9)["owner_user_id"] == "admin"
+    assert UserAPI(legacy_workspace).get_user("admin")["display_name"] == "admin"
     goals = GoalAPI(legacy_workspace)
     goal = goals.get_goal(4)
     assert goal["operator"] == "Coach" and goal["status"] == "completed"
@@ -174,6 +175,15 @@ def test_migrates_legacy_owner_assignments_and_completion_once(legacy_workspace)
     with closing(sqlite3.connect(legacy_workspace)) as connection:
         assert connection.execute("SELECT id FROM users").fetchall() == [("admin",)]
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_upgrade_preserves_custom_owner_display_name(legacy_workspace):
+    with closing(sqlite3.connect(legacy_workspace, autocommit=True)) as connection:
+        connection.execute(
+            "UPDATE users SET display_name = 'Karsten' WHERE id = 'local'"
+        )
+
+    assert UserAPI(legacy_workspace).get_user("admin")["display_name"] == "Karsten"
 
 
 def test_standalone_snapshot_initializes_workspace(tmp_path):

@@ -16,7 +16,8 @@ Add `--help` to any command or group to see its options.
 ## Workspace users and operators
 
 These commands use the current workspace database and print JSON. Every operator
-has one owner. The default owner is the protected system user `admin`.
+record has one owner. The default owner is the protected system user `admin`.
+See how each entry point determines the target, owner and caller in [Identity and attribution](TERMINOLOGY.md#identity-and-attribution).
 
 | Command | What it does |
 | --- | --- |

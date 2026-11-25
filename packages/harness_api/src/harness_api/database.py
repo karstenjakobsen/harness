@@ -83,7 +83,9 @@ class WorkspaceDatabase:
             ALTER TABLE users ADD COLUMN deleted_at TEXT CHECK (id != 'admin' OR deleted_at IS NULL);
             ALTER TABLE operators ADD COLUMN deleted_at TEXT;
             PRAGMA defer_foreign_keys = ON;
-            UPDATE users SET id = 'admin', display_name = 'admin' WHERE id = 'local';
+            UPDATE users SET id = 'admin',
+                display_name = CASE display_name WHEN 'Local user' THEN 'admin' ELSE display_name END
+                WHERE id = 'local';
             UPDATE goals SET owner_user_id = 'admin' WHERE owner_user_id = 'local';
             UPDATE operators SET owner_user_id = 'admin' WHERE owner_user_id = 'local';
         """)
