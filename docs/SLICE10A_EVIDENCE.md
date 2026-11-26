@@ -267,3 +267,247 @@ plugins: anyio-4.16.0
 collected 234 items / 225 deselected / 9 selected
 
 packages/harness_operator/tests/test_goal_plan_live.py .....
+Owner's question
+Goal ID 1.
+Who changed the success criteria for this goal, what changed, and which run and call saved it?
+
+Signed-in operator B's reply
+**Goal 1, “Join the library,” is active at revision 2.** Registered operator **ID 1** changed the success criteria under definition grant **ID 1**. The run record identifies the operator by ID only.
+
+- **Revision 1** required active library membership.
+- **Revision 2** kept that requirement and added successful completion of the first checkout.
+
+**Run 1, call 3** (`revise_goal`) saved revision 2 on November 26, 2026, at 16:14:28. The run log confirms that the call targeted revision 1, committed revision 2, and returned successfully.
+
+Verified HTTP response excerpts
+{
+  "/goals/1/history?view=activity": {
+    "revision_1_criteria": "Membership is active",
+    "revision_2_criteria": "Library membership is active and the first checkout has been completed successfully.",
+    "committing_call": {
+      "run_id": 1,
+      "sequence": 3
+    },
+    "activity_read": {
+      "run_id": 2,
+      "sequence": 2
+    }
+  },
+  "/runs/1": {
+    "operator_id": 1,
+    "definition_grant": {
+      "id": 1,
+      "operator_id": 1,
+      "action": "revise_goal",
+      "goal_id": 1
+    },
+    "call": {
+      "sequence": 3,
+      "tool": "revise_goal",
+      "outcome": "returned",
+      "committed_revision": {
+        "goal_id": 1,
+        "revision": 2
+      }
+    }
+  },
+  "/runs/2": {
+    "operator_id": 2,
+    "granted_goal_id": 3,
+    "calls": [
+      {
+        "sequence": 2,
+        "tool": "get_goal_activity",
+        "outcome": "returned",
+        "returned_history": {
+          "goal_id": 1,
+          "timeline": [
+            {
+              "kind": "revision",
+              "revision": 1,
+              "committing_call": null
+            },
+            {
+              "run_id": 1,
+              "sequence": 1,
+              "kind": "call",
+              "at": "2026-11-26 16:14:26.047010",
+              "tool": "get_goal_tree",
+              "outcome": "returned",
+              "relationship": "requested"
+            },
+            {
+              "run_id": 1,
+              "sequence": 3,
+              "kind": "call",
+              "at": "2026-11-26 16:14:28.297301",
+              "tool": "revise_goal",
+              "outcome": "returned",
+              "relationship": "revision_target"
+            },
+            {
+              "kind": "revision",
+              "revision": 2,
+              "committing_call": {
+                "run_id": 1,
+                "sequence": 3
+              }
+            },
+            {
+              "run_id": 2,
+              "sequence": 1,
+              "kind": "call",
+              "at": "2026-11-26 16:14:38.620163",
+              "tool": "list_goals",
+              "outcome": "returned",
+              "relationship": "listed"
+            }
+          ]
+        }
+      },
+      {
+        "sequence": 3,
+        "tool": "get_run",
+        "outcome": "returned",
+        "returned_history": {
+          "run_id": 1,
+          "outcome": "succeeded",
+          "calls": [
+            {
+              "run_id": 1,
+              "sequence": 1,
+              "outcome": "returned",
+              "committed_event_id": null,
+              "retrieved_event_id": null,
+              "committed_revision": null,
+              "retrieved_revision": null
+            },
+            {
+              "run_id": 1,
+              "sequence": 2,
+              "outcome": "returned",
+              "committed_event_id": null,
+              "retrieved_event_id": null,
+              "committed_revision": null,
+              "retrieved_revision": null
+            },
+            {
+              "run_id": 1,
+              "sequence": 3,
+              "outcome": "returned",
+              "committed_event_id": null,
+              "retrieved_event_id": null,
+              "committed_revision": {
+                "goal_id": 1,
+                "revision": 2
+              },
+              "retrieved_revision": null
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+B's run made no goal changes.
+.
+Owner's question
+For my ‘Build a chess game in Go’ goal, what subgoals would you propose, and how would you verify that a move cannot leave your own king in check?
+
+Signed-in operator's reply
+**Build a chess game in Go** · Goal #1 · Active at revision 1, with no saved subgoals or success criteria.
+
+I’d start with a two-player terminal game and propose four subgoals:
+
+1. **Represent a position.** Store the board, side to move, castling rights, en passant target, and move counters. Verify that a FEN fixture loads the expected state.
+2. **Generate legal moves.** Implement piece movement and attack detection, then filter candidates for king safety. Cover promotion, en passant, and castling with focused tests.
+3. **Determine game outcomes.** Verify checkmate, stalemate, and draw conditions with known positions or move sequences.
+4. **Make a game playable.** Accept coordinate moves in the terminal, display the board, and report invalid moves and the result. Verify a complete game through that interface.
+
+### Verify king safety
+
+Apply each candidate move to a copy of the position, including any capture, then ask whether the opponent attacks the **moving side’s king** on the resulting board. Use a square-attack function so pawn attacks and attacks by pinned pieces are handled correctly. For castling, also check the king’s starting and transit squares.
+
+Start with a table-driven Go test using `k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1`. White’s rook on e2 shields its king on e1 from Black’s rook on e8.
+
+| Candidate | Expected result | Why |
+|---|---|---|
+| `e2f2` | Illegal | Moving sideways opens the e-file and exposes White’s king. |
+| `e2e3` | Legal | The rook still blocks the e-file. |
+
+Use a fresh position for each case. Through the public move API, also verify that rejecting `e2f2` preserves the board and leaves White to move. If the engine exposes a legal move list, check that it excludes `e2f2` and includes `e2e3`.
+
+**Small next step:** Build enough position handling to load that fixture, then make both cases pass with `go test ./...`.
+
+Verified HTTP response excerpts
+{
+  "/runs/1": {
+    "mode": "advisory",
+    "outcome": "succeeded",
+    "calls": [
+      {
+        "sequence": 1,
+        "tool": "list_skills",
+        "outcome": "returned",
+        "returned_skills": [
+          {
+            "id": "chess-rules",
+            "revision": 2
+          },
+          {
+            "id": "go-testing",
+            "revision": 2
+          }
+        ]
+      },
+      {
+        "sequence": 4,
+        "tool": "read_skill",
+        "outcome": "returned",
+        "returned_skills": [
+          {
+            "id": "chess-rules",
+            "revision": 2
+          }
+        ]
+      },
+      {
+        "sequence": 5,
+        "tool": "read_skill",
+        "outcome": "returned",
+        "returned_skills": [
+          {
+            "id": "go-testing",
+            "revision": 2
+          }
+        ]
+      }
+    ]
+  },
+  "/skills/chess-rules/revisions/2": {
+    "source_path": "skills/chess-rules",
+    "commit_sha": "406f55bcbabefec7eb208b48667ffa70d7952387",
+    "content_hash": "6ec1c969094073364daa44f741e41cf1cef1152bc594fe2252b9753342a38f1a",
+    "instructions_excerpt": "---\nname: chess-rules\ndescription: Plan legal move generation and verify check, pins and king safety.\n---\n\n# Verify king safety"
+  },
+  "/skills/chess-rules/revisions/2/reads": [
+    {
+      "run_id": 1,
+      "sequence": 4
+    }
+  ],
+  "/skills/go-testing/revisions/2": {
+    "source_path": "skills/go-testing",
+    "commit_sha": "406f55bcbabefec7eb208b48667ffa70d7952387",
+    "content_hash": "cc5ec757f99961664ed2f12abdec6974044e8aa5a3c105f90ddad17dff97ed3c",
+    "instructions_excerpt": "---\nname: go-testing\ndescription: Turn rules and counterexamples into table-driven Go tests with explicit expected results.\n---\n\n# Test a move rule in Go"
+  },
+  "/skills/go-testing/revisions/2/reads": [
+    {
+      "run_id": 1,
+      "sequence": 5
+    }
+  ]
+}
+Goal 1 after the run: revision 1, 0 descendants.
+.
