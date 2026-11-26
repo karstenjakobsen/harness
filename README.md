@@ -24,6 +24,40 @@ uv run --package harness-operator operator ask "Read goals/POC.md and suggest on
 Run `operator ask` to type a message at the prompt, or pipe a message into the
 same command. Use `make check` to run the Ruff lint and format checks.
 
+## Local Nomad workloads
+
+Use a Linux host with Docker Compose, a running systemd user manager with access
+to the local Docker Engine, and `bash`, `flock`, `curl`, `jq`, GNU Make and
+`uv`. Compose runs the digest-pinned Nomad **2.1.1** server, publishes its
+loopback ports, and checks for an elected leader. The systemd user service
+copies the matching binary from that container into its runtime directory and
+runs the client on the Linux host. The client uses the Docker driver to launch
+workloads. The server API is at `http://127.0.0.1:14646`. Reserve local ports
+14646–14651 for this setup. [Compose definition](dev/nomad/compose.yaml) · [Client unit](dev/nomad/harness-nomad-client@.service)
+
+```sh
+make nomad-up       # Start the server, then the host client. Wait for Docker readiness.
+make test-nomad    # Starts or reuses the cluster and runs three real workload tests.
+make nomad-down    # Stop the client and remove the Compose server and its data volume.
+```
+
+`make nomad-up` links a checkout-specific unit into the systemd user manager
+for the current login session. While it is running, `dev/nomad/cluster.sh identity`
+prints the container ID for `docker logs` and the unit name for `journalctl --user -u`.
+
+In Python, construct `NomadBackend(address)` with an already-running cluster.
+`start(run_id, WorkloadSpec(image, argv))` accepts an image pinned by digest
+and a tuple starting with the executable. It returns a handle for one batch
+job. Repeating the same request retrieves that handle. A changed spec under
+the same ID raises `WorkloadConflictError`. If registration cannot be
+confirmed, retry `StartOutcomeUnknown` with the original ID and spec.
+
+`inspect(handle)` reports state, job ID, allocation ID once placed and exit code
+when observed. After `stop(handle)`, poll for `stopped`. A task that exits
+unsuccessfully reports `failed`. Retry identity lasts while Nomad retains the
+job. Capture the task outcome and stdout while its allocation is available.
+The test target cleans up its own jobs. [Execution contract and acceptance](docs/SLICE9_TODO.md)
+
 ## Sign in to Codex
 
 To connect Harness to your ChatGPT account, enable device code login in your

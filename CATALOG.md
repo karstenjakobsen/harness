@@ -128,6 +128,10 @@ operator goal create --title "Track food" --duration-days 7
 | --- | --- |
 | `make setup` | Installs the workspace packages into `.venv` using `uv`. |
 | `make api` | Starts FastAPI at `http://127.0.0.1:8000`. |
+| `make nomad-server` | Starts the checkout’s Nomad 2.1.1 Compose service and waits for its leader health check. |
+| `make nomad-agent` / `make nomad-up` | Starts or reuses the Compose server and systemd user client, then waits for the host client to report a healthy Docker driver. |
+| `make test-nomad` | Brings up the development cluster, checks successful exit, failed exit and concurrent start followed by repeated stop, then cleans up its test jobs. |
+| `make nomad-down` | Stops and unlinks the checkout’s systemd client unit, then removes its Compose server, network and data volume. |
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
