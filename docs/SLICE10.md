@@ -2,11 +2,11 @@
 
 An owner asks an operator to prepare Go test cases for a saved chess subgoal. The operator chooses a worker profile, writes a brief, and pins the skills the worker can read. Harness starts one Nomad worker. The worker submits a test fixture against the exact goal revision, and the operator reviews what it establishes. The goal stays open until an authorized completion decision.
 
-AI-DLC's registry also provides defaults, modes, prompts, workflows, scripts, integrations, runtime adapters, collections, and distribution. The companion guide maps the full catalog and package structure to Harness use cases. Slice 10 puts one package through a real operator-to-worker handoff first. [Registry capability map](SLICE10/REGISTRY.md) · [Complete local example tree](SLICE10/registry/README.md)
+AI Team's registry also provides defaults, modes, prompts, workflows, scripts, integrations, runtime adapters, collections, and distribution. The companion guide maps the full catalog and package structure to Harness use cases. Slice 10 puts one package through a real operator-to-worker handoff first. [Registry capability map](SLICE10/REGISTRY.md) · [Complete local example tree](SLICE10/registry/README.md)
 
 ## Skills, plugins, profiles and grants
 
-Use AI-DLC's manifest-based packaging and its separation of agent instructions from executable workflow steps. In Harness, a plugin release groups reusable material. The public models enforce grants, and the execution backend starts and inspects the worker.
+Use AI Team's manifest-based packaging and its separation of agent instructions from executable workflow steps. In Harness, a plugin release groups reusable material. The public models enforce grants, and the execution backend starts and inspects the worker.
 
 | Concept | Slice 10 contract |
 | --- | --- |

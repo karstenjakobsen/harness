@@ -1,10 +1,10 @@
-# What the AI-DLC registry can do
+# What the AI Team registry can do
 
-The AI-DLC checkout at `5e2d3859fefc29c615045babc76b505bd77a6c79` contains 28 catalog entries, four collections, a default library, and runtime adapters. A registry gives authors a stable package format. A workspace chooses packages. An adapter gives a runtime the selected material. Workflows and integrations can add execution to that setup. The examples here use proposed Harness formats and local data.
+The AI Team checkout at `5e2d3859fefc29c615045babc76b505bd77a6c79` contains 28 catalog entries, four collections, a default library, and runtime adapters. A registry gives authors a stable package format. A workspace chooses packages. An adapter gives a runtime the selected material. Workflows and integrations can add execution to that setup. The examples here use proposed Harness formats and local data.
 
 ## Registry structure
 
-| AI-DLC element | What it does | How Harness could use it |
+| AI Team element | What it does | How Harness could use it |
 | --- | --- | --- |
 | `catalog.json` | Searchable index of plugin names, versions, descriptions, tags, paths, dependencies, and configuration. | Show owners which packages and revisions are available. Derive the index from validated manifests and pin exact revisions at use time. [Example catalog](registry/catalog.json) |
 | Collections | Install a curated group in order. Collision policies can preserve the existing owner, let later members win, report overlaps, or honor an explicit owner map. | Offer a reusable group of packages for an operator or project. Require one explicit owner for a conflicting ID so the same selection resolves predictably. [Example collection](registry/catalog.json) |
@@ -16,20 +16,20 @@ The AI-DLC checkout at `5e2d3859fefc29c615045babc76b505bd77a6c79` contains 28 ca
 
 ## What a package can contain
 
-| AI-DLC material | Harness use |
+| AI Team material | Harness use |
 | --- | --- |
-| `plugin.yaml`, dependencies and prerequisites | A manifest declares what a package supplies and what it needs. AI-DLC supports required and optional plugins, enhancements, external tool prerequisites, typed configuration and validation checks. Harness can begin with one self-contained package, then resolve exact dependency revisions before publishing a catalog. An optional dependency can enable an explicitly named feature when present. [Dependency preview](registry/plugins/evidence-review/plugin.yaml) |
+| `plugin.yaml`, dependencies and prerequisites | A manifest declares what a package supplies and what it needs. AI Team supports required and optional plugins, enhancements, external tool prerequisites, typed configuration and validation checks. Harness can begin with one self-contained package, then resolve exact dependency revisions before publishing a catalog. An optional dependency can enable an explicitly named feature when present. [Dependency preview](registry/plugins/evidence-review/plugin.yaml) |
 | `skills/` and `agents/` | Reusable instructions and agent definitions with skill references, capabilities, tool preferences, and optional model choices. In Harness the role definitions live under `profiles/`. The operator profile shapes planning and review. The worker profile shapes a single deliverable. A later runtime preference can select among owner-approved models. [Operator profile](registry/plugins/engineering/profiles/test-planner.yaml) · [Worker profile](registry/plugins/engineering/profiles/test-writer.yaml) |
 | `references/`, `templates/`, `examples/` | Carry the supporting knowledge, blank work artifacts, and worked results that make a skill usable. A Harness importer can snapshot any declared material an agent can read. The example also includes authoring material that can be reviewed directly in Git. [Reference](registry/plugins/engineering/references/evidence-review.md) · [Brief template](registry/plugins/engineering/templates/work-brief.md) · [Worked result](registry/plugins/engineering/examples/king-safety.json) |
 | `schemas/` and `evals/` | Give outputs a machine-checkable shape and give authors reproducible cases for evaluating an agent's behavior. In Harness, validate a result before recording evidence. Evaluate profile behavior separately using a brief, expected content and trace evidence. [Result schema](registry/plugins/engineering/schemas/test-cases.schema.json) · [Evaluation case](registry/plugins/engineering/evals/king-safety.yaml) |
-| `workflow/` and runtime-native `workflows/` | AI-DLC workflows can sequence agent, script, and human steps using dependencies, validation, conditions, retries, and approval gates. Its adapters can also ship native Kiro recipes. Harness could add a recipe for worker submission, structural validation, and operator review. The model would still check the grant on each consequential operation. [Workflow preview](registry/plugins/engineering/workflows/prepare-test-cases.yaml) |
+| `workflow/` and runtime-native `workflows/` | AI Team workflows can sequence agent, script, and human steps using dependencies, validation, conditions, retries, and approval gates. Its adapters can also ship native Kiro recipes. Harness could add a recipe for worker submission, structural validation, and operator review. The model would still check the grant on each consequential operation. [Workflow preview](registry/plugins/engineering/workflows/prepare-test-cases.yaml) |
 | `scripts/`, `server/`, `config/` and MCP declarations | Plugins can ship helper commands or servers and describe needed configuration and credentials. Harness can expose owner-approved integrations as typed tools with per-run scope. Resolve secrets from trusted workspace configuration and record the calls. Start with a validator the developer can run directly. [Validation helper](registry/plugins/engineering/scripts/validate_result.py) · [Read integration preview](registry/plugins/engineering/integrations/test-reports.yaml) |
 | `hooks/`, `powers/` and `agent_hooks` | IDE extensions and runner-specific hooks trigger checks or guidance at events such as session start, tool use, or turn end. Harness could use trusted validators at these lifecycle points and record their results. The server and public model enforce grants for direct calls as well as calls through a runtime adapter. [Result hook preview](registry/plugins/engineering/hooks/review-result.yaml) |
-| Authoring and release tooling | AI-DLC offers scaffolding, schema checks, dependency and collision checks, local linking, package updates, CI templates, compatibility checks, and versioned publishing. Harness can start with checks for manifest shape, referenced files, collisions, schema fixtures, and unchanged bytes under existing revisions. A second registry would justify install and update semantics. |
+| Authoring and release tooling | AI Team offers scaffolding, schema checks, dependency and collision checks, local linking, package updates, CI templates, compatibility checks, and versioned publishing. Harness can start with checks for manifest shape, referenced files, collisions, schema fixtures, and unchanged bytes under existing revisions. A second registry would justify install and update semantics. |
 
 ## What the shipped plugins cover
 
-| Family | AI-DLC examples | Harness use case |
+| Family | AI Team examples | Harness use case |
 | --- | --- | --- |
 | Planning and design | `aidlc-planner`, `aidlc-product-loop`, `aidlc-api-design`, `aidlc-reverse-engineering`, `aidlc-solution-design` | Turn a brief into scoped work, review requirements and architecture, and return reusable design artifacts. |
 | Implementation and verification | `aidlc-developer`, `aidlc-devops`, `aidlc-engineering-practices`, `aidlc-live-validator`, `aidlc-release`, `aidlc-bamboo-gitlab-migration` | Compose implementation, test, runtime-check and review roles. Treat release and migration changes as separately authorized actions. |

@@ -1,6 +1,6 @@
 # Sources and attribution
 
-The registry guide is a summary of the AI-DLC registry and accompanying design documentation at commit `5e2d3859fefc29c615045babc76b505bd77a6c79`. The example manifests, profiles, workflow, integration, and validator are Harness proposal material.
+The registry guide is a summary of the AI Team registry and accompanying design documentation at commit `5e2d3859fefc29c615045babc76b505bd77a6c79`. The example manifests, profiles, workflow, integration, and validator are Harness proposal material.
 
 The planning and task breakdown, test-driven development, and code review and quality skills are Harness adaptations of Addy Osmani's `addyosmani/agent-skills` at commit `1401c8b8030e023baeebb31781a6653fe8e93026`. The chess rules and Go testing skills are copies of the existing Harness examples.
 
