@@ -10,6 +10,7 @@ from harness_api import (
     GoalNotFoundError,
     GoalValidationError,
     RunNotFoundError,
+    SkillCatalogError,
     WorkspaceStorageError,
 )
 
@@ -47,6 +48,7 @@ def main() -> int:
         GoalNotFoundError,
         GoalValidationError,
         RunNotFoundError,
+        SkillCatalogError,
         WorkspaceStorageError,
     ) as error:
         click.echo(f"operator: {error}", err=True)

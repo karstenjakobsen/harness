@@ -2,8 +2,8 @@
 
 `operator ask` sends one message to Codex and prints its reply. Use it to read
 relevant workspace files, think through a goal, or suggest a small next step.
-An ordinary session offers advice. The workspace owner can delegate completion
-of one subgoal for an explicit session. Each invocation starts a fresh
+An ordinary session offers advice. The workspace owner can delegate a definition change,
+creation of draft children under one parent, or completion of one subgoal. Each invocation starts a fresh
 conversation using the Codex read-only sandbox. It uses your existing Codex
 sign-in and skips your personal Codex configuration.
 
@@ -23,6 +23,60 @@ uv run --package harness-operator operator ask "Read goals/POC.md and suggest on
 
 Run `operator ask` to type a message at the prompt, or pipe a message into the
 same command. Use `make check` to run the Ruff lint and format checks.
+
+## Local Nomad workloads
+
+Use a Linux host with Docker Compose, a running systemd user manager with access
+to the local Docker Engine, and `bash`, `flock`, `curl`, `jq`, GNU Make and
+`uv`. Compose runs the digest-pinned Nomad **2.1.1** server, publishes its
+loopback ports, and checks for an elected leader. The systemd user service
+copies the matching binary from that container into its runtime directory and
+runs the client on the Linux host. The client uses the Docker driver to launch
+workloads. The server API is at `http://127.0.0.1:14646`. Reserve local ports
+14646–14651 for this setup. [Compose definition](dev/nomad/compose.yaml) · [Client unit](dev/nomad/harness-nomad-client@.service)
+
+```sh
+make nomad-up       # Start the server, then the host client. Wait for Docker readiness.
+make test-nomad    # Starts or reuses the cluster and runs the real workload tests.
+make nomad-down    # Stop the client and remove the Compose server and its data volume.
+```
+
+`make nomad-up` links a checkout-specific unit into the systemd user manager
+for the current login session. While it is running, `dev/nomad/cluster.sh identity`
+prints the container ID for `docker logs` and the unit name for `journalctl --user -u`.
+After a server-only or partial startup, `make nomad-down` still attempts Compose
+cleanup if the systemd user session is unavailable. It returns a nonzero status
+and reports when client cleanup could not be verified.
+
+In Python, construct `NomadBackend(address)` with an already-running cluster.
+`start(run_id, WorkloadSpec(image, argv))` accepts an image pinned by digest
+and a literal argument tuple starting with the executable. It returns a handle
+for one batch job. For example, `("printf", "%s", "${NOMAD_ALLOC_ID}")` prints
+`${NOMAD_ALLOC_ID}`. Repeating the same request retrieves that handle. A changed spec under
+the same ID raises `WorkloadConflictError`. If registration cannot be
+confirmed, retry `StartOutcomeUnknown` with the original ID and spec.
+
+`inspect(handle)` reports state, job ID, allocation ID once placed and exit code
+when observed. After `stop(handle)`, poll for `stopped`. A task that exits
+unsuccessfully reports `failed`. A disconnected or lost allocation reports
+`unknown` with an unknown exit code. The original allocation can reconnect
+within a one-hour window. Nomad is configured to keep it and suppress replacement
+during that window. [Nomad disconnect policy](https://developer.hashicorp.com/nomad/docs/job-specification/disconnect)
+
+Before the workload starts, a pinned Nomad CLI prestart task checks its allocation
+and the job’s placements through the task-local API socket. Only a sole allocation
+with no predecessor or successor passes. A failed read also blocks launch. On a
+cluster with ACLs, the prestart task’s workload identity needs access to read its
+allocation and the job’s allocations. This check also covers a placement created
+after disconnect expiry or by a scheduler override.
+
+If multiple placements are observed, `inspect` returns `unknown`. It keeps
+the original `allocation_id` when identifiable and exposes additional IDs in
+`replacement_allocation_ids`. Inspect and stop remain available for older jobs.
+A start retry against a job registered before the prestart check raises
+`WorkloadConflictError`. Capture outcomes before Nomad collects their records.
+Slice 10 worker grants must bind to the authenticated original allocation before
+accepting evidence or authorizing an external action. [Execution contract and acceptance](docs/SLICE9_TODO.md)
 
 ## Sign in to Codex
 
@@ -62,11 +116,9 @@ deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.m
 
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
-On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Version 10 upgrades workspaces from versions 7, 8 and 9 in
-place. Existing assignments keep their responsible operator and require an
-explicit grant for completion authority. Opening a pre-v7 or unrecognized
-workspace returns an error and leaves the file intact.
+Harness initializes an empty database from the current [schema.sql](packages/harness_api/src/harness_api/schema.sql)
+and reuses it on later runs. For local development, start in a fresh directory
+after an incompatible schema change. Your previous database stays in its original directory.
 
 The schema gives each goal a stable ID, an owner, and a status. Goal revisions
 store titles and outcomes. Operator assignments have their own history, and
@@ -82,6 +134,47 @@ For questions about a plan, the operator calls `get_goal_tree` with the goal ID
 to read each descendant’s current requirements, status, and completion evidence.
 For progress it calls `get_goal_progress` and explains the model’s assessment
 using the returned evidence IDs, dates and provenance.
+
+### Plan with versioned skills
+
+Before each `operator ask` session, Harness imports the committed `skills/` tree
+from the Harness checkout used by `make setup`. The caller can start in an empty
+workspace. Each skill directory contains a UTF-8 `operator.yaml` and `SKILL.md`.
+The manifest declares `kind: skill`, a stable `id` matching
+`[A-Za-z0-9][A-Za-z0-9_.-]*`, a positive 64-bit integer `revision`, and a
+`name`, `description`, and `author`. A duplicate manifest field rejects the
+catalog. The Git reader uses the original objects for its recorded commit SHA,
+including in checkouts with local replacement refs.
+
+Recorded sessions can use `list_skills()` to discover guidance and
+`read_skill(id, revision)` to retrieve it. The operator chooses which revisions
+to read and which subgoals to propose. An advisory plan stays in the reply.
+
+Discovery reflects the last successful import into this workspace. Removing a
+skill removes it from discovery. The saved revision retains its original files,
+directory path, Git commit SHA and SHA-256 content hash. The hash covers the
+manifest’s UTF-8 byte length as eight big-endian bytes, then the manifest and
+Markdown bytes in order. An unrelated commit or folder move preserves the
+original provenance. Changing either file under an existing ID and revision
+rejects the entire import before the run starts. Bump the manifest revision to
+publish changed content. Historical HTTP reads use SQLite even when the source
+checkout is unavailable. The public skill queries raise `SkillValidationError`
+for a malformed ID or revision (HTTP 422) and `SkillNotFoundError` for a valid
+key absent from the owner’s catalog history (HTTP 404). [Seed catalog](skills)
+
+### Delegate subgoal creation
+
+In a fresh workspace, use `operator goal grant-subgoals PARENT_ID OPERATOR_ID`
+and pass the returned grant ID to `operator ask --definition-grant GRANT_ID`.
+Ask the operator to break the named goal into subgoals and save them for review.
+Each saved child starts at revision 1 in draft status with success criteria.
+Inspect the plan with `operator goal show PARENT_ID --tree`. An interruption can
+leave a partial plan, so the next operator can inspect the children before continuing.
+
+A grant permits direct children under a draft, active, or paused parent. An
+identical authorized retry can retrieve a saved child after the parent completes
+or is revoked at the same revision. A change to the parent definition makes an
+older request stale. After reviewing the new revision, use a new key for new work.
 
 ### Delegate completion of a subgoal
 
@@ -188,6 +281,9 @@ curl --fail --silent --show-error http://127.0.0.1:8000/goals
 | `GET` | `/goals/{goal_id}/history` | Read revision timestamps, submissions and saved completions |
 | `GET` | `/goals/{goal_id}/history?view=activity` | Read the goal timeline and discover related operator runs |
 | `GET` | `/runs/{run_id}` | Read the run identity, timing, outcome and ordered tool calls |
+| `GET` | `/skills` | List skills and revisions in the workspace owner’s current catalog |
+| `GET` | `/skills/{skill_id}/revisions/{revision}` | Read the exact saved manifest, instructions and source provenance |
+| `GET` | `/skills/{skill_id}/revisions/{revision}/reads` | List owner-visible `{run_id, sequence}` pairs for calls that returned the full revision |
 | `POST` | `/goals/{goal_id}/completion` | Complete the current `revision` with a confirmation or reference and optional `evidence_ids` |
 | `DELETE` | `/goals/{goal_id}` | Soft-delete a leaf and close its assignment. A parent with visible children returns HTTP 409 |
 
@@ -212,8 +308,6 @@ owner-visible goal at call start. Returned goals and committed or retrieved
 revision references also contribute to the timeline. A denied attempt appears
 in run history, and appears on the goal timeline if the target resolved at
 call start. The goal's definition, status, and decisions are preserved.
-For version 9 records, returned references and matching bound grants establish
-goal relationships. Older attempts with only a supplied ID remain in the run trace.
 The revision list remains available at `/goals/{goal_id}/history`.
 
 Follow a `run_id` to `GET /runs/{run_id}`. An advisory run has null operator and
@@ -221,13 +315,34 @@ grant fields. A delegated run identifies the registered operator and exact grant
 Completion runs retain `completion_grant_id` and `granted_goal_id`. A run with
 a creation or revision grant includes `definition_grant` with `id`, `operator_id`,
 `action`, and `goal_id`. The action is `create_goal` for top-level creation with
-`goal_id: null`, or `revise_goal` for a single goal. The run outcome is
+`goal_id: null`, `create_subgoal` with the parent’s ID, or `revise_goal` for a single goal. The run outcome is
 `succeeded`, `failed`, or `unfinished`.
 A launch error, such as an existing trace file, marks the run `failed`.
 Calls are ordered by `sequence` and retain the requested goal ID and revision
-when supplied, including on denial. The call outcome is `returned`, `denied`,
-`failed`, or `unfinished`. A successful empty result has `returned_goals: []`.
-Calls without a returned result have `returned_goals: null`.
+or the requested run ID (`target_run_id`), including on denial. The call outcome
+is `returned`, `denied`, `failed`, or `unfinished`. A successful empty goal
+result has `returned_goals: []`. History reads use `returned_history`. Skill calls
+use `returned_skills`, an ordered list of `{id, revision}` references. A
+successful empty catalog listing returns `[]`. A call without a returned
+result has all three fields set to `null`.
+
+For `create_subgoal`, the parent’s activity lists the call as `requested`.
+Follow its run ID and sequence to see `target_goal_id` and `target_revision`
+for the parent and `committed_revision` for the new child. An identical retry
+has a `retrieved_revision`. Open `GET /goals/{child_id}/history?view=activity`
+to find the `creation_result` and follow revision 1’s `committing_call` back
+to the original call. This link survives an interruption before reply delivery.
+A denied call has no saved result. Once a call commits or retrieves a child,
+its audit record preserves that fact even if delivery fails.
+
+For a `list_skills` call, these references identify the descriptions made
+available for discovery. For a `read_skill` call, `target_skill_id` and
+`target_revision` identify the requested revision. An invalid skill ID yields
+a denied attempt with a null `target_skill_id`. A returned reference
+identifies the instructions Harness handed to the transport. To inspect them,
+follow the reference to `GET /skills/{skill_id}/revisions/{revision}`. Append
+`/reads` to find the calls that returned those instructions. A listing alone
+contributes zero entries to that reverse lookup.
 
 Each result reference retains its goal ID, revision and any returned status. `observation_ids`
 identifies observation records returned by a progress call. A result's `decision`
@@ -246,8 +361,23 @@ return the current revision without a commit. Direct owner and HTTP revisions
 have `committing_call: null`, as do revisions saved before definition auditing.
 
 `operator goal history GOAL_ID` and `operator run show RUN_ID` return the same
-records through `GoalAPI.get_goal_activity` and `GoalAPI.get_run`. Audit capture
-covers Harness MCP calls during `operator ask`. It stores typed references and
+records through `GoalAPI.get_goal_activity` and `GoalAPI.get_run`. Advisory and
+delegated `operator ask` sessions can use these queries through the read-only
+MCP tools `get_goal_activity` and `get_run`, including for other operators'
+runs in the same workspace. A standalone MCP server without a recorded run
+omits both tools from discovery and rejects direct calls to them.
+
+For `get_goal_activity`, `returned_history` contains the goal ID and ordered
+timeline references, including revision numbers and their committing calls,
+observation IDs, decision IDs and citations, and related call entries. For
+`get_run`, it contains the inspected run ID and its outcome, plus each call's
+run ID, sequence, outcome, and commit or retrieval references as returned at
+read time. For example, a saved read can show an `unfinished` call with a
+committed revision after the call itself becomes `returned`. The snapshot
+excludes the executing call. Inspecting an earlier history read exposes its
+saved references one level deep.
+
+Audit capture covers Harness MCP calls in recorded runs. It stores typed references and
 outcomes. Prompt text, raw tool arguments and results, and credentials are
 excluded. Direct CLI and HTTP reads fall outside capture. Owner reports entered
 through the CLI appear in the timeline with their original attribution.
@@ -255,10 +385,10 @@ through the CLI appear in the timeline with their original attribution.
 A read reference is saved before MCP hands the response to the transport.
 Receipt by the assistant can remain unknown if the connection drops. A revision
 or completion transaction saves its committing call even if the call remains
-`unfinished` after an interruption. Older decisions and direct owner completions
+`unfinished` after an interruption. Direct owner completions
 have `committing_call: null`. All MCP goal writes require a recorded run.
 
-The `harness_api` package follows MVC. `GoalAPI`, `UserAPI`, and `OperatorAPI`
+The `harness_api` package follows MVC. `GoalAPI`, `SkillAPI`, `UserAPI`, and `OperatorAPI`
 own persistence and business rules. The FastAPI controllers call those models,
 and Pydantic views define the HTTP request and response bodies. Workspace CLI
 commands call the same Python models. Start FastAPI and run the CLI from the
@@ -266,5 +396,7 @@ same workspace to use the same SQLite database.
 
 Run `make test` for the offline suite and `make check` for lint and formatting.
 Run `make test-live` separately with Codex signed in. It populates temporary workspaces through
-the CLI, verifies plan and progress reads through MCP, and checks the replies.
+the CLI, verifies MCP reads and delegated writes, and checks the replies. The
+shared history test follows a revision to its committing call and a separate
+operator's history read over HTTP.
 Test teardown removes the workspace and its database even if an assertion fails.

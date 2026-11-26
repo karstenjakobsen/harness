@@ -1,4 +1,5 @@
 from .database import ADMIN_USER_ID, DATABASE_PATH, WorkspaceStorageError
+from .execution import ExecutionBackend, WorkloadSpec, WorkloadStatus
 from .models.accounts import (
     AccountConflictError,
     AccountNotFoundError,
@@ -16,6 +17,7 @@ from .models.activity import (
     HarnessTool,
     OperatorRun,
     RunNotFoundError,
+    SkillReference,
 )
 from .models.evidence import Evidence
 from .models.goals import (
@@ -42,6 +44,18 @@ from .models.goals import (
     GoalTree,
     GoalValidationError,
 )
+from .models.skills import (
+    SkillAPI,
+    SkillCatalog,
+    SkillCatalogError,
+    SkillNotFoundError,
+    SkillRevision,
+    SkillSource,
+    SkillSummary,
+    SkillValidationError,
+)
+from .nomad import NomadBackend, StartOutcomeUnknown, WorkloadConflictError
+from .skill_source import read_skill_catalog
 
 __all__ = [
     "ADMIN_USER_ID",
@@ -58,6 +72,7 @@ __all__ = [
     "DelegatedCompletion",
     "DelegatedGoalResult",
     "Evidence",
+    "ExecutionBackend",
     "Goal",
     "GoalAPI",
     "GoalActivity",
@@ -77,11 +92,26 @@ __all__ = [
     "GoalTree",
     "GoalValidationError",
     "HarnessTool",
+    "NomadBackend",
     "Operator",
     "OperatorAPI",
     "OperatorRun",
     "RunNotFoundError",
+    "SkillAPI",
+    "SkillCatalog",
+    "SkillCatalogError",
+    "SkillNotFoundError",
+    "SkillReference",
+    "SkillRevision",
+    "SkillSource",
+    "SkillSummary",
+    "SkillValidationError",
+    "StartOutcomeUnknown",
     "User",
     "UserAPI",
+    "WorkloadConflictError",
+    "WorkloadSpec",
+    "WorkloadStatus",
     "WorkspaceStorageError",
+    "read_skill_catalog",
 ]

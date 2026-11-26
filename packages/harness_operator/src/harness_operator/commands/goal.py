@@ -183,6 +183,16 @@ def grant_create(operator_id: int) -> None:
 
 
 @goal.command()
+@click.argument("parent_id", type=POSITIVE_INTEGER)
+@click.argument("operator_id", type=POSITIVE_INTEGER)
+def grant_subgoals(parent_id: int, operator_id: int) -> None:
+    """Grant creation of direct draft children under this parent."""
+    print_record(
+        GoalAPI().grant_definition("create_subgoal", operator_id, goal_id=parent_id)
+    )
+
+
+@goal.command()
 @click.argument("goal_id", type=POSITIVE_INTEGER)
 @click.argument("operator_id", type=POSITIVE_INTEGER)
 def grant_revision(goal_id: int, operator_id: int) -> None:

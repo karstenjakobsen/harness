@@ -13,12 +13,21 @@ Add `--help` to any command or group to see its options.
 | `operator register` | Starts Codex device sign-in and displays the verification link and one-time code. |
 | `operator ask [--trace-file PATH] [MESSAGE]` | Opens an advisory session and prints its reply. The optional flag saves the Codex event stream, including MCP calls, to a new file. |
 | `operator ask --completion-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can complete the specific subgoal covered by the active grant. |
-| `operator ask --definition-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can create top-level goals or revise one goal, as specified by the active grant. |
+| `operator ask --definition-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can create top-level goals, create draft children under one parent, or revise one goal, according to its grant. |
 
 Today, `operator ask` can read goals with `list_goals`, `get_goal_tree` and
-`get_goal_progress`. It can weigh the evidence, suggest completion or ask what
+`get_goal_progress`. Advisory and delegated sessions can inspect goal timelines
+and earlier runs with `get_goal_activity` and `get_run`. Both tools require a
+recorded run and save references to the records they expose.
+The assistant can weigh the evidence, suggest completion or ask what
 is missing. To act on its advice, the local owner uses `operator goal complete`.
 Named registration creates a workspace record. Ordinary ask sessions remain advisory.
+
+Before starting each run, `operator ask` imports the committed Harness skill
+catalog into the selected workspace. A recorded session can discover descriptions
+with `list_skills()` and choose exact instructions with `read_skill(id, revision)`.
+An invalid catalog stops startup before a run is created. Inspect
+`operator run show RUN_ID` for the skill revisions each call listed or read. [Skill catalog and provenance](README.md#plan-with-versioned-skills)
 
 The delegated session exposes
 `complete_goal(goal_id, expected_revision, evidence_ids, rationale)`.
@@ -26,12 +35,17 @@ Harness derives the actor from the grant bound at startup and returns the saved
 decision with its citations. The operator decides when the evidence is sufficient.
 The session's grant is checked again on every completion call.
 
-For goal definitions, an active creation grant exposes `create_goal` and an
-active revision grant exposes `revise_goal`. The owner approves each grant once.
-Harness binds one grant per session and rechecks it on every write. Creation
-defaults to `draft` and accepts a `retry_key` to retrieve revision 1 on an
-identical retry. Revision takes the current `expected_revision`. On conflict,
-read the current definition and activity before deciding how to proceed.
+The owner grants one definition action per session. MCP discovery reflects the
+bound grant’s current authority. The model rechecks it inside every write transaction.
+
+- `create_goal` saves a top-level goal and defaults to `draft`.
+- `create_subgoal` takes a parent ID, expected parent revision, retry key, title
+  and success criteria. Each new key can save one direct draft child.
+- `revise_goal` takes the current `expected_revision` of the granted goal.
+
+Both creation tools return the original revision 1 result on an identical
+authorized retry. On conflict, read the current definition and activity before
+deciding how to proceed.
 
 `operator ask` records Harness MCP activity in the workspace database. The
 two history commands read its typed references and outcomes without requiring
@@ -81,8 +95,9 @@ Explicit creation and the other workspace commands print JSON.
 | `operator goal grant-completion GOAL_ID OPERATOR_ID` | Assigns the subgoal with explicit completion authority. Returns a fresh grant `id`, the goal ID and operator ID. |
 | `operator goal withdraw-completion GRANT_ID` | Closes that assignment and invalidates sessions bound to the grant. |
 | `operator goal grant-create OPERATOR_ID` | This operator may create top-level goals in this workspace until you withdraw the grant. Returns the grant ID and operator ID. |
+| `operator goal grant-subgoals PARENT_ID OPERATOR_ID` | Grants repeated creation of direct draft children under the specified parent. Returns the grant ID for `operator ask --definition-grant`. |
 | `operator goal grant-revision GOAL_ID OPERATOR_ID` | Grants revision of the specified goal. Returns the grant ID, goal ID and operator ID. |
-| `operator goal withdraw-definition-grant GRANT_ID` | Withdraws the creation or revision grant and invalidates sessions bound to it. |
+| `operator goal withdraw-definition-grant GRANT_ID` | Withdraws the definition grant and invalidates sessions bound to it. |
 
 For `FIELDS`, use `--desired-outcome`, `--success-criteria`, `--measurement-plan`,
 `--assessment-type` (`objective`, `judgment`, or `mixed`), `--duration` (`one_time`
@@ -113,8 +128,12 @@ operator goal create --title "Track food" --duration-days 7
 | --- | --- |
 | `make setup` | Installs the workspace packages into `.venv` using `uv`. |
 | `make api` | Starts FastAPI at `http://127.0.0.1:8000`. |
+| `make nomad-server` | Starts the checkout’s Nomad 2.1.1 Compose service and waits for its leader health check. |
+| `make nomad-agent` / `make nomad-up` | Starts or reuses the Compose server and systemd user client, then waits for the host client to report a healthy Docker driver. |
+| `make test-nomad` | Brings up the development cluster and checks workload exit, concurrent start, repeated stop, literal arguments and refusal of a second placement. Cleans up its test jobs. |
+| `make nomad-down` | Attempts client and Compose cleanup independently. Removes the checkout’s Compose server, network and data volume and reports a failure if it cannot verify the systemd client cleanup. |
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
-| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, and creation and revision history. |
+| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, one operator inspecting another's revision, an advisory chess plan using versioned skills, and delegated subgoal creation with HTTP attribution. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |

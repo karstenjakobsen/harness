@@ -1,7 +1,9 @@
 import json
 import sqlite3
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
+from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
 from types import EllipsisType
@@ -16,17 +18,25 @@ from ..database import (
 )
 from . import GoalStatus
 from .activity import (
+    ActivityReadEntry,
+    ActivityReadReference,
     CallActivity,
     CallReference,
+    DecisionReadReference,
     DefinitionAction,
     DefinitionGrant,
     GoalResultReference,
     HarnessTool,
+    HistoryReadReference,
+    ObservationReadReference,
     OperatorRun,
+    RevisionReadReference,
     RevisionReference,
+    SkillReference,
     related_calls,
     revision_reference,
     run_calls,
+    run_read_reference,
     run_record,
     run_row,
     save_result_references,
@@ -42,6 +52,7 @@ from .evidence import (
     goal_evidence,
     is_future_dated,
 )
+from .skills import SkillAPI, is_skill_id
 
 EVENT_COLUMNS = """
 event.id AS event_id, event.actor_user_id, event.recorded_at, statement.payload, event.statement_evidence_id,
@@ -209,6 +220,39 @@ type ActivityEntry = (
 class GoalActivity(TypedDict):
     goal_id: int
     timeline: list[ActivityEntry]
+
+
+def _activity_read_reference(activity: GoalActivity) -> ActivityReadReference:
+    timeline: list[ActivityReadEntry] = []
+    for entry in activity["timeline"]:
+        if entry["kind"] == "revision":
+            timeline.append(
+                RevisionReadReference(
+                    kind="revision",
+                    revision=entry["definition"]["revision"],
+                    committing_call=entry["committing_call"],
+                )
+            )
+        elif entry["kind"] == "observation":
+            timeline.append(
+                ObservationReadReference(
+                    kind="observation", evidence_id=entry["observation"]["evidence_id"]
+                )
+            )
+        elif entry["kind"] == "decision":
+            decision = entry["decision"]
+            timeline.append(
+                DecisionReadReference(
+                    kind="decision",
+                    event_id=decision["event_id"],
+                    evidence_ids=decision["evidence_ids"],
+                    statement_evidence_id=decision.get("statement_evidence_id"),
+                    committing_call=entry["committing_call"],
+                )
+            )
+        else:
+            timeline.append(entry)
+    return ActivityReadReference(goal_id=activity["goal_id"], timeline=timeline)
 
 
 class GoalNotFoundError(LookupError):
@@ -413,6 +457,11 @@ class GoalAPI(WorkspaceDatabase):
         super().__init__(path)
         self._submitter = ADMIN_USER_ID if local_owner else None
 
+    @cached_property
+    def skills(self) -> SkillAPI:
+        """The skill catalog in the same workspace as these runs."""
+        return SkillAPI(self._path)
+
     def save_goal_draft(
         self,
         original_message: str,
@@ -472,6 +521,8 @@ class GoalAPI(WorkspaceDatabase):
             ),
         )
         with self._write() as connection:
+            if parent_goal_id is not None:
+                self._get_goal(connection, parent_goal_id)
             goal_id = self._insert_goal(
                 connection, title, status, definition, parent_goal_id
             )
@@ -489,8 +540,6 @@ class GoalAPI(WorkspaceDatabase):
         definition: GoalDefinition,
         parent_goal_id: int | None = None,
     ) -> int:
-        if parent_goal_id is not None:
-            self._get_goal(connection, parent_goal_id)
         (goal_id,) = connection.execute(
             "INSERT INTO goals (owner_user_id, parent_goal_id, status) VALUES (?, ?, ?) RETURNING id",
             (ADMIN_USER_ID, parent_goal_id, status),
@@ -559,14 +608,17 @@ class GoalAPI(WorkspaceDatabase):
             for row in rows
         ]
 
-    def get_goal_activity(self, goal_id: int) -> GoalActivity:
+    def get_goal_activity(
+        self, goal_id: int, *, call: CallReference | None = None
+    ) -> GoalActivity:
         """Read the owner-visible timeline in a consistent workspace snapshot."""
         with self._connection("ro") as connection:
             connection.execute("BEGIN")
             self._get_goal(connection, goal_id)
+            self._validate_history_call(connection, call, "get_goal_activity", goal_id)
             history = self._goal_history(connection, goal_id)
             calls, decision_commits, revision_commits = related_calls(
-                connection, goal_id, ADMIN_USER_ID
+                connection, goal_id, ADMIN_USER_ID, call
             )
         timeline: list[ActivityEntry] = list(calls)
         for revision in history:
@@ -648,12 +700,55 @@ class GoalAPI(WorkspaceDatabase):
                 (outcome, utc_timestamp(), run_id),
             )
 
-    def get_run(self, run_id: int) -> OperatorRun:
+    def get_run_write_action(
+        self, run_id: int
+    ) -> DefinitionAction | Literal["complete_goal"] | None:
+        """Return the action the run's exact grant currently authorizes."""
         _validate_positive_integer(run_id, "Run ID")
         with self._connection("ro") as connection:
             connection.execute("BEGIN")
+            run = run_row(connection, run_id, ADMIN_USER_ID)
+            if run["outcome"] != "unfinished":
+                return None
+            try:
+                if run["definition_grant_id"] is not None:
+                    return self._get_definition_grant(
+                        connection, run["definition_grant_id"]
+                    )["action"]
+                if run["completion_grant_id"] is not None:
+                    self._get_completion_grant(connection, run["completion_grant_id"])
+                    return "complete_goal"
+            except GoalValidationError:
+                # Historical runs retain the grant ID after its authority ends.
+                return None
+            return None
+
+    def get_run(self, run_id: int, *, call: CallReference | None = None) -> OperatorRun:
+        _validate_positive_integer(run_id, "Run ID")
+        exclude_sequence = (
+            call["sequence"] if call is not None and call["run_id"] == run_id else None
+        )
+        with self._connection("ro") as connection:
+            connection.execute("BEGIN")
             row = run_row(connection, run_id, ADMIN_USER_ID)
-            return run_record(row, run_calls(connection, run_id))
+            self._validate_history_call(connection, call, "get_run", run_id)
+            return run_record(row, run_calls(connection, run_id, exclude_sequence))
+
+    def _validate_history_call(
+        self,
+        connection: sqlite3.Connection,
+        call: CallReference | None,
+        tool: Literal["get_goal_activity", "get_run"],
+        target_id: int,
+    ) -> None:
+        if call is None:
+            return
+        attempt = self._open_tool_call(connection, call)
+        target_field = "target_run_id" if tool == "get_run" else "target_goal_id"
+        if attempt["tool"] != tool or attempt[target_field] != target_id:
+            raise GoalValidationError(
+                "The history call does not match the requested target."
+            )
 
     def start_tool_call(
         self,
@@ -662,14 +757,28 @@ class GoalAPI(WorkspaceDatabase):
         *,
         target_goal_id: int | None = None,
         target_revision: int | None = None,
+        target_run_id: int | None = None,
+        target_skill_id: str | None = None,
     ) -> CallReference:
         _validate_positive_integer(run_id, "Run ID")
         if tool not in get_args(HarnessTool.__value__):
             raise GoalValidationError("Unknown Harness tool.")
         if target_goal_id is not None:
+            if tool in ("list_skills", "read_skill"):
+                raise GoalValidationError("Skill calls cannot have a goal target.")
             _validate_positive_integer(target_goal_id, "Target goal ID")
         if target_revision is not None:
+            if tool == "list_skills":
+                raise GoalValidationError("Catalog discovery cannot target a revision.")
             _validate_positive_integer(target_revision, "Target revision")
+        if target_skill_id is not None and (
+            tool != "read_skill" or not isinstance(target_skill_id, str)
+        ):
+            raise GoalValidationError("Only read_skill can request a skill ID.")
+        if target_run_id is not None:
+            _validate_positive_integer(target_run_id, "Target run ID")
+            if tool != "get_run":
+                raise GoalValidationError("Only get_run can request a run ID.")
         with self._write() as connection:
             run = run_row(connection, run_id, ADMIN_USER_ID)
             if run["outcome"] != "unfinished":
@@ -681,9 +790,11 @@ class GoalAPI(WorkspaceDatabase):
             connection.execute(
                 """
                 INSERT INTO run_calls (
-                    run_id, sequence, tool, target_goal_id, target_revision, started_at, resolved_goal_id
+                    run_id, sequence, tool, target_goal_id, target_revision, target_run_id, target_skill_id,
+                    started_at, resolved_goal_id
                 ) VALUES (
-                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :started_at,
+                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :target_run_id, :target_skill_id,
+                    :started_at,
                     (SELECT id FROM goals WHERE id = :target_goal_id
                         AND owner_user_id = :owner AND deleted_at IS NULL)
                 )
@@ -694,6 +805,10 @@ class GoalAPI(WorkspaceDatabase):
                     "tool": tool,
                     "target_goal_id": target_goal_id,
                     "target_revision": target_revision,
+                    "target_run_id": target_run_id,
+                    "target_skill_id": target_skill_id
+                    if is_skill_id(target_skill_id)
+                    else None,
                     "started_at": utc_timestamp(),
                     "owner": run["owner_user_id"],
                 },
@@ -706,23 +821,147 @@ class GoalAPI(WorkspaceDatabase):
         outcome: Literal["returned", "denied", "failed"],
         *,
         returned_goals: list[GoalResultReference] | None = None,
+        history_result: GoalActivity | OperatorRun | None = None,
+        returned_skills: list[SkillReference] | None = None,
     ) -> None:
-        if outcome not in ("returned", "denied", "failed") or (
+        result_count = sum(
+            value is not None
+            for value in (returned_goals, history_result, returned_skills)
+        )
+        if outcome not in ("returned", "denied", "failed") or result_count != int(
             outcome == "returned"
-        ) != (returned_goals is not None):
+        ):
             raise GoalValidationError("A returned call requires result references.")
         with self._write() as connection:
             attempt = self._open_tool_call(connection, call)
-            if returned_goals is not None:
+            if outcome == "denied" and any(
+                attempt[field] is not None
+                for field in (
+                    "revision_kind",
+                    "committed_event_id",
+                    "retrieved_event_id",
+                )
+            ):
+                raise GoalValidationError(
+                    "A call with a saved result cannot be recorded as denied."
+                )
+            history_reference = None
+            if returned_skills is not None:
+                self._save_skill_references(connection, attempt, returned_skills)
+            elif history_result is not None:
+                history_reference = self._history_read_reference(
+                    connection, attempt, history_result
+                )
+            elif returned_goals is not None:
                 self._validate_tool_result(connection, attempt, returned_goals)
                 save_result_references(connection, call, returned_goals)
             connection.execute(
                 """
-                UPDATE run_calls SET outcome = :outcome, finished_at = :finished_at
+                UPDATE run_calls SET outcome = :outcome, finished_at = :finished_at,
+                    returned_history = :returned_history
                 WHERE run_id = :run_id AND sequence = :sequence
                 """,
-                dict(call, outcome=outcome, finished_at=utc_timestamp()),
+                dict(
+                    call,
+                    outcome=outcome,
+                    finished_at=utc_timestamp(),
+                    returned_history=json.dumps(
+                        history_reference, separators=(",", ":")
+                    )
+                    if history_reference is not None
+                    else None,
+                ),
             )
+
+    @staticmethod
+    def _save_skill_references(
+        connection: sqlite3.Connection,
+        attempt: sqlite3.Row,
+        skills: list[SkillReference],
+    ) -> None:
+        if attempt["tool"] not in ("list_skills", "read_skill"):
+            raise GoalValidationError("The result type must match the tool call.")
+        if attempt["tool"] == "read_skill" and skills != [
+            {
+                "id": attempt["target_skill_id"],
+                "revision": attempt["target_revision"],
+            }
+        ]:
+            raise GoalValidationError(
+                "The returned skill must match the requested ID and revision."
+            )
+        listed_ids = set()
+        for position, skill in enumerate(skills):
+            if (
+                not isinstance(skill, dict)
+                or skill.keys() != {"id", "revision"}
+                or not is_skill_id(skill["id"])
+            ):
+                raise GoalValidationError(
+                    "A skill reference requires an ID and revision."
+                )
+            _validate_positive_integer(skill["revision"], "Skill revision")
+            if skill["id"] in listed_ids:
+                raise GoalValidationError(
+                    "A skill can appear only once in a catalog listing."
+                )
+            listed_ids.add(skill["id"])
+            cursor = connection.execute(
+                """INSERT INTO run_call_skills (run_id, sequence, position, snapshot_id)
+                   SELECT ?, ?, ?, id FROM skill_revisions
+                   WHERE owner_user_id = ? AND skill_key = ? AND revision = ?""",
+                (
+                    attempt["run_id"],
+                    attempt["sequence"],
+                    position,
+                    ADMIN_USER_ID,
+                    skill["id"],
+                    skill["revision"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise GoalValidationError(
+                    "The returned skill revision must exist in this workspace."
+                )
+
+    @staticmethod
+    def _history_read_reference(
+        connection: sqlite3.Connection,
+        attempt: sqlite3.Row,
+        history: GoalActivity | OperatorRun,
+    ) -> HistoryReadReference:
+        reference: HistoryReadReference
+        calls: Iterable[CallReference]
+        if (
+            "goal_id" not in history
+            and attempt["tool"] == "get_run"
+            and attempt["target_run_id"] == history["id"]
+        ):
+            run_row(connection, history["id"], ADMIN_USER_ID)
+            reference = run_read_reference(history)
+            calls = reference["calls"]
+        elif (
+            "id" not in history
+            and attempt["tool"] == "get_goal_activity"
+            and attempt["target_goal_id"] == history["goal_id"]
+            and connection.execute(
+                "SELECT 1 FROM goals WHERE id = ? AND owner_user_id = ?",
+                (history["goal_id"], ADMIN_USER_ID),
+            ).fetchone()
+        ):
+            reference = _activity_read_reference(history)
+            calls = (item for item in reference["timeline"] if item["kind"] == "call")
+        else:
+            raise GoalValidationError(
+                "The history result must match the requested target."
+            )
+        if any(
+            item["run_id"] == attempt["run_id"]
+            and item["sequence"] == attempt["sequence"]
+            for item in calls
+        ):
+            raise GoalValidationError("A history result cannot include its own call.")
+        return reference
 
     @staticmethod
     def _validate_tool_result(
@@ -730,6 +969,13 @@ class GoalAPI(WorkspaceDatabase):
         attempt: sqlite3.Row,
         goals: list[GoalResultReference],
     ) -> None:
+        if attempt["tool"] in (
+            "list_skills",
+            "read_skill",
+            "get_goal_activity",
+            "get_run",
+        ):
+            raise GoalValidationError("The result type must match the tool call.")
         if attempt["tool"] == "complete_goal":
             event_id = attempt["committed_event_id"] or attempt["retrieved_event_id"]
             if (
@@ -743,7 +989,7 @@ class GoalAPI(WorkspaceDatabase):
                 raise GoalValidationError(
                     "The completion result must reference the call's saved decision."
                 )
-        elif attempt["tool"] in ("create_goal", "revise_goal"):
+        elif attempt["tool"] in ("create_goal", "create_subgoal", "revise_goal"):
             reference = revision_reference(attempt)
             if (
                 reference is None
@@ -751,6 +997,10 @@ class GoalAPI(WorkspaceDatabase):
                 or goals[0]["goal_id"] != reference["goal_id"]
                 or goals[0]["revision"] != reference["revision"]
                 or goals[0]["status"] not in ("draft", "active", "paused")
+                or (
+                    attempt["tool"] == "create_subgoal"
+                    and goals[0]["status"] != "draft"
+                )
                 or goals[0]["observation_ids"]
                 or goals[0]["decision"] is not None
             ):
@@ -865,17 +1115,17 @@ class GoalAPI(WorkspaceDatabase):
     def grant_definition(
         self, action: DefinitionAction, operator_id: int, *, goal_id: int | None = None
     ) -> DefinitionGrant:
-        """Grant top-level creation or revision of one goal to a registered operator."""
+        """Grant a registered operator one definition action in its requested scope."""
         if self._submitter != ADMIN_USER_ID:
             raise GoalValidationError(
                 "Only the workspace owner can delegate goal definitions."
             )
         _validate_positive_integer(operator_id, "Operator ID")
-        if action not in ("create_goal", "revise_goal") or (
-            action == "revise_goal"
-        ) != (goal_id is not None):
+        if action not in get_args(DefinitionAction.__value__) or (
+            action == "create_goal"
+        ) != (goal_id is None):
             raise GoalValidationError(
-                "A revision grant requires one goal. A creation grant covers top-level goals."
+                "Top-level creation takes no goal. Subgoal creation and revision require one goal."
             )
         with self._write() as connection:
             if goal_id is not None:
@@ -1007,16 +1257,70 @@ class GoalAPI(WorkspaceDatabase):
         **fields: Unpack[GoalDefinitionChanges],
     ) -> DelegatedGoalResult:
         """Save a top-level goal once for this grant and creation key."""
+        return self._create_with_grant(title, call, retry_key, status, fields)
+
+    def create_delegated_subgoal(
+        self,
+        parent_goal_id: int,
+        expected_parent_revision: int,
+        title: str,
+        *,
+        call: CallReference,
+        retry_key: str,
+        **fields: Unpack[GoalDefinitionChanges],
+    ) -> DelegatedGoalResult:
+        """Save a draft child against the parent revision reviewed by this call."""
+        _validate_positive_integer(parent_goal_id, "Parent goal ID")
+        _validate_positive_integer(expected_parent_revision, "Expected parent revision")
+        criteria = fields.get("success_criteria")
+        if not isinstance(criteria, str) or not criteria.strip():
+            raise GoalValidationError("Subgoal success criteria must contain text.")
+        return self._create_with_grant(
+            title,
+            call,
+            retry_key,
+            "draft",
+            fields,
+            parent_goal_id,
+            expected_parent_revision,
+        )
+
+    def _create_with_grant(
+        self,
+        title: str,
+        call: CallReference,
+        retry_key: str,
+        status: GoalCreationStatus,
+        fields: GoalDefinitionChanges,
+        parent_goal_id: int | None = None,
+        expected_parent_revision: int | None = None,
+    ) -> DelegatedGoalResult:
         title = _normalize_title(title)
         retry_key = _require_text(retry_key, "Retry key").strip()
         if not retry_key:
             raise GoalValidationError("Retry key must contain text.")
         definition = _new_definition(status, fields)
-        fingerprint = sha256(
-            json.dumps([title, status, definition], sort_keys=True).encode()
-        ).hexdigest()
+        request: list[object] = [title, status, definition]
+        if parent_goal_id is not None:
+            request.extend((parent_goal_id, expected_parent_revision))
+        fingerprint = sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
         with self._write() as connection:
-            grant = self._definition_write_grant(connection, call, "create_goal")
+            grant = self._definition_write_grant(
+                connection,
+                call,
+                "create_goal" if parent_goal_id is None else "create_subgoal",
+                parent_goal_id,
+                expected_parent_revision,
+            )
+            parent = (
+                self._get_goal(connection, parent_goal_id)
+                if parent_goal_id is not None
+                else None
+            )
+            if parent is not None and parent["revision"] != expected_parent_revision:
+                raise GoalConflictError(
+                    f"Stale parent revision. Current revision is {parent['revision']}."
+                )
             existing = connection.execute(
                 "SELECT goal_id, status, fingerprint FROM goal_creation_retries WHERE grant_id = ? AND retry_key = ?",
                 (grant["id"], retry_key),
@@ -1032,7 +1336,17 @@ class GoalAPI(WorkspaceDatabase):
                 )
                 self._link_revision(connection, call, result, "retrieved")
                 return result
-            goal_id = self._insert_goal(connection, title, status, definition)
+            if parent is not None and parent["status"] not in (
+                "draft",
+                "active",
+                "paused",
+            ):
+                raise GoalConflictError(
+                    f"Cannot add a subgoal to a {parent['status']} parent."
+                )
+            goal_id = self._insert_goal(
+                connection, title, status, definition, parent_goal_id
+            )
             connection.execute(
                 "INSERT INTO goal_creation_retries (grant_id, retry_key, fingerprint, goal_id, status) VALUES (?, ?, ?, ?, ?)",
                 (grant["id"], retry_key, fingerprint, goal_id, status),

@@ -9,6 +9,7 @@ from mcp.types import (
     CallToolRequest,
     CallToolResult,
     ServerResult,
+    TextContent,
     Tool,
     ToolAnnotations,
 )
@@ -20,6 +21,7 @@ from harness_api import (
     DecisionReference,
     DelegatedCompletion,
     DelegatedGoalResult,
+    GoalActivity,
     GoalAPI,
     GoalConflictError,
     GoalCreationStatus,
@@ -33,13 +35,26 @@ from harness_api import (
     GoalTree,
     GoalValidationError,
     HarnessTool,
+    OperatorRun,
     RunNotFoundError,
+    SkillNotFoundError,
+    SkillReference,
+    SkillRevision,
+    SkillSummary,
+    SkillValidationError,
     WorkspaceStorageError,
 )
 
 PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
 HARNESS_TOOLS = get_args(HarnessTool.__value__)
-WRITE_TOOLS = ("complete_goal", "create_goal", "revise_goal")
+WRITE_TOOLS = ("complete_goal", "create_goal", "create_subgoal", "revise_goal")
+HISTORY_TOOLS = ("get_goal_activity", "get_run")
+SKILL_TOOLS = ("list_skills", "read_skill")
+RUN_REQUIRED_TOOLS = WRITE_TOOLS + HISTORY_TOOLS + SKILL_TOOLS
+
+
+class SkillList(TypedDict):
+    skills: list[SkillSummary]
 
 
 class GoalList(TypedDict):
@@ -107,6 +122,8 @@ def _result_references(
 class HarnessServer(FastMCP):
     def __init__(self, api: GoalAPI, run_id: int | None) -> None:
         super().__init__("harness_mcp")
+        self._api = api
+        self._run_id = run_id
         self._invocation: ContextVar[_Invocation | None] = ContextVar(
             "invocation", default=None
         )
@@ -121,17 +138,40 @@ class HarnessServer(FastMCP):
                 return await dispatch(request)
             tool = cast(HarnessTool, request.params.name)
             arguments = request.params.arguments or {}
-            revision_field = "expected_revision" if tool in WRITE_TOOLS else "revision"
-            call = api.start_tool_call(
-                run_id,
-                tool,
-                target_goal_id=_positive_id(arguments.get("goal_id"))
-                if tool not in ("list_goals", "create_goal")
-                else None,
-                target_revision=_positive_id(arguments.get(revision_field))
-                if tool in ("complete_goal", "revise_goal", "get_goal_progress")
-                else None,
-            )
+            goal_field = "parent_goal_id" if tool == "create_subgoal" else "goal_id"
+            revision_field = {
+                "create_subgoal": "expected_parent_revision",
+                "complete_goal": "expected_revision",
+                "revise_goal": "expected_revision",
+                "get_goal_progress": "revision",
+                "read_skill": "revision",
+            }.get(tool)
+            skill_id = arguments.get("id")
+            try:
+                call = api.start_tool_call(
+                    run_id,
+                    tool,
+                    target_goal_id=_positive_id(arguments.get(goal_field))
+                    if tool
+                    not in ("list_goals", "create_goal", "get_run", *SKILL_TOOLS)
+                    else None,
+                    target_revision=_positive_id(arguments.get(revision_field))
+                    if revision_field
+                    else None,
+                    target_skill_id=skill_id
+                    if tool == "read_skill" and isinstance(skill_id, str)
+                    else None,
+                    target_run_id=_positive_id(arguments.get("run_id"))
+                    if tool == "get_run"
+                    else None,
+                )
+            except (GoalValidationError, GoalConflictError, RunNotFoundError) as error:
+                return ServerResult(
+                    CallToolResult(
+                        isError=True,
+                        content=[TextContent(type="text", text=str(error))],
+                    )
+                )
             invocation = _Invocation(call, frozenset(arguments))
             token = self._invocation.set(invocation)
             try:
@@ -144,28 +184,59 @@ class HarnessServer(FastMCP):
                 api.finish_tool_call(call, invocation.error_outcome)
             else:
                 assert result.structuredContent is not None
-                api.finish_tool_call(
-                    call,
-                    "returned",
-                    returned_goals=_result_references(tool, result.structuredContent),
-                )
+                if tool in SKILL_TOOLS:
+                    items = (
+                        result.structuredContent["skills"]
+                        if tool == "list_skills"
+                        else [result.structuredContent]
+                    )
+                    api.finish_tool_call(
+                        call,
+                        "returned",
+                        returned_skills=[
+                            SkillReference(id=item["id"], revision=item["revision"])
+                            for item in items
+                        ],
+                    )
+                elif tool in HISTORY_TOOLS:
+                    api.finish_tool_call(
+                        call,
+                        "returned",
+                        history_result=cast(
+                            GoalActivity | OperatorRun, result.structuredContent
+                        ),
+                    )
+                else:
+                    api.finish_tool_call(
+                        call,
+                        "returned",
+                        returned_goals=_result_references(
+                            tool, result.structuredContent
+                        ),
+                    )
             return response
 
         self._mcp_server.request_handlers[CallToolRequest] = record_call
 
     async def list_tools(self) -> list[Tool]:
-        tools = await super().list_tools()
-        for tool in tools:
-            if tool.name in WRITE_TOOLS:
+        tools = []
+        for tool in await super().list_tools():
+            if tool.name in WRITE_TOOLS and (
+                self._run_id is None
+                or self._api.get_run_write_action(self._run_id) != tool.name
+            ):
+                continue
+            if tool.name in RUN_REQUIRED_TOOLS:
                 tool.inputSchema["additionalProperties"] = False
+            tools.append(tool)
         return tools
 
     async def call_tool(self, name: str, arguments: dict[str, object]):
         # FastMCP's default argument model ignores unknown fields.
         try:
-            if name in WRITE_TOOLS:
+            if name in RUN_REQUIRED_TOOLS:
                 tool = next(
-                    (tool for tool in await self.list_tools() if tool.name == name),
+                    (tool for tool in await super().list_tools() if tool.name == name),
                     None,
                 )
                 if tool is None or self._invocation.get() is None:
@@ -186,6 +257,9 @@ class HarnessServer(FastMCP):
                         GoalValidationError,
                         GoalConflictError,
                         GoalNotFoundError,
+                        RunNotFoundError,
+                        SkillNotFoundError,
+                        SkillValidationError,
                         ValidationError,
                     ),
                 )
@@ -193,10 +267,10 @@ class HarnessServer(FastMCP):
                 invocation.error_outcome = "denied"
             raise
 
-    def write_invocation(self) -> _Invocation:
+    def audited_invocation(self) -> _Invocation:
         invocation = self._invocation.get()
         if invocation is None:
-            raise ToolError("An audited invocation is required for a goal write.")
+            raise ToolError("A recorded invocation is required for this tool.")
         return invocation
 
 
@@ -268,6 +342,35 @@ def create_server(
         """
         return api.get_goal_progress(goal_id, revision)
 
+    if run_id is not None:
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def list_skills() -> SkillList:
+            """Discover current skill revisions by name and description."""
+            return {"skills": api.skills.list_skills()}
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def read_skill(id: str, revision: PositiveInteger) -> SkillRevision:
+            """Read the exact instructions, manifest and provenance for a skill revision."""
+            return api.skills.read_skill(id, revision)
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def get_goal_activity(goal_id: PositiveInteger) -> GoalActivity:
+            """Read a goal's revisions, observations, decisions and calls across operators.
+
+            A committing_call gives the run ID and sequence that saved a revision or decision.
+            """
+            return api.get_goal_activity(goal_id, call=server.audited_invocation().call)
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def get_run(run_id: PositiveInteger) -> OperatorRun:
+            """Inspect an owner-visible run and its ordered calls, including other operators' runs.
+
+            The run identifies the operator and grant. Each call has a sequence, outcome,
+            and references to saved changes and returned records.
+            """
+            return api.get_run(run_id, call=server.audited_invocation().call)
+
     if completion_grant_id is not None:
         grant = api.get_completion_grant(completion_grant_id)
 
@@ -287,7 +390,7 @@ def create_server(
                 completion_grant_id=grant["id"],
                 evidence_ids=evidence_ids,
                 rationale=rationale,
-                call=server.write_invocation().call,
+                call=server.audited_invocation().call,
             )
 
     if definition_grant_id is not None:
@@ -311,7 +414,7 @@ def create_server(
                 window_start: str | None = None,
             ) -> DelegatedGoalResult:
                 """Save one top-level goal definition. Reuse the same key and input to retry."""
-                invocation = server.write_invocation()
+                invocation = server.audited_invocation()
                 return api.create_delegated_goal(
                     title,
                     call=invocation.call,
@@ -320,7 +423,37 @@ def create_server(
                     **_definition_fields(invocation, locals()),
                 )
 
-        else:
+        elif definition_grant["action"] == "create_subgoal":
+
+            @server.tool(
+                annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True)
+            )
+            def create_subgoal(
+                parent_goal_id: PositiveInteger,
+                expected_parent_revision: PositiveInteger,
+                retry_key: str,
+                title: str,
+                success_criteria: str,
+                desired_outcome: str | None = None,
+                duration: GoalDuration | None = None,
+                duration_days: PositiveInteger | None = None,
+                assessment_type: AssessmentType | None = None,
+                measurement_plan: str | None = None,
+                target_distinct_dates: PositiveInteger | None = None,
+                window_start: str | None = None,
+            ) -> DelegatedGoalResult:
+                """Save one draft child under the granted parent. Reuse the key for an identical retry."""
+                invocation = server.audited_invocation()
+                return api.create_delegated_subgoal(
+                    parent_goal_id,
+                    expected_parent_revision,
+                    title,
+                    call=invocation.call,
+                    retry_key=retry_key,
+                    **_definition_fields(invocation, locals()),
+                )
+
+        elif definition_grant["action"] == "revise_goal":
 
             @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
             def revise_goal(
@@ -337,7 +470,7 @@ def create_server(
                 window_start: str | None = None,
             ) -> DelegatedGoalResult:
                 """Revise the granted goal. Omit fields to preserve them or send null to clear a nullable definition field."""
-                invocation = server.write_invocation()
+                invocation = server.audited_invocation()
                 return api.revise_delegated_goal(
                     goal_id,
                     expected_revision,

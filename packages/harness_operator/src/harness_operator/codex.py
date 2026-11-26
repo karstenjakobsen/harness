@@ -9,11 +9,13 @@ from typing import TextIO
 
 from pydantic import ConfigDict, TypeAdapter, with_config
 
-from harness_api import DefinitionGrant, GoalAPI, GoalDefinition
+from harness_api import DefinitionGrant, GoalAPI, GoalDefinition, read_skill_catalog
 
 OPERATOR_INSTRUCTIONS = """\
 You are the user's goal operator. Treat goals as flexible guidelines.
 Read relevant workspace files when helpful and suggest a small next step.
+When planning, discover available guidance with list_skills and use read_skill
+for the revisions you judge relevant. Choose the subgoals and checks yourself.
 Use the harness_mcp list_goals tool to find saved goal IDs. For questions about a
 plan and its subgoals or completion decisions, call get_goal_tree with the goal ID.
 For progress questions call get_goal_progress. Use its assessed revision, count,
@@ -24,6 +26,10 @@ State when attribution or automatic assessment is unavailable.
 Use the returned records to answer. List each goal on its own line with its status
 and the relevant timing or evidence. Draft, active, and paused goals are open.
 Attribute completion statements according to their saved provenance.
+When goal history is relevant, use get_goal_activity to compare saved revisions
+and find a committing call. Use get_run with its run ID to identify the registered
+operator and verify the exact sequence and committed change. A change can be committed
+while the call outcome is unfinished. If asked why and no rationale was recorded, say so.
 If the tool fails, say that you could not retrieve the goals.
 """
 
@@ -47,6 +53,16 @@ definition. Use draft by default and keep uncertain fields provisional. Ask for
 clarification when needed. Use a new retry key for each intended goal and reuse
 the same key and inputs if delivery of that call is uncertain. Report the saved
 goal ID, revision and status from the tool. A reply-only proposal has no saved revision.
+"""
+
+SUBGOAL_INSTRUCTIONS = """\
+The owner delegated creation of draft children under goal ID {goal_id}.
+Inspect the current tree before planning so you can build on any existing children.
+When asked to save a plan, use create_subgoal for each direct child you propose.
+Use the parent revision you reviewed, a distinct retry key for each intended child,
+and concrete success criteria. Retry uncertain delivery with the same key and
+inputs. On conflict, inspect the tree and its history before continuing.
+Report which children were saved and how the owner can verify each one.
 """
 
 REVISION_INSTRUCTIONS = """\
@@ -165,14 +181,15 @@ def ask_codex(
     definition_grant_id: int | None = None,
 ) -> int:
     api = GoalAPI()
+    api.skills.import_catalog(read_skill_catalog())
     run = api.start_run(completion_grant_id, definition_grant_id=definition_grant_id)
     grant = run["definition_grant"]
     if grant is not None:
-        instructions = (
-            CREATE_INSTRUCTIONS
-            if grant["action"] == "create_goal"
-            else REVISION_INSTRUCTIONS.format(goal_id=grant["goal_id"])
-        )
+        instructions = {
+            "create_goal": CREATE_INSTRUCTIONS,
+            "create_subgoal": SUBGOAL_INSTRUCTIONS,
+            "revise_goal": REVISION_INSTRUCTIONS,
+        }[grant["action"]].format(goal_id=grant["goal_id"])
     elif completion_grant_id is not None:
         instructions = DELEGATED_INSTRUCTIONS.format(goal_id=run["granted_goal_id"])
     else:

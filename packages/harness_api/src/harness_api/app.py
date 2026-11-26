@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from .controllers.accounts import operators_router, users_router
 from .controllers.goals import router as goals_router
 from .controllers.runs import router as runs_router
+from .controllers.skills import router as skills_router
 from .database import DATABASE_PATH, WorkspaceStorageError
 from .models.accounts import (
     AccountConflictError,
@@ -24,12 +25,14 @@ from .models.goals import (
     GoalNotFoundError,
     GoalValidationError,
 )
+from .models.skills import SkillAPI, SkillNotFoundError, SkillValidationError
 
 
 def create_app(database_path: Path | str = DATABASE_PATH) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.goal_api = GoalAPI(database_path, local_owner=False)
+        app.state.skill_api = SkillAPI(database_path)
         app.state.user_api = UserAPI(database_path)
         app.state.operator_api = OperatorAPI(database_path)
         yield
@@ -39,23 +42,30 @@ def create_app(database_path: Path | str = DATABASE_PATH) -> FastAPI:
     api.include_router(users_router)
     api.include_router(operators_router)
     api.include_router(runs_router)
+    api.include_router(skills_router)
 
+    @api.exception_handler(SkillNotFoundError)
     @api.exception_handler(GoalNotFoundError)
     @api.exception_handler(AccountNotFoundError)
     @api.exception_handler(RunNotFoundError)
     def not_found(
         _request: Request,
-        error: GoalNotFoundError | AccountNotFoundError | RunNotFoundError,
+        error: GoalNotFoundError
+        | AccountNotFoundError
+        | RunNotFoundError
+        | SkillNotFoundError,
     ) -> JSONResponse:
         return JSONResponse(
             status_code=HTTPStatus.NOT_FOUND,
             content={"detail": str(error)},
         )
 
+    @api.exception_handler(SkillValidationError)
     @api.exception_handler(GoalValidationError)
     @api.exception_handler(AccountValidationError)
     def invalid_input(
-        _request: Request, error: GoalValidationError | AccountValidationError
+        _request: Request,
+        error: GoalValidationError | AccountValidationError | SkillValidationError,
     ) -> JSONResponse:
         return JSONResponse(
             status_code=HTTPStatus.UNPROCESSABLE_CONTENT,

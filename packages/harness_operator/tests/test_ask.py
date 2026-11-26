@@ -4,12 +4,13 @@ import stat
 import subprocess
 import sys
 import tomllib
+from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
 
 import pytest
 
-from harness_api import GoalAPI, OperatorAPI
+from harness_api import GoalAPI, OperatorAPI, RunNotFoundError, read_skill_catalog
 from harness_operator import ask_codex, main
 
 
@@ -141,7 +142,7 @@ def test_launcher_records_nonzero_exit_and_start_failure(monkeypatch, tmp_path):
         assert saved["outcome"] == "failed" and saved["finished_at"] is not None
 
 
-@pytest.mark.parametrize("action", ["create_goal", "revise_goal"])
+@pytest.mark.parametrize("action", ["create_goal", "create_subgoal", "revise_goal"])
 def test_cli_binds_one_definition_grant_and_approves_its_tool(
     action, monkeypatch, tmp_path, capsys
 ):
@@ -164,7 +165,8 @@ def test_cli_binds_one_definition_grant_and_approves_its_tool(
         assert invoke("goal", "grant-create", operator_id) == 0
     else:
         goal_id = goals.create_goal("Library")["id"]
-        assert invoke("goal", "grant-revision", goal_id, operator_id) == 0
+        command = "grant-subgoals" if action == "create_subgoal" else "grant-revision"
+        assert invoke("goal", command, goal_id, operator_id) == 0
     grant = json.loads(capsys.readouterr().out)
     assert grant == {
         "id": grant["id"],
@@ -198,3 +200,24 @@ def test_cli_binds_one_definition_grant_and_approves_its_tool(
     assert invoke("goal", "withdraw-definition-grant", grant["id"]) == 0
     assert json.loads(capsys.readouterr().out) == grant
     assert invoke("ask", "--definition-grant", grant["id"], "Save the definition.") == 1
+
+
+def test_catalog_conflict_stops_ask_before_starting_a_run(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    catalog = read_skill_catalog()
+    goals = GoalAPI()
+    goals.skills.import_catalog(catalog)
+    changed = replace(
+        catalog.sources[0], instructions="Changed without a revision bump"
+    )
+    monkeypatch.setattr(
+        "harness_operator.codex.read_skill_catalog",
+        lambda: replace(catalog, sources=(changed, *catalog.sources[1:])),
+    )
+    monkeypatch.setattr(sys, "argv", ["operator", "ask", "Propose a plan"])
+    assert main() == 1
+    assert "Bump its revision" in capsys.readouterr().err
+    with pytest.raises(RunNotFoundError):
+        goals.get_run(1)

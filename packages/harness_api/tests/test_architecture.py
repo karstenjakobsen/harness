@@ -17,6 +17,8 @@ ADAPTER_MODULES = (
     "harness_api.app",
     "harness_api.controllers",
     "harness_api.views",
+    "harness_api.skill_source",
+    "harness_api.read_skill_catalog",
 )
 
 
@@ -58,7 +60,11 @@ def test_production_import_boundaries():
         src = PACKAGES / package / "src"
         root = src / package
         if package == "harness_api":
-            paths = [root / "database.py", *(root / "models").rglob("*.py")]
+            paths = [
+                root / "database.py",
+                root / "skill_source.py",
+                *(root / "models").rglob("*.py"),
+            ]
         else:
             paths = root.rglob("*.py")
         for path in sorted(paths):
@@ -83,6 +89,11 @@ def test_production_import_boundaries():
             "harness_operator/commands/get.py",
             "import harness_api as api\napi.database.WorkspaceDatabase",
             "harness_api",
+        ),
+        (
+            "harness_api/models/skills.py",
+            "from harness_api import read_skill_catalog",
+            "harness_api.read_skill_catalog",
         ),
         ("harness_mcp/server.py", "from harness_api import *", "harness_api.*"),
         (
