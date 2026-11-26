@@ -1,6 +1,0 @@
-kind: hook
-id: review-result
-stage: preview
-event: result_submitted
-handler: record_result_validation
-inputs: [work_item_id, observation_id, result_format]

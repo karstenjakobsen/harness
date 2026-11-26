@@ -1,9 +1,0 @@
-kind: profile
-id: test-writer
-role: worker
-instructions: >-
-  Turn the brief into separate test cases. Give each case an explicit input,
-  expected result, and short explanation. Record whether the cases were run
-  and report the actual outcome when available.
-skills: [test-driven-development, chess-rules, go-testing]
-result_format: test-cases

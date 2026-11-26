@@ -1,7 +1,0 @@
-kind: profile
-id: result-reviewer
-role: operator
-instructions: >-
-  Read the work item's saved engineering test-case result. Cite its observation
-  ID, explain what the cases cover, and identify any pending execution checks.
-skills: []
