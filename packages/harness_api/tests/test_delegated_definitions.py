@@ -1,6 +1,7 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from importlib.resources import files
 
 import pytest
 
@@ -236,11 +237,11 @@ def test_definition_grants_and_calls_require_the_owner_action_and_target(workspa
         )
 
 
-@pytest.mark.parametrize("action", ["create_goal", "revise_goal"])
+@pytest.mark.parametrize("action", ["create_goal", "create_subgoal", "revise_goal"])
 def test_failed_revision_link_rolls_back_definition_and_retry_record(workspace, action):
     path, api, operator_id = workspace
     goal_id = api.create_goal("Library")["id"]
-    scope = {"goal_id": goal_id} if action == "revise_goal" else {}
+    scope = {"goal_id": goal_id} if action != "create_goal" else {}
     grant = api.grant_definition(action, operator_id, **scope)
     run_id = api.start_run(definition_grant_id=grant["id"])["id"]
     call = api.start_tool_call(
@@ -253,6 +254,15 @@ def test_failed_revision_link_rolls_back_definition_and_retry_record(workspace, 
     def write():
         if action == "create_goal":
             return api.create_delegated_goal("Other", retry_key="new", call=call)
+        if action == "create_subgoal":
+            return api.create_delegated_subgoal(
+                goal_id,
+                1,
+                "Child",
+                success_criteria="Owner confirms membership",
+                retry_key="new",
+                call=call,
+            )
         return api.revise_delegated_goal(goal_id, 1, call=call, title="Revised")
 
     with closing(sqlite3.connect(path, autocommit=True)) as db:
@@ -275,3 +285,211 @@ def test_failed_revision_link_rolls_back_definition_and_retry_record(workspace, 
         "goal_id": result["goal_id"],
         "revision": result["revision"],
     }
+
+
+@pytest.fixture
+def planning(workspace):
+    path, api, operator_id = workspace
+    parent = api.create_goal("Join the library")
+    grant = api.grant_definition("create_subgoal", operator_id, goal_id=parent["id"])
+    run_id = api.start_run(definition_grant_id=grant["id"])["id"]
+    return path, api, parent["id"], grant, run_id
+
+
+def subgoal_call(api, run_id, parent_id, revision=1):
+    return api.start_tool_call(
+        run_id, "create_subgoal", target_goal_id=parent_id, target_revision=revision
+    )
+
+
+def save_child(api, parent_id, call, key="card", revision=1, **changes):
+    fields = {"success_criteria": "The library issues a card."} | changes
+    return api.create_delegated_subgoal(
+        parent_id, revision, "Get a card", retry_key=key, call=call, **fields
+    )
+
+
+@pytest.mark.parametrize("open_status", ["draft", "active", "paused"])
+@pytest.mark.parametrize("closed_status", ["completed", "revoked"])
+def test_subgoal_parent_lifecycle_and_retrieval(planning, open_status, closed_status):
+    path, api, parent, _, run = planning
+    with closing(sqlite3.connect(path, autocommit=True)) as db:
+        db.execute("UPDATE goals SET status=? WHERE id=?", (open_status, parent))
+    initial = api.get_goal(parent)
+    original_call = subgoal_call(api, run, parent)
+    child = save_child(api, parent, original_call)
+    sibling = save_child(
+        api,
+        parent,
+        subgoal_call(api, run, parent),
+        "checkout",
+        success_criteria="The loan appears in the account.",
+    )
+    assert child != sibling and child["status"] == sibling["status"] == "draft"
+    assert api.get_goal(parent) == initial
+    if closed_status == "completed":
+        api.complete_goal(parent, 1, confirmation="Membership verified")
+    else:
+        with closing(sqlite3.connect(path, autocommit=True)) as db:
+            db.execute("UPDATE goals SET status='revoked' WHERE id=?", (parent,))
+    with pytest.raises(GoalConflictError, match=closed_status):
+        save_child(api, parent, subgoal_call(api, run, parent), "third")
+    assert save_child(api, parent, subgoal_call(api, run, parent)) == child
+    assert api.get_goal(parent)["revision"] == 1
+    assert len(api.get_goal_tree(parent)["goals"]) == 3
+    calls = api.get_run(run)["calls"]
+    assert calls[2]["committed_revision"] is None
+    assert calls[0]["committed_revision"] == calls[3]["retrieved_revision"]
+    rev = next(
+        e
+        for e in api.get_goal_activity(child["goal_id"])["timeline"]
+        if e["kind"] == "revision"
+    )
+    assert rev["committing_call"] == original_call
+
+
+def test_subgoal_checks_criteria_revision_and_grant_on_every_request(planning):
+    _, api, parent, grant, run = planning
+    for fields in (
+        {},
+        {"success_criteria": ""},
+        {"success_criteria": "  "},
+        {"success_criteria": None},
+    ):
+        with pytest.raises(GoalValidationError, match="criteria"):
+            api.create_delegated_subgoal(
+                parent,
+                1,
+                "Card",
+                retry_key="card",
+                call=subgoal_call(api, run, parent),
+                **fields,
+            )
+    child = save_child(api, parent, subgoal_call(api, run, parent))
+    baseline = api.get_goal_tree(parent)
+    with pytest.raises(GoalConflictError, match="different"):
+        save_child(
+            api, parent, subgoal_call(api, run, parent), success_criteria="Changed"
+        )
+    assert api.get_goal_tree(parent) == baseline
+    api.update_goal(parent, title="Renew library membership")
+    revised = api.get_goal_tree(parent)
+    with pytest.raises(GoalConflictError, match="Stale"):
+        save_child(api, parent, subgoal_call(api, run, parent))
+    with pytest.raises(GoalConflictError, match="different"):
+        save_child(api, parent, subgoal_call(api, run, parent, 2), revision=2)
+    api.withdraw_definition_grant(grant["id"])
+    fresh = api.grant_definition("create_subgoal", grant["operator_id"], goal_id=parent)
+    assert fresh["id"] != grant["id"]
+    for key in ("card", "new"):
+        with pytest.raises(GoalValidationError, match="inactive"):
+            save_child(api, parent, subgoal_call(api, run, parent, 2), key, revision=2)
+    assert api.get_goal_tree(parent) == revised
+    calls = api.get_run(run)["calls"]
+    assert [c["committed_revision"] for c in calls if c["committed_revision"]] == [
+        {"goal_id": child["goal_id"], "revision": 1}
+    ]
+    assert all(c["retrieved_revision"] is None for c in calls)
+
+
+def test_subgoal_concurrent_retry_and_recovery_after_commit(planning):
+    path, api, parent, grant, run = planning
+    attempts = [subgoal_call(api, run, parent) for _ in range(2)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(lambda call: save_child(GoalAPI(path), parent, call), attempts)
+        )
+    assert results[0] == results[1]
+    (winner,) = [c for c in api.get_run(run)["calls"] if c["committed_revision"]]
+    original = {"run_id": run, "sequence": winner["sequence"]}
+    with pytest.raises(GoalConflictError, match="already saved"):
+        save_child(api, parent, original, "different")
+    api.finish_run(run, "failed")
+    reopened = GoalAPI(path)
+    root, child = reopened.get_goal_tree(parent)["goals"]
+    assert (
+        child["id"] == results[0]["goal_id"] and child["parent_goal_id"] == root["id"]
+    )
+    (first,) = [
+        e
+        for e in reopened.get_goal_activity(child["id"])["timeline"]
+        if e["kind"] == "revision"
+    ]
+    assert first["committing_call"] == original
+    fresh = reopened.start_run(definition_grant_id=grant["id"])["id"]
+    assert (
+        save_child(reopened, parent, subgoal_call(reopened, fresh, parent))
+        == results[0]
+    )
+    assert winner["outcome"] == "unfinished" and winner["returned_goals"] is None
+    for c in [*reopened.get_run(run)["calls"], *reopened.get_run(fresh)["calls"]]:
+        if c["run_id"] != run or c["sequence"] != original["sequence"]:
+            assert c["retrieved_revision"] == winner["committed_revision"]
+            assert c["committed_revision"] is None
+    assert len(reopened.list_goals()) == 2
+
+
+def test_subgoal_authority_is_checked_by_model(planning):
+    _, api, parent, grant, run = planning
+    other = api.create_goal("Another parent")["id"]
+    with pytest.raises(GoalValidationError, match="does not cover"):
+        save_child(api, other, subgoal_call(api, run, other))
+    with pytest.raises(GoalValidationError, match="does not match"):
+        save_child(api, parent, subgoal_call(api, run, other))
+    advisory = api.start_run()["id"]
+    top = api.grant_definition("create_goal", grant["operator_id"])
+    creation_run = api.start_run(definition_grant_id=top["id"])["id"]
+    for wrong_run in (advisory, creation_run):
+        with pytest.raises(GoalValidationError):
+            save_child(api, parent, subgoal_call(api, wrong_run, parent))
+    call = subgoal_call(api, run, parent)
+    api.finish_run(run, "failed")
+    with pytest.raises(GoalValidationError, match="does not match"):
+        save_child(api, parent, call)
+    assert [g["id"] for g in api.list_goals()] == [parent, other]
+    assert all(
+        c["committed_revision"] is None
+        for r in [advisory, creation_run, run]
+        for c in api.get_run(r)["calls"]
+    )
+
+
+def test_v13_retains_previous_operations_and_identifies_fresh_workspace_requirement(
+    tmp_path,
+):
+    path = tmp_path / "legacy.db"
+    snapshot = files("harness_api").joinpath("migrations", "schema_v13.sql")
+    with closing(sqlite3.connect(path, autocommit=True)) as db:
+        db.executescript(snapshot.read_text(encoding="utf-8"))
+    api = GoalAPI(path)
+    owner = OperatorAPI(path).register_operator("Planner")
+    parent = api.create_goal("Review the plan")
+    assert api.grant_definition("revise_goal", owner["id"], goal_id=parent["id"])["id"]
+    with pytest.raises(GoalValidationError, match="fresh workspace"):
+        api.grant_definition("create_subgoal", owner["id"], goal_id=parent["id"])
+    assert GoalAPI(path).get_goal(parent["id"]) == parent
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("PRAGMA user_version").fetchone() == (13,)
+
+
+@pytest.mark.parametrize("retry", [False, True], ids=["commit", "retrieval"])
+def test_subgoal_audit_cannot_deny_an_applied_call(planning, retry):
+    _, api, parent, _, run = planning
+    if retry:
+        save_child(api, parent, subgoal_call(api, run, parent))
+    call = subgoal_call(api, run, parent)
+    result = save_child(api, parent, call)
+    with pytest.raises(GoalValidationError, match="denied"):
+        api.finish_tool_call(call, "denied")
+    saved = api.get_run(run)["calls"][-1]
+    assert saved["outcome"] == "unfinished"
+    assert saved["retrieved_revision" if retry else "committed_revision"] == {
+        "goal_id": result["goal_id"],
+        "revision": result["revision"],
+    }
+    api.finish_tool_call(
+        call,
+        "returned",
+        returned_goals=[result | {"observation_ids": [], "decision": None}],
+    )
+    assert api.get_run(run)["calls"][-1]["outcome"] == "returned"

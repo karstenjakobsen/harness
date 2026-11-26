@@ -124,10 +124,10 @@ CREATE TABLE goal_definition_grants (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
     operator_id INTEGER NOT NULL REFERENCES operators(id),
     goal_id INTEGER REFERENCES goals(id),
-    action TEXT NOT NULL CHECK (action IN ('create_goal', 'revise_goal')),
+    action TEXT NOT NULL CHECK (action IN ('create_goal', 'create_subgoal', 'revise_goal')),
     granted_at TEXT NOT NULL,
     withdrawn_at TEXT,
-    CHECK ((action = 'revise_goal') = (goal_id IS NOT NULL))
+    CHECK ((action = 'create_goal') = (goal_id IS NULL))
 ) STRICT;
 
 CREATE TABLE goal_creation_retries (
@@ -158,7 +158,7 @@ CREATE TABLE run_calls (
     run_id INTEGER NOT NULL REFERENCES operator_runs(id),
     sequence INTEGER NOT NULL CHECK (sequence > 0),
     tool TEXT NOT NULL CHECK (tool IN (
-        'list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal', 'create_goal', 'revise_goal',
+        'list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal', 'create_goal', 'create_subgoal', 'revise_goal',
         'get_goal_activity', 'get_run', 'list_skills', 'read_skill'
     )),
     -- Requested IDs can be invalid or belong to a different owner.
@@ -269,4 +269,4 @@ CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
-PRAGMA user_version = 13;
+PRAGMA user_version = 14;

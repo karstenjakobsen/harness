@@ -315,7 +315,7 @@ def assert_day_pass_answer(reply):
     text = " ".join(reply.casefold().replace("’", "'").replace("*", "").split())
     if re.search(
         r"\bif (?:your |the )?(?:gym )?membership is (?:currently )?active,? "
-        r"(?:please )?confirm (?:it|that)(?: directly)?(?=[.!?;]|$)",
+        r"(?:please )?confirm (?:it|that)(?: directly)?(?=[,.!?;]|$| and (?:i|we)\b)",
         text,
     ):
         return
@@ -324,6 +324,7 @@ def assert_day_pass_answer(reply):
     missing = (
         r"\b(?:missing|need|awaiting|unclear|insufficient|not enough|not an active|"
         r"no (?:\w+ )?(?:evidence|proof|confirmation)|"
+        r"next step is for (?:the owner|you) to confirm|"
         r"(?:open because|still) .*?requir\w*\b.*?\bconfirm\w*|"
         r"(?:not|neither(?: record)?|cannot|\w+n't) (?:yet )?"
         r"(?:confirm|show|establish|prove|verify|tell)\w*|please confirm)\b"
@@ -362,6 +363,8 @@ def assert_day_pass_answer(reply):
         "Is your gym membership active?",
         "You toured the gym. Did you end up joining?",
         "I left it open. If your membership is active, confirm that directly.",
+        "If your membership is active, confirm that and I can complete subgoal 2.",
+        "The next step is for the owner to confirm that the gym membership is active.",
     ],
 )
 def test_day_pass_answer_accepts_a_missing_fact_or_a_question(reply):
@@ -961,3 +964,115 @@ def test_chess_answer_accepts_a_full_position_and_one_illegal_move(case):
         "For king safety, use a table-driven Go test for check.\n"
         f"k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1\n{case}"
     )
+
+
+@pytest.mark.live
+def test_delegated_operator_saves_subgoals(workspace, run, goal):
+    parent = goal("create", "--title", "Build a chess game in Go")
+    parent_id = parent["id"]
+    operator = json.loads(run("register", "Chess planner"))
+    question = (
+        "Break my “Build a chess game in Go” goal into subgoals and save them for review. "
+        "For each subgoal, say how we could tell it was done."
+    )
+    before = {g["id"] for g in goal("list")}
+    proposal = run("ask", question)
+    assert re.search(
+        r"subgoal|milestone|plan|^\s*1[.)]", proposal, re.IGNORECASE | re.MULTILINE
+    ), proposal
+    assert re.search(r"board|piece|move|position|checkmate", proposal, re.IGNORECASE), (
+        proposal
+    )
+    assert re.search(
+        r"test|verif|done|pass|acceptance|demonstrat", proposal, re.IGNORECASE
+    ), proposal
+    assert {g["id"] for g in goal("list")} == before == {parent_id}
+    assert goal("show", parent_id, "--tree")["goals"] == [parent]
+    grant = goal("grant-subgoals", parent_id, operator["id"])
+    reply = run("ask", "--definition-grant", grant["id"], question)
+    tree = goal("show", parent_id, "--tree")["goals"]
+    children = {g["id"]: g for g in tree if g["parent_goal_id"] == parent_id}
+    assert len(children) >= 2 and len(tree) == 1 + len(children)
+    criteria = " ".join(
+        child["success_criteria"] for child in children.values()
+    ).casefold()
+    assert re.search(
+        r"\b(?:saved|created|added|recorded|stored|drafts?)\b", reply, re.IGNORECASE
+    ), reply
+    assert any(
+        term in criteria and term in reply.casefold()
+        for term in ("board", "piece", "move", "position", "checkmate", "turn")
+    )
+    assert {g["id"] for g in goal("list")} - before == children.keys()
+
+    with TestClient(create_app(workspace / DATABASE_PATH)) as client:
+
+        def get(path):
+            return client.get(path).raise_for_status().json()
+
+        parent_url = f"/goals/{parent_id}/history?view=activity"
+        timeline = get(parent_url)["timeline"]
+        planning = [
+            entry
+            for entry in timeline
+            if entry.get("tool") == "create_subgoal" and entry["outcome"] == "returned"
+        ]
+        (run_id,) = {entry["run_id"] for entry in planning}
+        record = get(f"/runs/{run_id}")
+        assert (
+            record["definition_grant"] == grant
+            and record["operator_id"] == operator["id"]
+        )
+        assert record["outcome"] == "succeeded" and record["mode"] == "delegated"
+        commits = [c for c in record["calls"] if c["committed_revision"]]
+        assert len(commits) == len(children)
+        assert {c["committed_revision"]["goal_id"] for c in commits} == children.keys()
+        assert get(f"/goals/{parent_id}") == parent
+        print(
+            f"\nOwner request\n{question}\n\nAdvisory reply (zero children saved)\n{proposal.strip()}"
+        )
+        print(f"\nDelegated reply\n{reply.strip()}\n\n{parent_url} → /runs/{run_id}")
+        print(
+            f"Operator {record['operator_id']}, grant {grant['id']}, parent {parent_id} at revision {parent['revision']} ({parent['status']})"
+        )
+        for call in commits:
+            child_id = call["committed_revision"]["goal_id"]
+            child = children[child_id]
+            assert call["tool"] == "create_subgoal" and call["outcome"] == "returned"
+            assert (call["target_goal_id"], call["target_revision"]) == (
+                parent_id,
+                parent["revision"],
+            )
+            assert any(
+                entry["sequence"] == call["sequence"]
+                and entry["relationship"] == "requested"
+                for entry in planning
+            )
+            assert call["committed_revision"] == {"goal_id": child_id, "revision": 1}
+            assert call["returned_goals"] == [
+                call["committed_revision"]
+                | {"status": "draft", "observation_ids": [], "decision": None}
+            ]
+            assert (child["status"], child["revision"]) == ("draft", 1)
+            assert child["success_criteria"].strip()
+            assert get(f"/goals/{child_id}") == child
+            child_url = f"/goals/{child_id}/history?view=activity"
+            (revision,) = [
+                e for e in get(child_url)["timeline"] if e["kind"] == "revision"
+            ]
+            assert revision["definition"]["revision"] == 1
+            assert revision["committing_call"] == {
+                "run_id": run_id,
+                "sequence": call["sequence"],
+            }
+            print(
+                f"Call {call['sequence']} → {child_url} → revision 1, draft: {child['title']}\n  {child['success_criteria']}"
+            )
+        for call in record["calls"]:
+            if (
+                call["tool"] in ("list_skills", "read_skill")
+                and call["outcome"] == "returned"
+            ):
+                print(
+                    f"Call {call['sequence']} {call['tool']} → {call['returned_skills']}"
+                )

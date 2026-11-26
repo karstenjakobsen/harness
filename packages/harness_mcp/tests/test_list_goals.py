@@ -5,6 +5,7 @@ import sys
 from contextlib import asynccontextmanager, closing
 from datetime import timedelta
 from hashlib import sha256
+from importlib.resources import files
 
 import pytest
 from fastapi.testclient import TestClient
@@ -118,6 +119,7 @@ async def test_only_the_bound_session_can_complete_its_subgoal(client, tmp_path)
         assert forged.isError
         api.withdraw_completion(first["id"])
         second = api.grant_completion(child["id"], operator["id"])
+        assert all(t.annotations.readOnlyHint for t in (await old.list_tools()).tools)
         assert (await old.call_tool("complete_goal", request)).isError
         assert api.get_goal(child["id"])["status"] == "active"
     for call in api.get_run(old_run)["calls"]:
@@ -666,7 +668,8 @@ async def test_audit_keeps_actual_result_relationships_after_revision(tmp_path):
         for entry in api.get_goal_activity(child)["timeline"]
         if entry["kind"] == "call"
     ]
-    assert [(call["sequence"], call["relationship"]) for call in calls] == [
+    assert [call["at"] for call in calls] == sorted(call["at"] for call in calls)
+    assert sorted((call["sequence"], call["relationship"]) for call in calls) == [
         (1, "listed"),
         (2, "descendant"),
         (3, "requested"),
@@ -968,3 +971,198 @@ async def test_catalog_import_and_historical_skill_reads(tmp_path, monkeypatch):
     print(f"  Content hash: {historical['content_hash']}")
     print(f"  Full reads of chess-rules revision 1: {readers}")
     print(f"  Full reads of go-testing revision 1 (only listed): {go_reads}")
+
+
+@pytest.mark.anyio
+async def test_subgoal_tool_is_parent_scoped_and_audits_request_and_result(tmp_path):
+    path = tmp_path / DATABASE_PATH
+    api = GoalAPI(path)
+    operator = OperatorAPI(path).register_operator("Planner")
+    parent = api.create_goal("Join a club")["id"]
+    other = api.create_goal("Renew membership")["id"]
+    request = {
+        "parent_goal_id": parent,
+        "expected_parent_revision": 1,
+        "title": "Attend a meeting",
+        "retry_key": "meeting",
+        "success_criteria": "Owner confirms attendance",
+        "duration_days": 14,
+    }
+    top_level = api.grant_definition("create_goal", operator["id"])
+    grant = api.grant_definition("create_subgoal", operator["id"], goal_id=parent)
+    for bound in (None, top_level):
+        run = api.start_run(definition_grant_id=bound["id"] if bound else None)["id"]
+        args = ["--definition-grant", str(bound["id"])] if bound else []
+        async with workspace_client(tmp_path, "--run-id", str(run), *args) as session:
+            assert "create_subgoal" not in {
+                tool.name for tool in (await session.list_tools()).tools
+            }
+            assert (await session.call_tool("create_subgoal", request)).isError
+        (denied,) = api.get_run(run)["calls"]
+        assert (
+            denied["outcome"],
+            denied["target_goal_id"],
+            denied["target_revision"],
+        ) == ("denied", parent, 1)
+        assert denied["committed_revision"] is None and denied["returned_goals"] is None
+    run = api.start_run(definition_grant_id=grant["id"])["id"]
+    async with workspace_client(
+        tmp_path, "--run-id", str(run), "--definition-grant", str(grant["id"])
+    ) as session:
+        tools = (await session.list_tools()).tools
+        assert [t.name for t in tools if not t.annotations.readOnlyHint] == [
+            "create_subgoal"
+        ]
+        assert (
+            await session.call_tool(
+                "revise_goal",
+                {"goal_id": parent, "expected_revision": 1, "title": "Different"},
+            )
+        ).isError
+        result = await session.call_tool("create_subgoal", request)
+        assert not result.isError
+        child = result.structuredContent["goal_id"]
+        assert result.structuredContent == {
+            "goal_id": child,
+            "revision": 1,
+            "status": "draft",
+        }
+        assert api.get_goal(child)["duration_days"] == 14
+        assert api.get_goal(child)["success_criteria"] == request["success_criteria"]
+        for target in (other, child):
+            assert (
+                await session.call_tool(
+                    "create_subgoal", request | {"parent_goal_id": target}
+                )
+            ).isError
+        assert (
+            await session.call_tool("create_subgoal", request | {"status": "active"})
+        ).isError
+        assert (
+            await session.call_tool("create_subgoal", request)
+        ).structuredContent == result.structuredContent
+    revision_denial, creation, wrong_parent, grandchild, invalid, retry = api.get_run(
+        run
+    )["calls"]
+    assert revision_denial["outcome"] == "denied"
+    assert (creation["target_goal_id"], creation["target_revision"]) == (parent, 1)
+    assert (
+        creation["committed_revision"]
+        == retry["retrieved_revision"]
+        == {"goal_id": child, "revision": 1}
+    )
+    assert (
+        creation["returned_goals"]
+        == retry["returned_goals"]
+        == [result.structuredContent | {"observation_ids": [], "decision": None}]
+    )
+    for denial, target in [
+        (wrong_parent, other),
+        (grandchild, child),
+        (invalid, parent),
+    ]:
+        assert (
+            denial["outcome"],
+            denial["target_goal_id"],
+            denial["target_revision"],
+        ) == ("denied", target, 1)
+        assert (
+            denial["committed_revision"] is None
+            and denial["retrieved_revision"] is None
+        )
+    assert [g["id"] for g in api.list_goals()] == [parent, other, child]
+    child_activity = api.get_goal_activity(child)["timeline"]
+    assert {
+        e["sequence"]: e["relationship"] for e in child_activity if e["kind"] == "call"
+    } == {
+        creation["sequence"]: "creation_result",
+        grandchild["sequence"]: "requested",
+        retry["sequence"]: "creation_result",
+    }
+
+
+@pytest.mark.anyio
+async def test_subgoal_discovery_tracks_withdrawal_and_regrant(tmp_path):
+    path = tmp_path / DATABASE_PATH
+    api = GoalAPI(path)
+    operator = OperatorAPI(path).register_operator("Planner")
+    parent = api.create_goal("Join a club")["id"]
+    grant = api.grant_definition("create_subgoal", operator["id"], goal_id=parent)
+    run = api.start_run(definition_grant_id=grant["id"])["id"]
+    async with workspace_client(
+        tmp_path, "--run-id", str(run), "--definition-grant", str(grant["id"])
+    ) as session:
+
+        async def writes():
+            return [
+                t.name
+                for t in (await session.list_tools()).tools
+                if not t.annotations.readOnlyHint
+            ]
+
+        assert await writes() == ["create_subgoal"]
+        api.withdraw_definition_grant(grant["id"])
+        assert await writes() == []
+        replacement = api.grant_definition(
+            "create_subgoal", operator["id"], goal_id=parent
+        )
+        assert await writes() == []
+        request = {
+            "parent_goal_id": parent,
+            "expected_parent_revision": 1,
+            "title": "Attend a meeting",
+            "success_criteria": "The owner attended.",
+            "retry_key": "first",
+        }
+        assert (await session.call_tool("create_subgoal", request)).isError
+        assert not (
+            await session.call_tool("get_goal_tree", {"goal_id": parent})
+        ).isError
+    denied, read = api.get_run(run)["calls"]
+    assert (denied["outcome"], denied["target_goal_id"], denied["target_revision"]) == (
+        "denied",
+        parent,
+        1,
+    )
+    assert denied["committed_revision"] is None and read["outcome"] == "returned"
+    assert len(api.list_goals()) == 1
+    fresh = api.start_run(definition_grant_id=replacement["id"])["id"]
+    async with workspace_client(
+        tmp_path, "--run-id", str(fresh), "--definition-grant", str(replacement["id"])
+    ) as session:
+        result = await session.call_tool("create_subgoal", request)
+        assert result.structuredContent["status"] == "draft"
+        api.finish_run(fresh, "succeeded")
+        assert all(
+            t.annotations.readOnlyHint for t in (await session.list_tools()).tools
+        )
+        rejected = await session.call_tool("create_subgoal", request)
+        assert rejected.isError and "finished" in rejected.content[0].text
+    assert len(api.get_run(fresh)["calls"]) == 1
+
+
+@pytest.mark.anyio
+async def test_legacy_run_reports_unsupported_subgoal_as_a_tool_error(tmp_path):
+    path = tmp_path / DATABASE_PATH
+    path.parent.mkdir(parents=True)
+    snapshot = files("harness_api").joinpath("migrations", "schema_v13.sql")
+    with closing(sqlite3.connect(path)) as db:
+        db.executescript(snapshot.read_text(encoding="utf-8"))
+    api = GoalAPI(path)
+    run = api.start_run()["id"]
+    async with workspace_client(tmp_path, "--run-id", str(run)) as session:
+        rejected = await session.call_tool(
+            "create_subgoal",
+            {
+                "parent_goal_id": 1,
+                "expected_parent_revision": 1,
+                "title": "Visit",
+                "success_criteria": "Owner confirms the visit",
+                "retry_key": "visit",
+            },
+        )
+        assert rejected.isError and "fresh workspace" in rejected.content[0].text
+        assert (await session.call_tool("list_goals", {})).structuredContent == {
+            "goals": []
+        }
+    assert [c["tool"] for c in api.get_run(run)["calls"]] == ["list_goals"]

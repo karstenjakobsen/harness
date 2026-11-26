@@ -2,8 +2,8 @@
 
 `operator ask` sends one message to Codex and prints its reply. Use it to read
 relevant workspace files, think through a goal, or suggest a small next step.
-An ordinary session offers advice. The workspace owner can delegate completion
-of one subgoal for an explicit session. Each invocation starts a fresh
+An ordinary session offers advice. The workspace owner can delegate a definition change,
+creation of draft children under one parent, or completion of one subgoal. Each invocation starts a fresh
 conversation using the Codex read-only sandbox. It uses your existing Codex
 sign-in and skips your personal Codex configuration.
 
@@ -63,8 +63,11 @@ deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.m
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
 On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Version 13 upgrades workspaces from versions 7 through 12 in
-place. Existing assignments keep their responsible operator and require an
+`001_initial.sql`. Fresh workspaces use version 14 and support delegated subgoal creation.
+Existing version 13 workspaces retain their schema and prior operations.
+A direct MCP request for `create_subgoal` there returns a tool error before
+recording a call. The version 13 audit schema supports the earlier tool names. Workspaces
+from versions 7 through 12 follow their existing upgrade path to version 13. Existing assignments keep their responsible operator and require an
 explicit grant for completion authority. Opening a pre-v7 or unrecognized
 workspace returns an error and leaves the file intact.
 
@@ -109,6 +112,20 @@ publish changed content. Historical HTTP reads use SQLite even when the source
 checkout is unavailable. The public skill queries raise `SkillValidationError`
 for a malformed ID or revision (HTTP 422) and `SkillNotFoundError` for a valid
 key absent from the owner’s catalog history (HTTP 404). [Seed catalog](skills)
+
+### Delegate subgoal creation
+
+In a fresh workspace, use `operator goal grant-subgoals PARENT_ID OPERATOR_ID`
+and pass the returned grant ID to `operator ask --definition-grant GRANT_ID`.
+Ask the operator to break the named goal into subgoals and save them for review.
+Each saved child starts at revision 1 in draft status with success criteria.
+Inspect the plan with `operator goal show PARENT_ID --tree`. An interruption can
+leave a partial plan, so the next operator can inspect the children before continuing.
+
+A grant permits direct children under a draft, active, or paused parent. An
+identical authorized retry can retrieve a saved child after the parent completes
+or is revoked at the same revision. A change to the parent definition makes an
+older request stale. After reviewing the new revision, use a new key for new work.
 
 ### Delegate completion of a subgoal
 
@@ -251,7 +268,7 @@ grant fields. A delegated run identifies the registered operator and exact grant
 Completion runs retain `completion_grant_id` and `granted_goal_id`. A run with
 a creation or revision grant includes `definition_grant` with `id`, `operator_id`,
 `action`, and `goal_id`. The action is `create_goal` for top-level creation with
-`goal_id: null`, or `revise_goal` for a single goal. The run outcome is
+`goal_id: null`, `create_subgoal` with the parent’s ID, or `revise_goal` for a single goal. The run outcome is
 `succeeded`, `failed`, or `unfinished`.
 A launch error, such as an existing trace file, marks the run `failed`.
 Calls are ordered by `sequence` and retain the requested goal ID and revision
@@ -261,6 +278,15 @@ result has `returned_goals: []`. History reads use `returned_history`. Skill cal
 use `returned_skills`, an ordered list of `{id, revision}` references. A
 successful empty catalog listing returns `[]`. A call without a returned
 result has all three fields set to `null`.
+
+For `create_subgoal`, the parent’s activity lists the call as `requested`.
+Follow its run ID and sequence to see `target_goal_id` and `target_revision`
+for the parent and `committed_revision` for the new child. An identical retry
+has a `retrieved_revision`. Open `GET /goals/{child_id}/history?view=activity`
+to find the `creation_result` and follow revision 1’s `committing_call` back
+to the original call. This link survives an interruption before reply delivery.
+A denied call has no saved result. Once a call commits or retrieves a child,
+its audit record preserves that fact even if delivery fails.
 
 For a `list_skills` call, these references identify the descriptions made
 available for discovery. For a `read_skill` call, `target_skill_id` and

@@ -8,7 +8,12 @@ from typing import Literal
 
 DATABASE_PATH = Path(".harness/goals.sqlite3")
 ADMIN_USER_ID = 1
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
+LEGACY_SCHEMA_VERSION = 13
+
+
+def schema_version(connection: sqlite3.Connection) -> int:
+    return connection.execute("PRAGMA user_version").fetchone()[0]
 
 
 def utc_timestamp() -> str:
@@ -36,15 +41,12 @@ class WorkspaceDatabase:
         except OSError as error:
             raise self.storage_error() from error
         with self._connection("rwc") as connection:
-            if (
-                connection.execute("PRAGMA user_version").fetchone()[0]
-                == SCHEMA_VERSION
-            ):
+            if schema_version(connection) in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
                 return
 
         with self._write() as connection:
-            (version,) = connection.execute("PRAGMA user_version").fetchone()
-            if version == SCHEMA_VERSION:
+            version = schema_version(connection)
+            if version in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
                 return
             if version not in (0, 7, 8, 9, 10, 11, 12) or (
                 version == 0
@@ -54,11 +56,14 @@ class WorkspaceDatabase:
             ):
                 raise self.storage_error(
                     f"Cannot open workspace schema version {version}. "
-                    f"Use a version 7 through 12 workspace or a fresh database for schema version {SCHEMA_VERSION}."
+                    f"Use a supported workspace or a fresh database for schema version {SCHEMA_VERSION}."
                 )
             snapshot = (
                 files("harness_api")
-                .joinpath("migrations", "001_initial.sql")
+                .joinpath(
+                    "migrations",
+                    "001_initial.sql" if version == 0 else "schema_v13.sql",
+                )
                 .read_text(encoding="utf-8")
             )
             if version == 0:
@@ -78,7 +83,7 @@ class WorkspaceDatabase:
                 "-- End skill schema\n", 1
             )[0]
             connection.executescript(skill_schema)
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.execute(f"PRAGMA user_version = {LEGACY_SCHEMA_VERSION}")
 
     @staticmethod
     def _upgrade_v7(connection: sqlite3.Connection, snapshot: str) -> None:

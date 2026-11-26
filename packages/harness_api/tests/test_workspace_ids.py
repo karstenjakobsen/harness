@@ -53,7 +53,7 @@ def test_generated_keys_and_integer_foreign_keys(tmp_path):
     assert users.create_user("second")["id"] > user["id"]
 
 
-@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 14])
+@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 15])
 def test_incompatible_workspace_requires_fresh_database(tmp_path, version):
     path = tmp_path / "workspace.db"
     with closing(sqlite3.connect(path, autocommit=True)) as db:

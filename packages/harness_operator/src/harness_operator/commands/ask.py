@@ -21,7 +21,7 @@ from ..terminal import POSITIVE_INTEGER, read_message
 @click.option(
     "--definition-grant",
     type=POSITIVE_INTEGER,
-    help="Bind this session to a creation or revision grant.",
+    help="Bind this session to top-level creation, subgoal creation or revision.",
 )
 def ask(
     message: str | None,

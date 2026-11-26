@@ -14,6 +14,7 @@ from ..database import (
     DATABASE_PATH,
     WorkspaceDatabase,
     WorkspaceStorageError,
+    schema_version,
     utc_timestamp,
 )
 from . import GoalStatus
@@ -330,6 +331,13 @@ def _validate_definition(definition: GoalDefinition) -> None:
         )
 
 
+def _require_subgoal_schema(connection: sqlite3.Connection) -> None:
+    if schema_version(connection) < 14:
+        raise GoalValidationError(
+            "Delegated subgoal creation requires a fresh workspace with schema version 14."
+        )
+
+
 def _merge_definition(
     definition: GoalDefinition, changes: GoalDefinitionChanges
 ) -> GoalDefinition:
@@ -521,6 +529,8 @@ class GoalAPI(WorkspaceDatabase):
             ),
         )
         with self._write() as connection:
+            if parent_goal_id is not None:
+                self._get_goal(connection, parent_goal_id)
             goal_id = self._insert_goal(
                 connection, title, status, definition, parent_goal_id
             )
@@ -538,8 +548,6 @@ class GoalAPI(WorkspaceDatabase):
         definition: GoalDefinition,
         parent_goal_id: int | None = None,
     ) -> int:
-        if parent_goal_id is not None:
-            self._get_goal(connection, parent_goal_id)
         (goal_id,) = connection.execute(
             "INSERT INTO goals (owner_user_id, parent_goal_id, status) VALUES (?, ?, ?) RETURNING id",
             (ADMIN_USER_ID, parent_goal_id, status),
@@ -700,6 +708,29 @@ class GoalAPI(WorkspaceDatabase):
                 (outcome, utc_timestamp(), run_id),
             )
 
+    def get_run_write_action(
+        self, run_id: int
+    ) -> DefinitionAction | Literal["complete_goal"] | None:
+        """Return the action the run's exact grant currently authorizes."""
+        _validate_positive_integer(run_id, "Run ID")
+        with self._connection("ro") as connection:
+            connection.execute("BEGIN")
+            run = run_row(connection, run_id, ADMIN_USER_ID)
+            if run["outcome"] != "unfinished":
+                return None
+            try:
+                if run["definition_grant_id"] is not None:
+                    return self._get_definition_grant(
+                        connection, run["definition_grant_id"]
+                    )["action"]
+                if run["completion_grant_id"] is not None:
+                    self._get_completion_grant(connection, run["completion_grant_id"])
+                    return "complete_goal"
+            except GoalValidationError:
+                # Historical runs retain the grant ID after its authority ends.
+                return None
+            return None
+
     def get_run(self, run_id: int, *, call: CallReference | None = None) -> OperatorRun:
         _validate_positive_integer(run_id, "Run ID")
         exclude_sequence = (
@@ -760,6 +791,8 @@ class GoalAPI(WorkspaceDatabase):
             run = run_row(connection, run_id, ADMIN_USER_ID)
             if run["outcome"] != "unfinished":
                 raise GoalConflictError(f"Run {run_id} already finished.")
+            if tool == "create_subgoal":
+                _require_subgoal_schema(connection)
             sequence = connection.execute(
                 "SELECT coalesce(max(sequence), 0) + 1 FROM run_calls WHERE run_id = ?",
                 (run_id,),
@@ -811,6 +844,17 @@ class GoalAPI(WorkspaceDatabase):
             raise GoalValidationError("A returned call requires result references.")
         with self._write() as connection:
             attempt = self._open_tool_call(connection, call)
+            if outcome == "denied" and any(
+                attempt[field] is not None
+                for field in (
+                    "revision_kind",
+                    "committed_event_id",
+                    "retrieved_event_id",
+                )
+            ):
+                raise GoalValidationError(
+                    "A call with a saved result cannot be recorded as denied."
+                )
             history_reference = None
             if returned_skills is not None:
                 self._save_skill_references(connection, attempt, returned_skills)
@@ -955,7 +999,7 @@ class GoalAPI(WorkspaceDatabase):
                 raise GoalValidationError(
                     "The completion result must reference the call's saved decision."
                 )
-        elif attempt["tool"] in ("create_goal", "revise_goal"):
+        elif attempt["tool"] in ("create_goal", "create_subgoal", "revise_goal"):
             reference = revision_reference(attempt)
             if (
                 reference is None
@@ -963,6 +1007,10 @@ class GoalAPI(WorkspaceDatabase):
                 or goals[0]["goal_id"] != reference["goal_id"]
                 or goals[0]["revision"] != reference["revision"]
                 or goals[0]["status"] not in ("draft", "active", "paused")
+                or (
+                    attempt["tool"] == "create_subgoal"
+                    and goals[0]["status"] != "draft"
+                )
                 or goals[0]["observation_ids"]
                 or goals[0]["decision"] is not None
             ):
@@ -1077,19 +1125,21 @@ class GoalAPI(WorkspaceDatabase):
     def grant_definition(
         self, action: DefinitionAction, operator_id: int, *, goal_id: int | None = None
     ) -> DefinitionGrant:
-        """Grant top-level creation or revision of one goal to a registered operator."""
+        """Grant a registered operator one definition action in its requested scope."""
         if self._submitter != ADMIN_USER_ID:
             raise GoalValidationError(
                 "Only the workspace owner can delegate goal definitions."
             )
         _validate_positive_integer(operator_id, "Operator ID")
-        if action not in ("create_goal", "revise_goal") or (
-            action == "revise_goal"
-        ) != (goal_id is not None):
+        if action not in get_args(DefinitionAction.__value__) or (
+            action == "create_goal"
+        ) != (goal_id is None):
             raise GoalValidationError(
-                "A revision grant requires one goal. A creation grant covers top-level goals."
+                "Top-level creation takes no goal. Subgoal creation and revision require one goal."
             )
         with self._write() as connection:
+            if action == "create_subgoal":
+                _require_subgoal_schema(connection)
             if goal_id is not None:
                 self._get_goal(connection, goal_id)
             operator = connection.execute(
@@ -1219,16 +1269,70 @@ class GoalAPI(WorkspaceDatabase):
         **fields: Unpack[GoalDefinitionChanges],
     ) -> DelegatedGoalResult:
         """Save a top-level goal once for this grant and creation key."""
+        return self._create_with_grant(title, call, retry_key, status, fields)
+
+    def create_delegated_subgoal(
+        self,
+        parent_goal_id: int,
+        expected_parent_revision: int,
+        title: str,
+        *,
+        call: CallReference,
+        retry_key: str,
+        **fields: Unpack[GoalDefinitionChanges],
+    ) -> DelegatedGoalResult:
+        """Save a draft child against the parent revision reviewed by this call."""
+        _validate_positive_integer(parent_goal_id, "Parent goal ID")
+        _validate_positive_integer(expected_parent_revision, "Expected parent revision")
+        criteria = fields.get("success_criteria")
+        if not isinstance(criteria, str) or not criteria.strip():
+            raise GoalValidationError("Subgoal success criteria must contain text.")
+        return self._create_with_grant(
+            title,
+            call,
+            retry_key,
+            "draft",
+            fields,
+            parent_goal_id,
+            expected_parent_revision,
+        )
+
+    def _create_with_grant(
+        self,
+        title: str,
+        call: CallReference,
+        retry_key: str,
+        status: GoalCreationStatus,
+        fields: GoalDefinitionChanges,
+        parent_goal_id: int | None = None,
+        expected_parent_revision: int | None = None,
+    ) -> DelegatedGoalResult:
         title = _normalize_title(title)
         retry_key = _require_text(retry_key, "Retry key").strip()
         if not retry_key:
             raise GoalValidationError("Retry key must contain text.")
         definition = _new_definition(status, fields)
-        fingerprint = sha256(
-            json.dumps([title, status, definition], sort_keys=True).encode()
-        ).hexdigest()
+        request: list[object] = [title, status, definition]
+        if parent_goal_id is not None:
+            request.extend((parent_goal_id, expected_parent_revision))
+        fingerprint = sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
         with self._write() as connection:
-            grant = self._definition_write_grant(connection, call, "create_goal")
+            grant = self._definition_write_grant(
+                connection,
+                call,
+                "create_goal" if parent_goal_id is None else "create_subgoal",
+                parent_goal_id,
+                expected_parent_revision,
+            )
+            parent = (
+                self._get_goal(connection, parent_goal_id)
+                if parent_goal_id is not None
+                else None
+            )
+            if parent is not None and parent["revision"] != expected_parent_revision:
+                raise GoalConflictError(
+                    f"Stale parent revision. Current revision is {parent['revision']}."
+                )
             existing = connection.execute(
                 "SELECT goal_id, status, fingerprint FROM goal_creation_retries WHERE grant_id = ? AND retry_key = ?",
                 (grant["id"], retry_key),
@@ -1244,7 +1348,17 @@ class GoalAPI(WorkspaceDatabase):
                 )
                 self._link_revision(connection, call, result, "retrieved")
                 return result
-            goal_id = self._insert_goal(connection, title, status, definition)
+            if parent is not None and parent["status"] not in (
+                "draft",
+                "active",
+                "paused",
+            ):
+                raise GoalConflictError(
+                    f"Cannot add a subgoal to a {parent['status']} parent."
+                )
+            goal_id = self._insert_goal(
+                connection, title, status, definition, parent_goal_id
+            )
             connection.execute(
                 "INSERT INTO goal_creation_retries (grant_id, retry_key, fingerprint, goal_id, status) VALUES (?, ?, ?, ?, ?)",
                 (grant["id"], retry_key, fingerprint, goal_id, status),

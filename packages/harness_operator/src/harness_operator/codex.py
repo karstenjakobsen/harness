@@ -55,6 +55,16 @@ the same key and inputs if delivery of that call is uncertain. Report the saved
 goal ID, revision and status from the tool. A reply-only proposal has no saved revision.
 """
 
+SUBGOAL_INSTRUCTIONS = """\
+The owner delegated creation of draft children under goal ID {goal_id}.
+Inspect the current tree before planning so you can build on any existing children.
+When asked to save a plan, use create_subgoal for each direct child you propose.
+Use the parent revision you reviewed, a distinct retry key for each intended child,
+and concrete success criteria. Retry uncertain delivery with the same key and
+inputs. On conflict, inspect the tree and its history before continuing.
+Report which children were saved and how the owner can verify each one.
+"""
+
 REVISION_INSTRUCTIONS = """\
 The owner delegated revision of goal ID {goal_id} for this session. When the
 owner asks you to save a change, read that goal with get_goal_tree, then call
@@ -175,11 +185,11 @@ def ask_codex(
     run = api.start_run(completion_grant_id, definition_grant_id=definition_grant_id)
     grant = run["definition_grant"]
     if grant is not None:
-        instructions = (
-            CREATE_INSTRUCTIONS
-            if grant["action"] == "create_goal"
-            else REVISION_INSTRUCTIONS.format(goal_id=grant["goal_id"])
-        )
+        instructions = {
+            "create_goal": CREATE_INSTRUCTIONS,
+            "create_subgoal": SUBGOAL_INSTRUCTIONS,
+            "revise_goal": REVISION_INSTRUCTIONS,
+        }[grant["action"]].format(goal_id=grant["goal_id"])
     elif completion_grant_id is not None:
         instructions = DELEGATED_INSTRUCTIONS.format(goal_id=run["granted_goal_id"])
     else:

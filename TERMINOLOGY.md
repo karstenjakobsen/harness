@@ -8,7 +8,7 @@
 | Owner | The user related to a particular resource by its `owner_user_id`. |
 | Registered operator | A workspace record with its own numeric ID, an owning user and optional goal assignments. |
 | Assignment | The recorded relationship between a goal and the registered operator responsible for it. Unregistering the operator releases its open assignments and invalidates its grants. Delegated writes require an explicit grant. |
-| Delegation | The owner’s explicit grant of a specific action and scope to a registered operator. A creation grant covers top-level goals in the owner’s workspace. A revision grant covers one goal. A completion grant uses the ID of the assignment created when the owner grants completion of one subgoal. |
+| Delegation | The owner’s explicit grant of a specific action and scope to a registered operator. A top-level creation grant covers the owner’s workspace. A subgoal creation grant authorizes draft children of one parent, whose ID is the grant’s `goal_id`. A revision grant covers one goal. A completion grant uses the ID of the assignment created when the owner grants completion of one subgoal. |
 | Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
 | Workspace | The context for users, registered operators, goals, evidence, decisions and operator run history. Local commands use the current workspace database. HTTP requests use the workspace served by the selected API server. |
 | Schema snapshot | The complete SQLite schema and initial system user in `001_initial.sql`. SQLite’s `user_version` records the schema version installed in each workspace. |
@@ -30,7 +30,7 @@
 | Bare `operator register` | Starts Codex sign-in. Named registration creates a workspace operator record. |
 | Advisory `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. History tools require a recorded run and can read across operators in the same workspace. |
 | `operator ask --completion-grant GRANT_ID` | The assistant can also complete the specific subgoal covered by the active grant. Harness derives the registered operator from the grant. |
-| `operator ask --definition-grant GRANT_ID` | The assistant can also create a top-level goal or revise the specified goal, depending on the active grant. Harness derives the registered operator from the grant bound to the recorded run. |
+| `operator ask --definition-grant GRANT_ID` | The assistant can create top-level goals, create draft children under one parent, or revise one goal. The run’s bound grant determines the registered operator, permitted action and scope. |
 
 In a delegated session, Harness binds the assistant to a registered operator and a specific grant at startup. A replacement grant requires a fresh session. The **decision maker** is the actor who exercises the delegated authority. The **evidence submitter** is the actor who supplied a cited record. If the owner confirms “My membership is active” and an operator uses that confirmation to complete the subgoal, the evidence keeps the owner’s user ID and the decision records the registered operator’s ID. These IDs refer to different tables and can have the same numeric value. [Delegated completion plan](docs/SLICE3_TODO.md#delegated-completion)
 
@@ -70,7 +70,7 @@ An owner can record evidence while a goal is open. The event ID identifies the e
 | Listed skill | Which revision’s name and description did a discovery call return? | `list_skills` recorded revision 1 of both chess and Go. |
 | Skill read | Which revision’s instructions did the tool return? | `read_skill` returned chess revision 1. The call records exposure of the instructions. Evidence of following them would require a separate observation. |
 | History read | What did an operator see when inspecting a goal timeline or run? | A run read exposed an unfinished call with revision 2 already committed. The read retains that outcome and commit reference after the call becomes returned. |
-| Committing call | Which call saved the revision or decision? | The model saves the revision or decision and its call link in the same transaction. An identical creation or completion retry can retrieve the original record under its own call sequence. |
+| Committing call | Which call saved the revision or decision? | The model saves the revision or decision and its call link in the same transaction. On subgoal creation the requested goal and revision identify the parent, and the committed revision identifies the child. An identical creation or completion retry can retrieve the original record under its own call sequence. |
 
 A successful HTTP response supports only the claim defined by that endpoint. A health check can establish reachability. A file-mode check can establish the mode of the file it inspected.
 

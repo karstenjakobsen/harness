@@ -17,9 +17,10 @@ type HarnessTool = Literal[
     "read_skill",
     "complete_goal",
     "create_goal",
+    "create_subgoal",
     "revise_goal",
 ]
-type DefinitionAction = Literal["create_goal", "revise_goal"]
+type DefinitionAction = Literal["create_goal", "create_subgoal", "revise_goal"]
 type RunOutcome = Literal["unfinished", "succeeded", "failed"]
 type CallOutcome = Literal["unfinished", "returned", "denied", "failed"]
 type CallRelationship = Literal[
@@ -335,7 +336,9 @@ def related_calls(
         tool = row["tool"]
         if tool == "complete_goal":
             relationship = "completion_target"
-        elif tool == "create_goal":
+        elif tool == "create_goal" or (
+            tool == "create_subgoal" and row["target_goal_id"] != goal_id
+        ):
             relationship = "creation_result"
         elif tool == "revise_goal":
             relationship = "revision_target"

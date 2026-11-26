@@ -142,7 +142,7 @@ def test_launcher_records_nonzero_exit_and_start_failure(monkeypatch, tmp_path):
         assert saved["outcome"] == "failed" and saved["finished_at"] is not None
 
 
-@pytest.mark.parametrize("action", ["create_goal", "revise_goal"])
+@pytest.mark.parametrize("action", ["create_goal", "create_subgoal", "revise_goal"])
 def test_cli_binds_one_definition_grant_and_approves_its_tool(
     action, monkeypatch, tmp_path, capsys
 ):
@@ -165,7 +165,8 @@ def test_cli_binds_one_definition_grant_and_approves_its_tool(
         assert invoke("goal", "grant-create", operator_id) == 0
     else:
         goal_id = goals.create_goal("Library")["id"]
-        assert invoke("goal", "grant-revision", goal_id, operator_id) == 0
+        command = "grant-subgoals" if action == "create_subgoal" else "grant-revision"
+        assert invoke("goal", command, goal_id, operator_id) == 0
     grant = json.loads(capsys.readouterr().out)
     assert grant == {
         "id": grant["id"],
