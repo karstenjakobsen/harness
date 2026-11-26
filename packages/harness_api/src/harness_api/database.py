@@ -8,12 +8,6 @@ from typing import Literal
 
 DATABASE_PATH = Path(".harness/goals.sqlite3")
 ADMIN_USER_ID = 1
-SCHEMA_VERSION = 14
-LEGACY_SCHEMA_VERSION = 13
-
-
-def schema_version(connection: sqlite3.Connection) -> int:
-    return connection.execute("PRAGMA user_version").fetchone()[0]
 
 
 def utc_timestamp() -> str:
@@ -30,7 +24,7 @@ class WorkspaceStorageError(RuntimeError):
 
 
 class WorkspaceDatabase:
-    """Workspace schema setup, upgrades and transactional connections."""
+    """Initialize an empty local workspace and manage transactional connections."""
 
     storage_error = WorkspaceStorageError
 
@@ -41,173 +35,21 @@ class WorkspaceDatabase:
         except OSError as error:
             raise self.storage_error() from error
         with self._connection("rwc") as connection:
-            if schema_version(connection) in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
-                return
-
-        with self._write() as connection:
-            version = schema_version(connection)
-            if version in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
-                return
-            if version not in (0, 7, 8, 9, 10, 11, 12) or (
-                version == 0
-                and connection.execute(
-                    "SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
-                ).fetchone()
-            ):
-                raise self.storage_error(
-                    f"Cannot open workspace schema version {version}. "
-                    f"Use a supported workspace or a fresh database for schema version {SCHEMA_VERSION}."
-                )
-            snapshot = (
-                files("harness_api")
-                .joinpath(
-                    "migrations",
-                    "001_initial.sql" if version == 0 else "schema_v13.sql",
-                )
-                .read_text(encoding="utf-8")
+            has_schema = (
+                "SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
             )
-            if version == 0:
-                connection.executescript(snapshot)
+            if connection.execute(has_schema).fetchone():
                 return
-            if version == 7:
-                self._upgrade_v7(connection, snapshot)
-            if version == 9:
-                self._upgrade_v9(connection)
-            if version >= 11:
-                self._upgrade_run_calls(connection, snapshot, version=version)
-            elif version >= 9:
-                self._upgrade_v10(connection, snapshot)
-            else:
-                self._upgrade_v8(connection, snapshot)
-            skill_schema = snapshot.split("-- Begin skill schema\n", 1)[1].split(
-                "-- End skill schema\n", 1
-            )[0]
-            connection.executescript(skill_schema)
-            connection.execute(f"PRAGMA user_version = {LEGACY_SCHEMA_VERSION}")
-
-    @staticmethod
-    def _upgrade_v7(connection: sqlite3.Connection, snapshot: str) -> None:
-        # Rebuild the two related tables to widen the completion constraint. SQLite
-        # keeps the old foreign keys attached to the renamed tables during the copy.
-        connection.executescript("""
-            ALTER TABLE goal_assignments ADD COLUMN completion_granted_at TEXT;
-            ALTER TABLE goal_assignments ADD COLUMN completion_grant_id INTEGER
-                AS (CASE WHEN completion_granted_at IS NOT NULL THEN id END);
-            CREATE UNIQUE INDEX assignment_completion_grant
-                ON goal_assignments(goal_id, completion_grant_id);
-            ALTER TABLE completion_citations RENAME TO v7_completion_citations;
-            ALTER TABLE goal_events RENAME TO v7_goal_events;
-            DROP INDEX one_completion_per_revision;
-            DROP INDEX observation_retry;
-            DROP INDEX observations_by_goal;
-        """)
-        event_schema = snapshot.split("-- Begin goal event schema\n", 1)[1].split(
-            "-- End goal event schema\n", 1
-        )[0]
-        connection.executescript(event_schema)
-        connection.executescript("""
-            INSERT INTO goal_events (
-                id, goal_id, revision, kind, actor_user_id, message_role,
-                occurred_at, recorded_at, payload, retry_key, statement_evidence_id
-            )
-            SELECT id, goal_id, revision, kind, actor_user_id, message_role,
-                   occurred_at, recorded_at, payload, retry_key, statement_evidence_id
-            FROM v7_goal_events;
-            INSERT INTO completion_citations (goal_id, decision_id, evidence_id)
-            SELECT goal_id, decision_id, evidence_id FROM v7_completion_citations;
-            DELETE FROM sqlite_sequence WHERE name = 'goal_events';
-            UPDATE sqlite_sequence SET name = 'goal_events' WHERE name = 'v7_goal_events';
-            DROP TABLE v7_completion_citations;
-            DROP TABLE v7_goal_events;
-            PRAGMA user_version = 8;
-        """)
-
-    @staticmethod
-    def _upgrade_v8(connection: sqlite3.Connection, snapshot: str) -> None:
-        activity_schema = snapshot.split("-- Begin run activity schema\n", 1)[1].split(
-            "-- End run activity schema\n", 1
-        )[0]
-        connection.executescript(activity_schema)
-
-    @staticmethod
-    def _upgrade_v9(connection: sqlite3.Connection) -> None:
-        connection.executescript("""
-            ALTER TABLE run_calls ADD COLUMN resolved_goal_id INTEGER REFERENCES goals(id)
-                CHECK (resolved_goal_id IS NULL OR resolved_goal_id IS target_goal_id);
-
-            -- A run's bound grant proves its goal was already visible at startup.
-            UPDATE run_calls AS call SET resolved_goal_id = target_goal_id
-            WHERE EXISTS (
-                SELECT 1 FROM operator_runs AS run
-                JOIN goal_assignments AS grant ON grant.id = run.completion_grant_id
-                JOIN goals AS goal ON goal.id = grant.goal_id
-                WHERE run.id = call.run_id AND goal.id = call.target_goal_id
-                    AND goal.owner_user_id = run.owner_user_id AND goal.deleted_at IS NULL
-            );
-            DROP INDEX run_calls_by_target;
-            CREATE INDEX run_calls_by_resolved_goal ON run_calls(resolved_goal_id)
-                WHERE resolved_goal_id IS NOT NULL;
-        """)
-
-    @staticmethod
-    def _upgrade_v10(connection: sqlite3.Connection, snapshot: str) -> None:
-        definition_grant_schema = snapshot.split(
-            "-- Begin definition grant schema\n", 1
-        )[1].split("-- End definition grant schema\n", 1)[0]
-        connection.executescript(definition_grant_schema)
-        connection.executescript("""
-            ALTER TABLE operator_runs ADD COLUMN definition_grant_id INTEGER
-                REFERENCES goal_definition_grants(id)
-                CHECK (definition_grant_id IS NULL OR completion_grant_id IS NULL);
-        """)
-        WorkspaceDatabase._upgrade_run_calls(connection, snapshot, version=10)
-
-    @staticmethod
-    def _upgrade_run_calls(
-        connection: sqlite3.Connection, snapshot: str, *, version: int
-    ) -> None:
-        # Rebuild the calls and their dependent tables to widen the tool constraint.
-        run_call_schema = snapshot.split("-- Begin run call schema\n", 1)[1].split(
-            "-- End run call schema\n", 1
-        )[0]
-        if version >= 11:
-            connection.executescript("""
-                ALTER TABLE run_call_revisions RENAME TO previous_run_call_revisions;
-                DROP INDEX one_committing_call_per_revision;
-                DROP INDEX run_call_revisions_by_goal;
-            """)
-        connection.executescript("""
-            ALTER TABLE run_call_goals RENAME TO previous_run_call_goals;
-            ALTER TABLE run_calls RENAME TO previous_run_calls;
-            DROP INDEX run_calls_by_resolved_goal;
-            DROP INDEX run_call_goals_by_goal;
-        """)
-        connection.executescript(run_call_schema)
-        columns = (
-            "run_id, sequence, tool, target_goal_id, target_revision, started_at, "
-            "finished_at, outcome, committed_event_id, retrieved_event_id, resolved_goal_id"
-        )
-        if version >= 12:
-            columns += ", target_run_id, returned_history"
-        connection.execute(
-            f"INSERT INTO run_calls ({columns}) SELECT {columns} FROM previous_run_calls"
-        )
-        connection.executescript("""
-            INSERT INTO run_call_goals (
-                run_id, sequence, position, goal_id, revision, status, observation_ids,
-                decision_event_id, cited_evidence_ids, statement_evidence_id
-            ) SELECT run_id, sequence, position, goal_id, revision, status, observation_ids,
-                     decision_event_id, cited_evidence_ids, statement_evidence_id
-            FROM previous_run_call_goals;
-            DROP TABLE previous_run_call_goals;
-        """)
-        if version >= 11:
-            connection.executescript("""
-                INSERT INTO run_call_revisions (run_id, sequence, goal_id, revision, kind)
-                SELECT run_id, sequence, goal_id, revision, kind FROM previous_run_call_revisions;
-                DROP TABLE previous_run_call_revisions;
-            """)
-        connection.execute("DROP TABLE previous_run_calls")
+            connection.execute("BEGIN IMMEDIATE")
+            # Another process may have initialized the database while we waited.
+            if not connection.execute(has_schema).fetchone():
+                schema = (
+                    files("harness_api")
+                    .joinpath("schema.sql")
+                    .read_text(encoding="utf-8")
+                )
+                connection.executescript(schema)
+            connection.execute("COMMIT")
 
     @contextmanager
     def _connection(

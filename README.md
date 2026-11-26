@@ -62,14 +62,9 @@ deleted usernames and IDs stay reserved. See the [CLI command catalog](CATALOG.m
 
 `operator ask` starts the local `harness_mcp` server over stdio. The server
 uses `harness_api` to open `.harness/goals.sqlite3` in the working directory.
-On first run, the API creates the database from the full schema snapshot in
-`001_initial.sql`. Fresh workspaces use version 14 and support delegated subgoal creation.
-Existing version 13 workspaces retain their schema and prior operations.
-A direct MCP request for `create_subgoal` there returns a tool error before
-recording a call. The version 13 audit schema supports the earlier tool names. Workspaces
-from versions 7 through 12 follow their existing upgrade path to version 13. Existing assignments keep their responsible operator and require an
-explicit grant for completion authority. Opening a pre-v7 or unrecognized
-workspace returns an error and leaves the file intact.
+Harness initializes an empty database from the current [schema.sql](packages/harness_api/src/harness_api/schema.sql)
+and reuses it on later runs. For local development, start in a fresh directory
+after an incompatible schema change. Your previous database stays in its original directory.
 
 The schema gives each goal a stable ID, an owner, and a status. Goal revisions
 store titles and outcomes. Operator assignments have their own history, and
@@ -259,8 +254,6 @@ owner-visible goal at call start. Returned goals and committed or retrieved
 revision references also contribute to the timeline. A denied attempt appears
 in run history, and appears on the goal timeline if the target resolved at
 call start. The goal's definition, status, and decisions are preserved.
-For version 9 records, returned references and matching bound grants establish
-goal relationships. Older attempts with only a supplied ID remain in the run trace.
 The revision list remains available at `/goals/{goal_id}/history`.
 
 Follow a `run_id` to `GET /runs/{run_id}`. An advisory run has null operator and
@@ -338,7 +331,7 @@ through the CLI appear in the timeline with their original attribution.
 A read reference is saved before MCP hands the response to the transport.
 Receipt by the assistant can remain unknown if the connection drops. A revision
 or completion transaction saves its committing call even if the call remains
-`unfinished` after an interruption. Older decisions and direct owner completions
+`unfinished` after an interruption. Direct owner completions
 have `committing_call: null`. All MCP goal writes require a recorded run.
 
 The `harness_api` package follows MVC. `GoalAPI`, `SkillAPI`, `UserAPI`, and `OperatorAPI`

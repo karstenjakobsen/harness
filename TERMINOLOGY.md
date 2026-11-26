@@ -11,7 +11,7 @@
 | Delegation | The owner’s explicit grant of a specific action and scope to a registered operator. A top-level creation grant covers the owner’s workspace. A subgoal creation grant authorizes draft children of one parent, whose ID is the grant’s `goal_id`. A revision grant covers one goal. A completion grant uses the ID of the assignment created when the owner grants completion of one subgoal. |
 | Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
 | Workspace | The context for users, registered operators, goals, evidence, decisions and operator run history. Local commands use the current workspace database. HTTP requests use the workspace served by the selected API server. |
-| Schema snapshot | The complete SQLite schema and initial system user in `001_initial.sql`. SQLite’s `user_version` records the schema version installed in each workspace. |
+| Schema snapshot | The table definitions, constraints and initial system user used to initialize an empty local database. [Workspace schema](packages/harness_api/src/harness_api/schema.sql) |
 | Harness API | The workspace operations provided by the `harness_api` package. Its public Python interfaces are `UserAPI`, `OperatorAPI`, `GoalAPI` and `SkillAPI`. The HTTP, CLI and MCP adapters call the model operations they expose. |
 | HTTP API | The FastAPI interface for working with workspace users, registered operators and goals, and reading goal activity and operator runs. [Endpoint catalog](README.md#fastapi) |
 | `UserAPI` | The public Python interface for creating, reading, updating and deleting workspace user accounts. |

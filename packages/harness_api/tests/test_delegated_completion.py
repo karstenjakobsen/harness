@@ -1,6 +1,5 @@
 import sqlite3
 from contextlib import closing
-from pathlib import Path
 
 import pytest
 
@@ -25,121 +24,31 @@ def workspace(tmp_path):
     return path, api, operators, parent, child, operator_id, report
 
 
-@pytest.fixture
-def v7_workspace(tmp_path):
-    path = tmp_path / "goals.db"
-    snapshot = Path(__file__).with_name("fixtures") / "schema_v7.sql"
+def test_assignment_records_responsibility_without_granting_completion(workspace):
+    path, _, _, _, child, operator_id, report = workspace
     with closing(sqlite3.connect(path, autocommit=True)) as db:
-        db.executescript(snapshot.read_text(encoding="utf-8"))
-        db.executescript("""
-            INSERT INTO operators (name, owner_user_id) VALUES ('Reviewer', 1);
-            INSERT INTO goals (owner_user_id, status) VALUES (1, 'active');
-            INSERT INTO goals (owner_user_id, status, parent_goal_id)
-                VALUES (1, 'active', 1), (1, 'completed', 1);
-            INSERT INTO goal_revisions (goal_id, revision, title)
-                VALUES (1, 1, 'Parent'), (2, 1, 'Child'), (3, 1, 'Previous');
-            INSERT INTO goal_assignments (goal_id, operator_id, claimed_at)
-                VALUES (2, 1, '2025-01-01 10:00:00');
-            INSERT INTO goal_events (goal_id, revision, kind, actor_user_id, payload) VALUES
-                (2, 1, 'observation', 1, '{"evidence_kind":"owner_confirmation","evidence":"Verified"}'),
-                (3, 1, 'observation', 1, '{"evidence_kind":"owner_confirmation","evidence":"Prior report"}'),
-                (3, 1, 'observation', 1, '{"evidence_kind":"owner_confirmation","evidence":"Prior statement"}');
-            INSERT INTO goal_events (goal_id, revision, kind, actor_user_id, payload, statement_evidence_id)
-                VALUES (3, 1, 'completion', 1, '{}', 3);
-            INSERT INTO completion_citations VALUES (3, 4, 2);
-            UPDATE sqlite_sequence SET seq = 20 WHERE name = 'goal_events';
-        """)
-    return path
+        assignment = db.execute(
+            "INSERT INTO goal_assignments (goal_id, operator_id) VALUES (?, ?) RETURNING id",
+            (child, operator_id),
+        ).fetchone()[0]
 
-
-def test_upgrade_keeps_responsibility_and_owner_completion_without_grant(v7_workspace):
-    path = v7_workspace
-    UserAPI(path)
     api = GoalAPI(path)
-    history = api.get_goal_history(2)
-    assert api.get_goal(2)["operator"] == "Reviewer"
-    with closing(sqlite3.connect(path, autocommit=True)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (13,)
-        assert db.execute("""
-            SELECT id, goal_id, operator_id, claimed_at, released_at, completion_granted_at
-            FROM goal_assignments
-        """).fetchall() == [(1, 2, 1, "2025-01-01 10:00:00", None, None)]
-        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
-        db.execute("PRAGMA foreign_keys = ON")
-        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
-            db.execute("""
-                INSERT INTO goal_events (goal_id, revision, kind, payload, completion_grant_id)
-                VALUES (2, 1, 'completion', '{"rationale":"Verified"}', 1)
-            """)
-    assert api.get_goal(3)["completion"] == api.complete_goal(
-        3, 1, confirmation="Prior statement", evidence_ids=[2]
-    )
-
-    def complete(grant_id):
-        return api.complete_goal(
-            2,
-            1,
-            completion_grant_id=grant_id,
-            rationale="Verified by the owner",
-            evidence_ids=[1],
-        )
-
+    assert api.get_goal(child)["operator"] == "Reviewer"
+    history = api.get_goal_history(child)
+    request = {
+        "rationale": "Verified by the owner",
+        "evidence_ids": [report["evidence_id"]],
+    }
     with pytest.raises(GoalValidationError, match="grant"):
-        api.get_completion_grant(1)
+        api.start_run(completion_grant_id=assignment)
     with pytest.raises(GoalValidationError, match="grant"):
-        complete(1)
-    with pytest.raises(GoalValidationError, match="Definition grant"):
-        api.start_run(definition_grant_id=1)
-    advisory = api.start_run()["id"]
-    with pytest.raises(GoalValidationError, match="does not match"):
-        api.create_delegated_goal(
-            "Another",
-            retry_key="other",
-            call=api.start_tool_call(advisory, "create_goal"),
-        )
-    with pytest.raises(GoalValidationError, match="does not match"):
-        api.revise_delegated_goal(
-            2,
-            1,
-            title="Revised",
-            call=api.start_tool_call(
-                advisory,
-                "revise_goal",
-                target_goal_id=2,
-                target_revision=1,
-            ),
-        )
-    assert api.get_goal(2)["status"] == "active"
-    assert api.get_goal_history(2) == history
-
-    grant = api.grant_completion(2, 1)
-    assert grant["id"] > 1
-    decision = complete(grant["id"])
-    assert decision["event_id"] == 21
-    assert decision["recorded_by_operator_id"] == 1
-    assert api.get_goal_history(2)[0]["evidence"] == history[0]["evidence"]
-
-
-def test_failed_v7_upgrade_leaves_assignments_and_completion_history_intact(
-    v7_workspace,
-):
-    with closing(sqlite3.connect(v7_workspace, autocommit=True)) as db:
-        # Simulate a broken reference written outside Harness.
-        db.execute("""
-            INSERT INTO completion_citations (goal_id, decision_id, evidence_id)
-            VALUES (3, 4, 99)
-        """)
-        with pytest.raises(GoalStorageError):
-            GoalAPI(v7_workspace)
-        assert db.execute("PRAGMA user_version").fetchone() == (7,)
-        assert db.execute("SELECT * FROM goal_assignments").fetchall() == [
-            (1, 2, 1, "2025-01-01 10:00:00", None)
-        ]
-        assert db.execute(
-            "SELECT decision_id, evidence_id FROM completion_citations ORDER BY evidence_id"
-        ).fetchall() == [(4, 2), (4, 99)]
-        db.execute("DELETE FROM completion_citations WHERE evidence_id = 99")
-    assert GoalAPI(v7_workspace).get_goal(3)["completion"]["evidence_ids"] == [2]
+        api.complete_goal(child, 1, completion_grant_id=assignment, **request)
+    assert api.get_goal_history(child) == history
+    grant = api.grant_completion(child, operator_id)
+    assert grant["id"] != assignment
+    decision = api.complete_goal(child, 1, completion_grant_id=grant["id"], **request)
+    assert decision["recorded_by_operator_id"] == operator_id
+    assert decision["evidence_ids"] == [report["evidence_id"]]
 
 
 @pytest.mark.parametrize("withdraw_before_regrant", [True, False])

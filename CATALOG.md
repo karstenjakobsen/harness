@@ -95,7 +95,7 @@ Explicit creation and the other workspace commands print JSON.
 | `operator goal grant-completion GOAL_ID OPERATOR_ID` | Assigns the subgoal with explicit completion authority. Returns a fresh grant `id`, the goal ID and operator ID. |
 | `operator goal withdraw-completion GRANT_ID` | Closes that assignment and invalidates sessions bound to the grant. |
 | `operator goal grant-create OPERATOR_ID` | This operator may create top-level goals in this workspace until you withdraw the grant. Returns the grant ID and operator ID. |
-| `operator goal grant-subgoals PARENT_ID OPERATOR_ID` | Grants repeated creation of direct draft children under the specified parent. Returns the grant ID for `operator ask --definition-grant`. Requires a fresh version 14 workspace. |
+| `operator goal grant-subgoals PARENT_ID OPERATOR_ID` | Grants repeated creation of direct draft children under the specified parent. Returns the grant ID for `operator ask --definition-grant`. |
 | `operator goal grant-revision GOAL_ID OPERATOR_ID` | Grants revision of the specified goal. Returns the grant ID, goal ID and operator ID. |
 | `operator goal withdraw-definition-grant GRANT_ID` | Withdraws the definition grant and invalidates sessions bound to it. |
 

@@ -68,7 +68,6 @@ CREATE INDEX open_assignments_by_operator ON goal_assignments(operator_id)
 
 CREATE UNIQUE INDEX assignment_completion_grant ON goal_assignments(goal_id, completion_grant_id);
 
--- Begin goal event schema
 CREATE TABLE goal_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
     goal_id INTEGER NOT NULL REFERENCES goals(id),
@@ -116,13 +115,32 @@ CREATE TABLE completion_citations (
     FOREIGN KEY (goal_id, evidence_id) REFERENCES goal_events(goal_id, evidence_id),
     PRIMARY KEY (decision_id, evidence_id)
 ) STRICT, WITHOUT ROWID;
--- End goal event schema
 
--- Begin run activity schema
+CREATE TABLE goal_definition_grants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+    operator_id INTEGER NOT NULL REFERENCES operators(id),
+    goal_id INTEGER REFERENCES goals(id),
+    action TEXT NOT NULL CHECK (action IN ('create_goal', 'create_subgoal', 'revise_goal')),
+    granted_at TEXT NOT NULL,
+    withdrawn_at TEXT,
+    CHECK ((action = 'create_goal') = (goal_id IS NULL))
+) STRICT;
+
+CREATE TABLE goal_creation_retries (
+    grant_id INTEGER NOT NULL REFERENCES goal_definition_grants(id),
+    retry_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    goal_id INTEGER NOT NULL UNIQUE REFERENCES goals(id),
+    status TEXT NOT NULL CHECK (status IN ('draft', 'active')),
+    PRIMARY KEY (grant_id, retry_key)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE operator_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
     owner_user_id INTEGER NOT NULL REFERENCES users(id),
     completion_grant_id INTEGER REFERENCES goal_assignments(id),
+    definition_grant_id INTEGER REFERENCES goal_definition_grants(id)
+        CHECK (definition_grant_id IS NULL OR completion_grant_id IS NULL),
     started_at TEXT NOT NULL,
     finished_at TEXT,
     outcome TEXT NOT NULL DEFAULT 'unfinished'
@@ -133,10 +151,17 @@ CREATE TABLE operator_runs (
 CREATE TABLE run_calls (
     run_id INTEGER NOT NULL REFERENCES operator_runs(id),
     sequence INTEGER NOT NULL CHECK (sequence > 0),
-    tool TEXT NOT NULL CHECK (tool IN ('list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal')),
+    tool TEXT NOT NULL CHECK (tool IN (
+        'list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal', 'create_goal', 'create_subgoal', 'revise_goal',
+        'get_goal_activity', 'get_run', 'list_skills', 'read_skill'
+    )),
     -- Requested IDs can be invalid or belong to a different owner.
     target_goal_id INTEGER CHECK (target_goal_id > 0),
+    target_skill_id TEXT CHECK (target_skill_id IS NULL OR tool = 'read_skill'),
     target_revision INTEGER CHECK (target_revision > 0),
+    target_run_id INTEGER CHECK (
+        target_run_id IS NULL OR (target_run_id > 0 AND tool = 'get_run')
+    ),
     started_at TEXT NOT NULL,
     finished_at TEXT,
     outcome TEXT NOT NULL DEFAULT 'unfinished'
@@ -145,7 +170,10 @@ CREATE TABLE run_calls (
     retrieved_event_id INTEGER,
     resolved_goal_id INTEGER REFERENCES goals(id)
         CHECK (resolved_goal_id IS NULL OR resolved_goal_id IS target_goal_id),
+    returned_history TEXT CHECK (json_type(returned_history) = 'object'),
     CHECK ((outcome = 'unfinished') = (finished_at IS NULL)),
+    CHECK ((returned_history IS NOT NULL) =
+        (outcome = 'returned' AND tool IN ('get_goal_activity', 'get_run'))),
     CHECK ((committed_event_id IS NOT NULL) + (retrieved_event_id IS NOT NULL) <= 1),
     CHECK ((committed_event_id IS NULL AND retrieved_event_id IS NULL) OR
         (tool = 'complete_goal' AND target_goal_id IS NOT NULL)),
@@ -178,7 +206,52 @@ CREATE TABLE run_call_goals (
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX run_call_goals_by_goal ON run_call_goals(goal_id);
--- End run activity schema
+
+CREATE TABLE run_call_revisions (
+    run_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    goal_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('committed', 'retrieved', 'unchanged')),
+    PRIMARY KEY (run_id, sequence),
+    FOREIGN KEY (run_id, sequence) REFERENCES run_calls(run_id, sequence),
+    FOREIGN KEY (goal_id, revision) REFERENCES goal_revisions(goal_id, revision)
+) STRICT, WITHOUT ROWID;
+
+CREATE UNIQUE INDEX one_committing_call_per_revision
+    ON run_call_revisions(goal_id, revision) WHERE kind = 'committed';
+CREATE INDEX run_call_revisions_by_goal ON run_call_revisions(goal_id);
+
+CREATE TABLE skill_revisions (
+    id INTEGER PRIMARY KEY,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    skill_key TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    discoverable INTEGER NOT NULL DEFAULT 0 CHECK (discoverable IN (0, 1)),
+    UNIQUE (owner_user_id, skill_key, revision)
+) STRICT;
+
+CREATE UNIQUE INDEX current_skill ON skill_revisions(owner_user_id, skill_key)
+    WHERE discoverable = 1;
+
+CREATE TABLE run_call_skills (
+    run_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    snapshot_id INTEGER NOT NULL REFERENCES skill_revisions(id),
+    PRIMARY KEY (run_id, sequence, position),
+    UNIQUE (run_id, sequence, snapshot_id),
+    FOREIGN KEY (run_id, sequence) REFERENCES run_calls(run_id, sequence)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX calls_by_skill_revision ON run_call_skills(snapshot_id);
 
 INSERT INTO users (username, display_name) VALUES ('admin', 'admin');
 
@@ -186,4 +259,3 @@ CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
-PRAGMA user_version = 10;

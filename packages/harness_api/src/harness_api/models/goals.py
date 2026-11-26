@@ -14,7 +14,6 @@ from ..database import (
     DATABASE_PATH,
     WorkspaceDatabase,
     WorkspaceStorageError,
-    schema_version,
     utc_timestamp,
 )
 from . import GoalStatus
@@ -328,13 +327,6 @@ def _validate_definition(definition: GoalDefinition) -> None:
     ] not in get_args(AssessmentType.__value__):
         raise GoalValidationError(
             "Assessment type must be objective, judgment, or mixed."
-        )
-
-
-def _require_subgoal_schema(connection: sqlite3.Connection) -> None:
-    if schema_version(connection) < 14:
-        raise GoalValidationError(
-            "Delegated subgoal creation requires a fresh workspace with schema version 14."
         )
 
 
@@ -791,8 +783,6 @@ class GoalAPI(WorkspaceDatabase):
             run = run_row(connection, run_id, ADMIN_USER_ID)
             if run["outcome"] != "unfinished":
                 raise GoalConflictError(f"Run {run_id} already finished.")
-            if tool == "create_subgoal":
-                _require_subgoal_schema(connection)
             sequence = connection.execute(
                 "SELECT coalesce(max(sequence), 0) + 1 FROM run_calls WHERE run_id = ?",
                 (run_id,),
@@ -1138,8 +1128,6 @@ class GoalAPI(WorkspaceDatabase):
                 "Top-level creation takes no goal. Subgoal creation and revision require one goal."
             )
         with self._write() as connection:
-            if action == "create_subgoal":
-                _require_subgoal_schema(connection)
             if goal_id is not None:
                 self._get_goal(connection, goal_id)
             operator = connection.execute(

@@ -25,7 +25,7 @@ Use `OperatorAPI.unregister_operator(operator_id)` as the reference operation. C
 
 ## Schema changes
 
-Keep the complete fresh-workspace schema in [001_initial.sql](packages/harness_api/src/harness_api/migrations/001_initial.sql). Version 7 was the fresh-workspace baseline. Reject pre-v7 and populated unversioned workspaces without altering their contents. Implement supported upgrades such as v7 to v8 in [WorkspaceDatabase](packages/harness_api/src/harness_api/database.py). Test a fresh workspace and a populated prior version, including reopening the upgraded database and checking that records and relationships survive. Resume numbered migration files only when the project explicitly adopts them.
+The local POC uses one unversioned SQLite [schema.sql](packages/harness_api/src/harness_api/schema.sql). Edit it directly. Initialize empty databases from it and reopen populated databases as they are. After an incompatible schema change, start in a fresh workspace directory. Test first use and reopening with saved data.
 
 ## Tests and verification
 
@@ -33,7 +33,7 @@ Keep the complete fresh-workspace schema in [001_initial.sql](packages/harness_a
 - Prefer a temporary SQLite database, real files, and small fixtures. If a test needs a chain of mocks or knowledge of private calls, simplify the production code. Introduce a narrow seam only for the dependency that needs control, such as a clock or an external service.
 - Test domain rules once in the model. Use focused adapter tests for argument mapping, response shapes, error handling, and destination selection. Add an end-to-end test when the risk lies in how components connect.
 - For operator acceptance tests, populate an isolated workspace through the CLI. Check the tool call and structured result when retrieval matters. Check the facts in the final answer while allowing natural variations in wording.
-- For a new delegated action, test the authority boundary directly. Cover a valid grant, an out-of-scope target, a pre-delegation assignment after upgrade, and a grant withdrawn after session start. Regrant the action and verify the old session is still denied. Verify denied writes and failed transactions leave history intact. At MCP, check both tool discovery and direct invocation from an advisory session.
+- For a new delegated action, test the authority boundary directly. Cover a valid grant, an out-of-scope target, an assignment without a grant, and a grant withdrawn after session start. Regrant the action and verify the old session is still denied. Verify denied writes and failed transactions leave history intact. At MCP, check both tool discovery and direct invocation from an advisory session.
 - Test discretion with the same open-ended request before and after stronger evidence arrives. Inspect the live trace and saved state for both outcomes. The first turn may seek clarification while the goal stays open. The second can exercise the delegated action. [Slice 3 acceptance](docs/SLICE3_TODO.md#acceptance)
 - Run `make check` and `make test` for code changes. Run the signed-in `make test-live` when the slice affects live operator behavior. Report live results separately and identify any check that could not run.
 - After completing each `docs/SLICE<N>_TODO.md`, create and run `docs/SLICE<N>_EVIDENCE.sh` to verify the slice’s acceptance criteria. Capture the run’s output in `docs/SLICE<N>_EVIDENCE.md`, using the same slice number for all three files. [Slice 7 script](docs/SLICE7_EVIDENCE.sh) · [Captured output](docs/SLICE7_EVIDENCE.md)

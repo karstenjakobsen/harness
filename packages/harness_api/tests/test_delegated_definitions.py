@@ -1,7 +1,6 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from importlib.resources import files
 
 import pytest
 
@@ -452,24 +451,6 @@ def test_subgoal_authority_is_checked_by_model(planning):
         for r in [advisory, creation_run, run]
         for c in api.get_run(r)["calls"]
     )
-
-
-def test_v13_retains_previous_operations_and_identifies_fresh_workspace_requirement(
-    tmp_path,
-):
-    path = tmp_path / "legacy.db"
-    snapshot = files("harness_api").joinpath("migrations", "schema_v13.sql")
-    with closing(sqlite3.connect(path, autocommit=True)) as db:
-        db.executescript(snapshot.read_text(encoding="utf-8"))
-    api = GoalAPI(path)
-    owner = OperatorAPI(path).register_operator("Planner")
-    parent = api.create_goal("Review the plan")
-    assert api.grant_definition("revise_goal", owner["id"], goal_id=parent["id"])["id"]
-    with pytest.raises(GoalValidationError, match="fresh workspace"):
-        api.grant_definition("create_subgoal", owner["id"], goal_id=parent["id"])
-    assert GoalAPI(path).get_goal(parent["id"]) == parent
-    with closing(sqlite3.connect(path)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (13,)
 
 
 @pytest.mark.parametrize("retry", [False, True], ids=["commit", "retrieval"])

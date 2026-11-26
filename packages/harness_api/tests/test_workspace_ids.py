@@ -1,5 +1,7 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from threading import Barrier
 
 import pytest
 
@@ -53,27 +55,36 @@ def test_generated_keys_and_integer_foreign_keys(tmp_path):
     assert users.create_user("second")["id"] > user["id"]
 
 
-@pytest.mark.parametrize("version", [0, 1, 2, 3, 4, 5, 6, 15])
-def test_incompatible_workspace_requires_fresh_database(tmp_path, version):
+def test_concurrent_first_use_initializes_one_unversioned_workspace(tmp_path):
     path = tmp_path / "workspace.db"
-    with closing(sqlite3.connect(path, autocommit=True)) as db:
-        db.executescript("""
-            CREATE TABLE users(id TEXT PRIMARY KEY, display_name TEXT NOT NULL);
-            INSERT INTO users VALUES ('saved', 'Existing workspace');
-        """)
-        db.execute(f"PRAGMA user_version = {version}")
-        for api in (UserAPI, GoalAPI):
-            with pytest.raises(
-                WorkspaceStorageError, match=f"version {version}.*fresh database"
-            ):
-                api(path)
-        assert db.execute("PRAGMA user_version").fetchone() == (version,)
-        assert db.execute("SELECT * FROM users").fetchall() == [
-            ("saved", "Existing workspace")
-        ]
-        assert db.execute(
-            "SELECT name FROM sqlite_schema WHERE type = 'table'"
-        ).fetchall() == [("users",)]
+    ready = Barrier(4)
+
+    def create_user(number):
+        ready.wait(timeout=10)
+        return UserAPI(path).create_user(f"user-{number}")["id"]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        ids = list(pool.map(create_user, range(4)))
+
+    assert sorted(ids) == [2, 3, 4, 5]
+    assert {user["id"] for user in UserAPI(path).list_users()} == {1, *ids}
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("PRAGMA user_version").fetchone() == (0,)
+
+
+def test_failed_initialization_can_retry_from_an_empty_database(tmp_path, monkeypatch):
+    path = tmp_path / "workspace.db"
+    (tmp_path / "schema.sql").write_text(
+        "CREATE TABLE users(id INTEGER); INSERT INTO missing VALUES (1);"
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr("harness_api.database.files", lambda package: tmp_path)
+        with pytest.raises(WorkspaceStorageError):
+            UserAPI(path)
+
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("SELECT name FROM sqlite_schema").fetchall() == []
+    assert [user["username"] for user in UserAPI(path).list_users()] == ["admin"]
 
 
 def test_sqlite_enforces_the_goal_revision_and_event_roles_of_a_decision(tmp_path):

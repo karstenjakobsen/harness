@@ -5,7 +5,6 @@ import sys
 from contextlib import asynccontextmanager, closing
 from datetime import timedelta
 from hashlib import sha256
-from importlib.resources import files
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1139,30 +1138,3 @@ async def test_subgoal_discovery_tracks_withdrawal_and_regrant(tmp_path):
         rejected = await session.call_tool("create_subgoal", request)
         assert rejected.isError and "finished" in rejected.content[0].text
     assert len(api.get_run(fresh)["calls"]) == 1
-
-
-@pytest.mark.anyio
-async def test_legacy_run_reports_unsupported_subgoal_as_a_tool_error(tmp_path):
-    path = tmp_path / DATABASE_PATH
-    path.parent.mkdir(parents=True)
-    snapshot = files("harness_api").joinpath("migrations", "schema_v13.sql")
-    with closing(sqlite3.connect(path)) as db:
-        db.executescript(snapshot.read_text(encoding="utf-8"))
-    api = GoalAPI(path)
-    run = api.start_run()["id"]
-    async with workspace_client(tmp_path, "--run-id", str(run)) as session:
-        rejected = await session.call_tool(
-            "create_subgoal",
-            {
-                "parent_goal_id": 1,
-                "expected_parent_revision": 1,
-                "title": "Visit",
-                "success_criteria": "Owner confirms the visit",
-                "retry_key": "visit",
-            },
-        )
-        assert rejected.isError and "fresh workspace" in rejected.content[0].text
-        assert (await session.call_tool("list_goals", {})).structuredContent == {
-            "goals": []
-        }
-    assert [c["tool"] for c in api.get_run(run)["calls"]] == ["list_goals"]

@@ -153,10 +153,9 @@ def test_failed_assignment_release_leaves_operator_registered(tmp_path):
 
 def test_standalone_snapshot_initializes_workspace(tmp_path):
     path = tmp_path / "workspace.sqlite3"
-    snapshot = files("harness_api").joinpath("migrations", "001_initial.sql")
+    snapshot = files("harness_api").joinpath("schema.sql")
     with closing(sqlite3.connect(path, autocommit=True)) as connection:
         connection.executescript(snapshot.read_text(encoding="utf-8"))
-        assert connection.execute("PRAGMA user_version").fetchone() == (14,)
     assert [user["id"] for user in UserAPI(path).list_users()] == [1]
     assert OperatorAPI(path).register_operator("Coach")["owner_user_id"] == 1
     goals = GoalAPI(path)
