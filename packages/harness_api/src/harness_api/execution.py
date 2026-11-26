@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+WORKER_EXECUTABLE = "/usr/local/bin/harness-worker"
+
 
 @dataclass(frozen=True)
 class WorkloadSpec:

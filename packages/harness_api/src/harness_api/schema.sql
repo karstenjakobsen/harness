@@ -278,6 +278,7 @@ CREATE TABLE work_items (
     goal_id INTEGER NOT NULL,
     revision INTEGER NOT NULL,
     brief TEXT NOT NULL,
+    result_type TEXT NOT NULL DEFAULT 'fixture' CHECK (result_type IN ('fixture','text_file')),
     FOREIGN KEY (goal_id, revision) REFERENCES goal_revisions(goal_id, revision)
 ) STRICT;
 

@@ -1,19 +1,28 @@
 """Goal-scoped work, execution attempts and observations from their workers."""
 
 import json
+import secrets
 import sqlite3
-from typing import TypedDict
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Literal, TypedDict
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..database import ADMIN_USER_ID, WorkspaceDatabase, utc_timestamp
-from ..execution import ExecutionBackend, WorkloadSpec
-from . import GoalConflictError, GoalValidationError
+from ..database import ADMIN_USER_ID, utc_timestamp
+from ..execution import WORKER_EXECUTABLE, ExecutionBackend, WorkloadSpec
+from . import GoalConflictError, GoalValidationError, WorkspaceModel
 from .activity import CallReference, SkillReference
 from .evidence import add_evidence
 
-WORKER_EXECUTABLE = "/usr/local/bin/harness-worker"
+WorkResultType = Literal["fixture", "text_file"]
+
+
+class WorkTextFile(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    filename: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    content: str
 
 
 class WorkGrant(TypedDict):
@@ -204,7 +213,9 @@ def work_history(connection, goal_id):
                     "worker_call_id": result["call_id"],
                     "evidence_id": result["evidence_id"],
                     "recorded_at": result["recorded_at"],
-                    "fixture": json.loads(json.loads(result["payload"])["evidence"]),
+                    item["result_type"]: json.loads(
+                        json.loads(result["payload"])["evidence"]
+                    ),
                 }
             )
             item["attempts"].append(attempt)
@@ -221,7 +232,7 @@ def work_history(connection, goal_id):
     return items
 
 
-class WorkAPI(WorkspaceDatabase):
+class WorkAPI(WorkspaceModel):
     def configure_launcher(self, image: str, nomad_address: str, endpoint: str) -> None:
         WorkloadSpec(image, (WORKER_EXECUTABLE,))
         with self._write() as connection:
@@ -232,6 +243,12 @@ class WorkAPI(WorkspaceDatabase):
                 raise GoalConflictError(
                     "This workspace already has a different worker launcher."
                 )
+            # The database write lock serializes first use. Publish the host-only
+            # credential in one rename before the launcher configuration is visible.
+            if not self.owner_http_token_file.exists():
+                with NamedTemporaryFile(dir=self._path.parent, delete=False) as token:
+                    token.write(secrets.token_urlsafe(32).encode("ascii"))
+                Path(token.name).replace(self.owner_http_token_file)
             connection.execute(
                 "INSERT OR IGNORE INTO worker_configuration VALUES (1,?,?,?)",
                 (image, nomad_address, endpoint),
@@ -246,6 +263,7 @@ class WorkAPI(WorkspaceDatabase):
         retry_key: str,
         *,
         call: CallReference,
+        result_type: WorkResultType = "fixture",
     ) -> DelegatedWorkResult:
         _positive_id(goal_id, "Goal ID")
         _positive_id(expected_revision, "Goal revision")
@@ -265,8 +283,8 @@ class WorkAPI(WorkspaceDatabase):
                     "Start the workspace worker service before delegating work."
                 )
             image = config["image"]
-            if reason := _revision_reason(connection, goal_id, expected_revision):
-                raise GoalConflictError(reason)
+            if result_type not in ("fixture", "text_file"):
+                raise GoalValidationError("Unknown work result type.")
             snapshots = []
             for reference in skill_revisions:
                 if (
@@ -286,14 +304,23 @@ class WorkAPI(WorkspaceDatabase):
                     raise GoalValidationError("Choose distinct saved skill revisions.")
                 snapshots.append(row[0])
             request = _request(
-                ["delegate_work", goal_id, expected_revision, brief, sorted(snapshots)]
+                [
+                    "delegate_work",
+                    goal_id,
+                    expected_revision,
+                    brief,
+                    sorted(snapshots),
+                    result_type,
+                ]
             )
             previous = _previous(connection, grant["id"], retry_key, request)
             if previous:
                 return _link(connection, call, previous, "retrieved")
+            if reason := _revision_reason(connection, goal_id, expected_revision):
+                raise GoalConflictError(reason)
             item = connection.execute(
-                "INSERT INTO work_items(grant_id,goal_id,revision,brief) VALUES (?,?,?,?) RETURNING id",
-                (grant["id"], goal_id, expected_revision, brief),
+                "INSERT INTO work_items(grant_id,goal_id,revision,brief,result_type) VALUES (?,?,?,?,?) RETURNING id",
+                (grant["id"], goal_id, expected_revision, brief, result_type),
             ).fetchone()[0]
             connection.executemany(
                 "INSERT INTO work_skills VALUES (?,?)",
@@ -454,20 +481,25 @@ class WorkAPI(WorkspaceDatabase):
             self.dispatch(row["id"], backend)
 
     def can_read(self, job_id: str, allocation_id: str) -> bool:
+        return self.worker_result_type(job_id, allocation_id) is not None
+
+    def worker_result_type(
+        self, job_id: str, allocation_id: str
+    ) -> WorkResultType | None:
         with self._connection("ro") as connection:
             connection.execute("BEGIN")
             row = connection.execute(
-                """SELECT i.grant_id FROM work_attempts a JOIN work_items i ON i.id=a.work_item_id
+                """SELECT i.grant_id,i.result_type FROM work_attempts a JOIN work_items i ON i.id=a.work_item_id
                 WHERE a.job_id=? AND a.allocation_id=?""",
                 (job_id, allocation_id),
             ).fetchone()
             if row is None:
-                return False
+                return None
             try:
                 active_grant(connection, row[0])
             except GoalValidationError:
-                return False
-            return True
+                return None
+            return row["result_type"]
 
     def worker_call(
         self, job_id: str, allocation_id: str, tool: str, arguments: dict
@@ -499,7 +531,7 @@ class WorkAPI(WorkspaceDatabase):
                 result = self._perform(connection, row, tool, arguments, call_id)
             except (GoalValidationError, GoalConflictError, ValidationError) as error:
                 denied_error = (
-                    GoalValidationError("Invalid worker result fixture.")
+                    GoalValidationError(f"Invalid worker result {row['result_type']}.")
                     if isinstance(error, ValidationError)
                     else error
                 )
@@ -520,7 +552,7 @@ class WorkAPI(WorkspaceDatabase):
             "get_work_brief": set(),
             "list_skills": set(),
             "read_skill": {"id", "revision"},
-            "submit_work_result": {"fixture"},
+            "submit_work_result": {row["result_type"]},
         }
         if (
             tool not in fields
@@ -539,6 +571,7 @@ class WorkAPI(WorkspaceDatabase):
             )
             return {
                 "brief": row["brief"],
+                "result_type": row["result_type"],
                 "work_item_id": row["id"],
                 "attempt_id": row["attempt_id"],
                 "goal": goal,
@@ -578,10 +611,21 @@ class WorkAPI(WorkspaceDatabase):
                 ),
             )
             return result
-        fixture = WorkFixture.model_validate(arguments["fixture"]).model_dump()
-        contents = _request(fixture)
-        if len(contents.encode()) > 16384:
-            raise GoalValidationError("Fixture exceeds 16384 bytes.")
+        if row["result_type"] == "text_file":
+            file = WorkTextFile.model_validate(arguments["text_file"])
+            try:
+                size = len(file.content.encode("utf-8"))
+            except UnicodeEncodeError as error:
+                raise GoalValidationError("Content must be valid UTF-8.") from error
+            if size > 16384:
+                raise GoalValidationError("Text file exceeds 16384 bytes.")
+            contents = _request(file.model_dump())
+        else:
+            contents = _request(
+                WorkFixture.model_validate(arguments["fixture"]).model_dump()
+            )
+            if len(contents.encode()) > 16384:
+                raise GoalValidationError("Fixture exceeds 16384 bytes.")
         saved = connection.execute(
             """SELECT r.evidence_id,e.payload FROM work_results r JOIN goal_events e
               ON e.id=r.evidence_id WHERE r.attempt_id=?""",

@@ -17,12 +17,13 @@ from ..views.goals import (
     GoalView,
     ObservationRequest,
 )
+from . import owner_service
 
 router = APIRouter(prefix="/goals", tags=["goals"])
 
 
 def get_goal_api(request: Request) -> GoalAPI:
-    return request.app.state.goal_api
+    return owner_service(request, request.app.state.goal_api)
 
 
 GoalService = Annotated[GoalAPI, Depends(get_goal_api)]

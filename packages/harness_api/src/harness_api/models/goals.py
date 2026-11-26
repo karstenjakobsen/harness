@@ -20,11 +20,10 @@ from typing import (
 from ..database import (
     ADMIN_USER_ID,
     DATABASE_PATH,
-    WorkspaceDatabase,
     WorkspaceStorageError,
     utc_timestamp,
 )
-from . import GoalConflictError, GoalStatus, GoalValidationError
+from . import GoalConflictError, GoalStatus, GoalValidationError, WorkspaceModel
 from .activity import (
     ActivityReadEntry,
     ActivityReadReference,
@@ -446,7 +445,7 @@ def _activity_order(entry: ActivityEntry) -> tuple[datetime, int, int, int]:
             return timestamp, 3, entry["decision"]["event_id"], 0
 
 
-class GoalAPI(WorkspaceDatabase):
+class GoalAPI(WorkspaceModel):
     """Admin-scoped workspace operations. Local calls run as the workspace owner.
 
     Entry points without an established owner use local_owner=False for attribution.

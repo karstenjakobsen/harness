@@ -11,17 +11,18 @@ from ..views.accounts import (
     UserUpdateRequest,
     UserView,
 )
+from . import owner_service
 
 users_router = APIRouter(prefix="/users", tags=["users"])
 operators_router = APIRouter(prefix="/operators", tags=["operators"])
 
 
 def get_user_api(request: Request) -> UserAPI:
-    return request.app.state.user_api
+    return owner_service(request, request.app.state.user_api)
 
 
 def get_operator_api(request: Request) -> OperatorAPI:
-    return request.app.state.operator_api
+    return owner_service(request, request.app.state.operator_api)
 
 
 UserService = Annotated[UserAPI, Depends(get_user_api)]

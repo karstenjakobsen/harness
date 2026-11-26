@@ -17,7 +17,7 @@ from mcp.types import Tool, ToolAnnotations
 from starlette.datastructures import Headers
 from starlette.responses import PlainTextResponse
 
-from harness_api import GoalAPI, WorkerNomadBackend, WorkFixture
+from harness_api import GoalAPI, WorkerNomadBackend, WorkFixture, WorkTextFile
 
 LOG = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class WorkerServer(FastMCP):
             port=port,
             stateless_http=True,
             json_response=True,
-            max_request_body_size=65536,
+            max_request_body_size=131072,
             transport_security=TransportSecuritySettings(
                 allowed_hosts=[f"{host}:{port}"]
             ),
@@ -83,14 +83,17 @@ class WorkerServer(FastMCP):
         return request.scope["worker_binding"]
 
     async def list_tools(self):
-        if not await asyncio.to_thread(self.work.can_read, *self.binding()):
+        kind = await asyncio.to_thread(self.work.worker_result_type, *self.binding())
+        if kind is None:
             return []
-        fixture_schema = WorkFixture.model_json_schema()
-        definitions = fixture_schema.pop("$defs")
+        schema = (
+            WorkTextFile if kind == "text_file" else WorkFixture
+        ).model_json_schema()
+        definitions = schema.pop("$defs", {})
         submission = tool(
             "submit_work_result",
-            "Submit the prepared cases and whether a move generator actually ran.",
-            {"fixture": fixture_schema},
+            "Submit the deliverable for this attempt.",
+            {kind: schema},
         )
         submission.inputSchema["$defs"] = definitions
         return [

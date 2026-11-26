@@ -2,21 +2,24 @@
 
 import hashlib
 import json
+import os
 import re
 from http.client import HTTPException
+from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from .execution import ExecutionState, WorkloadSpec, WorkloadStatus
-from .models.work import WORKER_EXECUTABLE
+from .execution import WORKER_EXECUTABLE, ExecutionState, WorkloadSpec, WorkloadStatus
 
 
-def _allocation_guard() -> dict:
+def _allocation_guard(*, use_guard_volume: bool) -> dict:
     """Check Nomad's placement records before the workload is allowed to start."""
-    script = """\
-set -eu
-export NOMAD_ADDR=unix:///secrets/api.sock
+    script = "set -eu\nexport NOMAD_ADDR=unix:///secrets/api.sock\n"
+    if use_guard_volume:
+        script += 'export NOMAD_TOKEN="$(cat /secrets/guard-acl)"\n'
+    script += """\
 original=$(nomad alloc status -t '{{if not (or .PreviousAllocation .NextAllocation)}}{{.ID}}{{end}}' "$NOMAD_ALLOC_ID")
 placements=$(nomad job allocs -t '{{range .}}{{println .ID}}{{end}}' "$NOMAD_JOB_ID")
 if [ "$original" != "$NOMAD_ALLOC_ID" ] || [ "$placements" != "$NOMAD_ALLOC_ID" ]; then
@@ -24,17 +27,27 @@ if [ "$original" != "$NOMAD_ALLOC_ID" ] || [ "$placements" != "$NOMAD_ALLOC_ID" 
     exit 1
 fi
 """
-    return {
+    guard = {
         "Name": "guard",
         "Driver": "docker",
         "Lifecycle": {"Hook": "prestart", "Sidecar": False},
-        "Identity": {"Env": True},
         "Config": {
             "image": "hashicorp/nomad@sha256:1a9a0a9ab149a6dd05fd5219e11273a20507a108ab191db26360f0843359ddf7",
             "entrypoint": ["sh"],
             "args": ["-c", script],
         },
     }
+    if use_guard_volume:
+        guard["VolumeMounts"] = [
+            {
+                "Volume": "guard-acl",
+                "Destination": "/secrets/guard-acl",
+                "ReadOnly": True,
+            }
+        ]
+    else:
+        guard["Identity"] = {"Env": True}
+    return guard
 
 
 class WorkloadConflictError(ValueError):
@@ -57,6 +70,8 @@ class NomadBackend:
         ):
             raise ValueError("Supply the HTTP API address of a running Nomad cluster.")
         self.timeout = timeout
+        token_file = os.environ.get("HARNESS_NOMAD_TOKEN_FILE")
+        self._token = Path(token_file).read_text().strip() if token_file else None
 
     def _request(self, method, path, body=None):
         data = None if body is None else json.dumps(body).encode()
@@ -66,6 +81,8 @@ class NomadBackend:
             method=method,
             headers={"Content-Type": "application/json"},
         )
+        if self._token:
+            request.add_unredirected_header("X-Nomad-Token", self._token)
         with urlopen(request, timeout=self.timeout) as response:
             return json.load(response)
 
@@ -87,7 +104,7 @@ class NomadBackend:
             "harness_spec_sha256": hashlib.sha256(
                 json.dumps([spec.image, spec.argv]).encode()
             ).hexdigest(),
-            "harness_execution_version": "2",
+            "harness_execution_version": "3" if self._token else "2",
         }
 
     def _configure_job(self, job):
@@ -98,7 +115,7 @@ class NomadBackend:
         meta = self._metadata(run_id, spec)
         # The Docker driver's config is decoded as HCL templates even in JSON jobs.
         argv = [arg.replace("${", "$${").replace("%{", "%%{") for arg in spec.argv]
-        job = {
+        job: dict[str, Any] = {
             "ID": handle,
             "Name": handle,
             "Type": "batch",
@@ -116,7 +133,7 @@ class NomadBackend:
                         "Reconcile": "keep_original",
                     },
                     "Tasks": [
-                        _allocation_guard(),
+                        _allocation_guard(use_guard_volume=bool(self._token)),
                         {
                             "Name": "workload",
                             "Driver": "docker",
@@ -130,6 +147,16 @@ class NomadBackend:
                 }
             ],
         }
+        groups: list[dict[str, Any]] = job["TaskGroups"]
+        if self._token:
+            groups[0]["Volumes"] = {
+                "guard-acl": {
+                    "Name": "guard-acl",
+                    "Type": "host",
+                    "Source": "harness-guard",
+                    "ReadOnly": True,
+                }
+            }
         self._configure_job(job)
         try:
             self._request(
@@ -267,14 +294,16 @@ class WorkerNomadBackend(NomadBackend):
 
     def _configure_job(self, job):
         group = job["TaskGroups"][0]
-        group["Volumes"] = {
-            "codex-login": {
-                "Name": "codex-login",
-                "Type": "host",
-                "Source": "harness-codex-login",
-                "ReadOnly": True,
+        group.setdefault("Volumes", {}).update(
+            {
+                "codex-login": {
+                    "Name": "codex-login",
+                    "Type": "host",
+                    "Source": "harness-codex-login",
+                    "ReadOnly": True,
+                }
             }
-        }
+        )
         task = group["Tasks"][1]
         task["VolumeMounts"] = [
             {

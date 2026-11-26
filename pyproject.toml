@@ -7,6 +7,7 @@ members = ["packages/harness_api", "packages/harness_mcp", "packages/harness_ope
 [tool.pytest.ini_options]
 markers = [
     "live: requires a signed-in Codex session and the real MCP server",
+    "city_file: default single-worker live handoff",
     "nomad: runs workloads on the development Nomad cluster",
 ]
 testpaths = ["packages/harness_api/tests", "packages/harness_mcp/tests", "packages/harness_operator/tests"]

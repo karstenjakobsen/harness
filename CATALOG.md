@@ -130,22 +130,23 @@ operator goal create --title "Track food" --duration-days 7
 | Command | What it does |
 | --- | --- |
 | `make setup` | Installs the workspace packages into `.venv` using `uv`. |
-| `make api` | Starts FastAPI at `http://127.0.0.1:8000`. |
+| `make api` | Starts FastAPI at `http://127.0.0.1:8000`. In a worker-enabled workspace, send the host-only bearer credential from `.harness/goals.sqlite3.owner-token`. |
 | `make nomad-server` | Starts the checkout’s Nomad 2.1.1 Compose service and waits for its leader health check. |
 | `make nomad-agent` / `make nomad-up` | Starts or reuses the Compose server and systemd user client, then waits for the host client to report a healthy Docker driver. |
-| `make test-nomad` | Brings up the development cluster and checks workload exit, concurrent start, repeated stop, literal arguments and refusal of a second placement. Cleans up its test jobs. |
+| `make test-nomad` | Brings up the development cluster and checks workload exit, concurrent start, repeated stop, literal arguments, refusal of a second placement, and worker isolation from Nomad management and owner HTTP. Requires no model login. |
 | `make nomad-down` | Attempts client and Compose cleanup independently. Removes the checkout’s Compose server, network and data volume and reports a failure if it cannot verify the systemd client cleanup. |
 | `make worker-image` | Builds the worker with Codex 0.166.0, pushes to the local loopback registry and records its digest in `.harness/nomad/worker-image`. |
-| `uv run --package harness-mcp python -m harness_mcp.worker --image DIGEST --host BRIDGE_IP` | Serves worker-only MCP and dispatches saved attempts for the current workspace on port 14660. |
+| `uv run --package harness-mcp python -m harness_mcp.worker --image DIGEST --host BRIDGE_IP` | Serves worker-only MCP and dispatches saved attempts for the current workspace on port 14660. Set `HARNESS_NOMAD_TOKEN_FILE` to the checkout’s `.harness/nomad/acl/launcher` file. |
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
-| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, one operator inspecting another's revision, an advisory chess plan using versioned skills, delegated subgoal creation with HTTP attribution, and the Nomad worker handoff with fresh review. |
+| `make test-live` | Runs only the Danish-city handoff. One signed-in worker writes the file and a fresh owner process retrieves it over HTTP. |
+| `make test-live-extended` | Runs the opt-in signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, one operator inspecting another's revision, an advisory chess plan using versioned skills, delegated subgoal creation with HTTP attribution, and the Nomad worker handoff with fresh review. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |
 
 
 A work grant permits `delegate_work(goal_id, expected_revision, brief, skill_revisions,
-retry_key)` and `retry_work(work_item_id, expected_latest_attempt_id, retry_key)`.
+retry_key, result_type="fixture")` and `retry_work(work_item_id, expected_latest_attempt_id, retry_key)`.
 The Python response type `DelegatedWorkResult` identifies the work item, attempt
 and original committing run and call. The launcher selects the image and Codex
 login volume. Each key belongs to the
@@ -153,3 +154,9 @@ exact grant. Identical authorized replays retrieve the original attempt. A new
 retry decision must name the latest created attempt and the work item's goal
 revision must still be current. Goal history exposes declined launches and the
 reason, all attempts, skill reads and submitted fixtures. [Worker setup](README.md#delegate-work-to-a-local-nomad-worker)
+
+For a file handoff, select `result_type="text_file"`. The worker writes regular files in private
+scratch with `write_text_file(filename, content)` and submits the existing
+file with `submit_work_result(filename)`. The owner can retrieve its exact
+UTF-8 content (up to 16,384 bytes) and filename in the attempt result via
+`GET /goals/{id}/history?view=activity`.

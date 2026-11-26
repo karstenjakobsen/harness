@@ -15,7 +15,7 @@ services:
       - ./server.hcl:/config/server.hcl:ro
       - server-data:/nomad/data
     healthcheck:
-      test: ["CMD-SHELL", "nomad operator raft list-peers -address=http://127.0.0.1:14646 | grep -qw leader"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:14646/v1/status/leader | grep -q '14647'"]
       interval: 2s
       timeout: 2s
       retries: 25

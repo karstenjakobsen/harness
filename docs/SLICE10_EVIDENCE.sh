@@ -26,7 +26,7 @@ run_check 'Worker image build' make worker-image
 run_check 'Static checks' make check
 run_check 'Offline tests' make test
 run_check 'Real Nomad tests' make test-nomad
-run_check 'Signed-in acceptance' env PYTEST_ADDOPTS=-s make test-live
+run_check 'Signed-in acceptance' env PYTEST_ADDOPTS=-s make test-live-extended
 echo '## Interpretation'
 echo
 echo 'The Nomad transport fixture submits a controlled result through the real signed worker endpoint.'

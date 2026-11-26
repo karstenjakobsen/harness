@@ -5,6 +5,7 @@ Description=Harness Nomad development client (%i)
 Type=exec
 RuntimeDirectory=hn-%i
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 # %Y is the directory of this checkout's linked unit file.
 WorkingDirectory=%Y
 ExecStartPre=docker compose --project-name harness-nomad-%i --file compose.yaml cp server:/bin/nomad %t/hn-%i/nomad

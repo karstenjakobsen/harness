@@ -20,13 +20,16 @@ start_server() {
         compose logs --tail 20 server >&2
         return 1
     fi
+    python3 dev/nomad/acl.py
     compose exec -T server /bin/nomad version
 }
 
 ready_node() {
-    curl -fsS --max-time 2 "$server_addr/v1/nodes" |
-        jq -cer --arg name "$project-client" '
-            .[] | select(.Name == $name and .Status == "ready"
+    local node_file="$XDG_RUNTIME_DIR/hn-$key/data/client/client-id"
+    [[ -s $node_file ]] || return 1
+    curl -fsS --max-time 2 --header @<(sed 's/^/X-Nomad-Token: /' .harness/nomad/acl/launcher) "$server_addr/v1/nodes" |
+        jq -cer --arg name "$project-client" --arg id "$(<"$node_file")" '
+            .[] | select(.ID == $id and .Name == $name and .Status == "ready"
                 and .SchedulingEligibility == "eligible" and .Drivers.docker.Healthy)
             | {node: .ID, name: .Name, status: .Status, docker: .Drivers.docker.Healthy}'
 }
@@ -39,7 +42,13 @@ start_client() {
     fi
     [[ $unit_link -ef $source_unit ]] || fail "Another unit already owns $unit_link."
     systemctl --user daemon-reload
-    systemctl --user start "$unit"
+    local fingerprint
+    fingerprint=$(sha256sum dev/nomad/client.hcl .harness/nomad/worker.hcl "$source_unit")
+    if [[ -f .harness/nomad/client-config.sha && $(<.harness/nomad/client-config.sha) == "$fingerprint" ]]; then
+        systemctl --user start "$unit"
+    else
+        systemctl --user restart "$unit"
+    fi
     local deadline=$((SECONDS + 60))
     until ready_node; do
         if ! systemctl --user is-active --quiet "$unit" || (( SECONDS >= deadline )); then
@@ -47,6 +56,7 @@ start_client() {
         fi
         sleep 1
     done
+    echo "$fingerprint" > .harness/nomad/client-config.sha
 }
 
 client_session() {
@@ -79,6 +89,8 @@ down() {
         status=1
     fi
     compose --profile worker down --volumes || return 1
+    # This registry and its layers were removed with the project.
+    if [[ -f .harness/nomad/worker-image ]]; then unlink .harness/nomad/worker-image; fi
     return "$status"
 }
 

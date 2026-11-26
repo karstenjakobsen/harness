@@ -9,7 +9,8 @@ from typing import TypeGuard, cast
 
 import yaml
 
-from ..database import ADMIN_USER_ID, WorkspaceDatabase
+from ..database import ADMIN_USER_ID
+from . import WorkspaceModel
 from .activity import CallReference, SkillReference
 
 
@@ -146,7 +147,7 @@ def _revision_key(skill_id: str, revision: int) -> tuple[int, str, int]:
     return ADMIN_USER_ID, skill_id, revision
 
 
-class SkillAPI(WorkspaceDatabase):
+class SkillAPI(WorkspaceModel):
     def import_catalog(self, catalog: SkillCatalog) -> None:
         """Activate exactly this committed catalog, retaining every earlier revision."""
         if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", catalog.commit_sha):

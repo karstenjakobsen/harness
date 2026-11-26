@@ -1,7 +1,8 @@
 import sqlite3
 from typing import TypedDict
 
-from ..database import ADMIN_USER_ID, WorkspaceDatabase
+from ..database import ADMIN_USER_ID
+from . import WorkspaceModel
 
 
 class User(TypedDict):
@@ -76,7 +77,7 @@ def _get_user(connection: sqlite3.Connection, user_id: int) -> User:
     return _user(row)
 
 
-class UserAPI(WorkspaceDatabase):
+class UserAPI(WorkspaceModel):
     """Manage users in a workspace. Deleted user IDs remain reserved."""
 
     def create_user(self, username: str, display_name: str | None = None) -> User:
@@ -141,7 +142,7 @@ class UserAPI(WorkspaceDatabase):
             return _user(row)
 
 
-class OperatorAPI(WorkspaceDatabase):
+class OperatorAPI(WorkspaceModel):
     """Register workspace operators and retain their ownership and assignment history."""
 
     def register_operator(

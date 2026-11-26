@@ -9,13 +9,16 @@ codex --version
 log=$(mktemp)
 reply=$(mktemp)
 trap 'rm -f "$log" "$reply"' EXIT
-export HARNESS_WORKER_TOKEN="$(cat /secrets/harness.jwt)"
-if ! codex --ask-for-approval never exec --ephemeral --ignore-user-config --skip-git-repo-check --sandbox read-only --output-last-message "$reply" \
-    -c "mcp_servers.worker.url=\"$HARNESS_WORKER_MCP_URL\"" \
-    -c 'mcp_servers.worker.bearer_token_env_var="HARNESS_WORKER_TOKEN"' \
+scratch=$(mktemp -d)
+cd "$scratch"
+if ! codex --ask-for-approval never exec --json --ephemeral --ignore-user-config --skip-git-repo-check --sandbox read-only --output-last-message "$reply" \
+    -c 'mcp_servers.worker.command="node"' \
+    -c "mcp_servers.worker.args=[\"/usr/local/lib/worker-mcp.mjs\",\"$scratch\"]" \
+    -c 'mcp_servers.worker.env_vars=["HARNESS_WORKER_MCP_URL"]' \
     -c 'mcp_servers.worker.required=true' \
     -c 'mcp_servers.worker.tools.submit_work_result.approval_mode="approve"' \
-    'Read your work brief and pinned goal through worker MCP. Consult your assigned skill revisions. Perform the requested preparation and submit the actual cases using submit_work_result. Report executed=true only if the cases ran against a move generator.' > "$log" 2>&1; then
+    -c 'mcp_servers.worker.tools.write_text_file.approval_mode="approve"' \
+    'Read your work brief and expected result type through worker MCP. Consult assigned skills. Prepare and submit the requested deliverable. For a text file, write it in scratch with write_text_file and submit its filename. Report only work you actually performed.' > "$log" 2>&1; then
     if grep -q "usage limit" "$log"; then
         echo 'The local Codex account reached its usage limit. Retry after capacity is available.' >&2
         exit 1
@@ -24,4 +27,7 @@ if ! codex --ask-for-approval never exec --ephemeral --ignore-user-config --skip
     echo 'Worker Codex call failed. Verify the worker endpoint and refresh the local Codex login on the host if needed.' >&2
     exit 1
 fi
+sessions=$(grep -c '"type":"thread.started"' "$log" || true)
+echo "Worker Codex sessions started=$sessions"
+test "$sessions" = 1
 cat "$reply"

@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Barrier
 from time import monotonic, sleep
 from urllib.request import Request, urlopen
@@ -22,6 +23,10 @@ def api(address, path, *, method="GET", body=None):
         data=None if body is None else json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
     )
+    if path_to_token := os.environ.get("HARNESS_NOMAD_TOKEN_FILE"):
+        request.add_unredirected_header(
+            "X-Nomad-Token", Path(path_to_token).read_text().strip()
+        )
     with urlopen(request, timeout=5) as response:
         return response.read()
 

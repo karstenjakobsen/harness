@@ -4,13 +4,14 @@ from fastapi import APIRouter, Depends, Path, Request
 
 from ..models.skills import SkillAPI
 from ..views.skills import SkillReadingCallView, SkillRevisionView, SkillSummaryView
+from . import owner_service
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 Revision = Annotated[int, Path(gt=0, lt=2**63)]
 
 
 def get_skill_api(request: Request) -> SkillAPI:
-    return request.app.state.skill_api
+    return owner_service(request, request.app.state.skill_api)
 
 
 SkillService = Annotated[SkillAPI, Depends(get_skill_api)]

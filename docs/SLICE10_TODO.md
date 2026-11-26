@@ -17,7 +17,7 @@ An owner asks for two pinned-rook test cases. The operator chooses the brief and
 - [x] Check in a Dockerfile and worker executable. Pin the Codex CLI version and add a Make target that builds the image and yields a pullable `repository@sha256:…` reference for the local Nomad Docker driver. Configure that digest in Harness. Set the executable explicitly in `WorkloadSpec.argv[0]` because the adapter supplies the container entrypoint. The worker starts one noninteractive Codex session, reads its assignment through MCP, submits its result and exits. [Execution adapter](../packages/harness_api/src/harness_api/nomad.py)
 - [x] For trusted local development only, have the worker launcher select the configured digest and mount the developer’s `${CODEX_HOME:-$HOME/.codex}/auth.json` read-only into a private worker Codex home at runtime. The worker process can read the developer’s login credential and cannot persist a refreshed login to that file. Give it writable scratch space and its own MCP configuration. If the login is missing, expired or keyring-only, report how to sign in or refresh on the host. Keep credential contents out of the build context, image layers, job spec, logs and evidence. [Codex authentication and credential storage](https://learn.chatgpt.com/docs/auth#credential-storage)
 - [x] Reject image overrides and host paths at the delegation tool boundary. Attach the mount only when the trusted launcher dispatches an authorized worker attempt. Add a worker MCP endpoint reachable from the container in the selected workspace and configure it in the launcher.
-- [ ] Keep the owner HTTP endpoints, workspace database, Nomad management API and Docker socket outside the worker’s access.
+- [x] Keep the owner HTTP endpoints, workspace database, Nomad management API and Docker socket outside the worker’s access.
 
 ## Authorize inputs and record the result
 
@@ -59,14 +59,16 @@ operations off the worker MCP event loop. Shared call and delegation types now
 pass type checking. Test SQLite connections are closed explicitly and the live
 fixtures reserve their listening sockets and verify service shutdown.
 
-One original boundary remains open. With ACLs disabled, the development
+At the Slice 10 review, one original boundary remained open. With ACLs disabled, the development
 Nomad task API returned HTTP 200 for `GET /v1/jobs` with an invalid token.
 Docker Desktop also exposed the loopback-published server at
 `host.docker.internal:14646` to the worker without authentication. The passing
 MCP grant tests establish the Harness authorization contract. Cluster/API
 isolation requires further hardening.
 
-- [ ] From a real worker, deny management requests through both the task socket
+- [x] From a real worker, deny management requests through both the task socket
   and the host gateway. Cover invalid credentials and the worker's own
   credential, while keeping the trusted launcher and original-allocation guard
   working. Verify owner HTTP isolation as part of the infrastructure change.
+
+Slice 10a verified denied management reads through both routes, a successful owner HTTP read with the host credential, denial from the worker, and scoped worker MCP access. [Slice 10a isolation results](SLICE10A_EVIDENCE.md#real-nomad-isolation-and-execution)

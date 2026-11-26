@@ -27,7 +27,7 @@ same command. Use `make check` to run the Ruff lint and format checks.
 ## Local Nomad workloads
 
 Use a Linux host with Docker Compose, a running systemd user manager with access
-to the local Docker Engine, and `bash`, `flock`, `curl`, `jq`, GNU Make `python3` and
+to the local Docker Engine, and `bash`, `flock`, `curl`, `jq`, GNU Make, Node.js 24, `python3` and
 `uv`. Compose runs the digest-pinned Nomad **2.1.1** server, publishes its
 loopback ports, and checks for an elected leader. The systemd user service
 copies the matching binary from that container into its runtime directory and
@@ -48,7 +48,9 @@ After a server-only or partial startup, `make nomad-down` still attempts Compose
 cleanup if the systemd user session is unavailable. It returns a nonzero status
 and reports when client cleanup could not be verified.
 
-In Python, construct `NomadBackend(address)` with an already-running cluster.
+For the development cluster, set `HARNESS_NOMAD_TOKEN_FILE` to the absolute
+path of `.harness/nomad/acl/launcher` in this checkout before constructing
+`NomadBackend(address)` in Python. The Make targets set this automatically.
 `start(run_id, WorkloadSpec(image, argv))` accepts an image pinned by digest
 and a literal argument tuple starting with the executable. It returns a handle
 for one batch job. For example, `("printf", "%s", "${NOMAD_ALLOC_ID}")` prints
@@ -65,10 +67,11 @@ during that window. [Nomad disconnect policy](https://developer.hashicorp.com/no
 
 Before the workload starts, a pinned Nomad CLI prestart task checks its allocation
 and the job’s placements through the task-local API socket. Only a sole allocation
-with no predecessor or successor passes. A failed read also blocks launch. On a
-cluster with ACLs, the prestart task’s workload identity needs access to read its
-allocation and the job’s allocations. This check also covers a placement created
-after disconnect expiry or by a scheduler override.
+with no predecessor or successor passes. A failed read also blocks launch.
+The development server and client enforce Nomad ACLs. The prestart guard alone
+mounts a read-only token with the `read-job` capability. The trusted launcher
+uses a separate host-side token for registration, inspection and cleanup. The
+guard checks placements after disconnect expiry or a scheduler override.
 
 If multiple placements are observed, `inspect` returns `unknown`. It keeps
 the original `allocation_id` when identifiable and exposes additional IDs in
@@ -80,7 +83,7 @@ accepting evidence or authorizing an external action. [Execution contract and ac
 
 ## Delegate work to a local Nomad worker
 
-Use a fresh workspace after the Slice 10 schema change. Build the worker image
+Use a fresh workspace after the Slice 10a schema change. Build the worker image
 from the checkout, start the development cluster, then start worker MCP from the
 workspace containing the goals.
 
@@ -95,9 +98,8 @@ its pullable digest to `.harness/nomad/worker-image`. The image pins Codex CLI
 
 `make nomad-up` reads the calling shell's Codex home and configures its existing
 `auth.json` as a read-only host volume for the client. `CODEX_HOME` defaults to
-`~/.codex`. If the client was already
-running before the volume was configured, restart this checkout's client unit.
-Use `dev/nomad/cluster.sh identity` to find its unit name. For keyring-only or
+`~/.codex`. The startup script reloads the checkout’s client when its volume
+configuration changes. For keyring-only or
 missing credentials, sign in on the host with file-backed credential storage
 before starting the client. The worker process has access to this login.
 Codex may need to persist a refreshed login. Refresh the login on the host when
@@ -110,6 +112,7 @@ address. From the goal workspace run the following with that address and the
 built digest.
 
 ```sh
+export HARNESS_NOMAD_TOKEN_FILE=/path/to/harness/.harness/nomad/acl/launcher
 uv run --project /path/to/harness --package harness-mcp python -m harness_mcp.worker \
   --image '127.0.0.1:14661/harness-worker@sha256:…' --host 172.17.0.1
 ```
@@ -117,7 +120,17 @@ uv run --project /path/to/harness --package harness-mcp python -m harness_mcp.wo
 The worker-only endpoint is `http://172.17.0.1:14660/mcp`. It verifies the
 Nomad-signed identity for the worker task on each request. The owner HTTP service
 remains on loopback. The launcher supplies the fixed executable, image and login
-mount. An ordinary workload using the same digest receives no login mount.
+mount. In a worker-enabled workspace, owner HTTP requests also require the
+bearer credential in `.harness/goals.sqlite3.owner-token` (mode `0600`).
+Only the host receives this file. To read goal activity from the owner workspace
+with curl, load the header from standard input so the token stays out of argv.
+
+```sh
+sed 's/^/Authorization: Bearer /' .harness/goals.sqlite3.owner-token |
+  curl --fail --header @- 'http://127.0.0.1:8000/goals/1/history?view=activity'
+```
+
+An ordinary workload using the same digest receives no login mount.
 
 Create an active chess subgoal and a registered operator using the owner CLI.
 Use their returned integer IDs in these commands.
@@ -134,17 +147,26 @@ The operator chooses the brief and exact skill revisions. It can inspect the
 saved attempts and request a deliberate retry using the latest created attempt's
 ID. A changed goal revision declines a pending launch or new retry and records
 the reason. An already dispatched worker can still report against its pinned
-revision while its grant remains active.
+revision while its grant remains active. An identical delegation replay with the
+same active grant and retry key retrieves the original attempt even after a goal edit.
 
 A fresh advisory `operator ask` session can start from only the goal ID.
 `GET /goals/{id}/history?view=activity` returns the same `work_items`, with
 attempts, committing calls, allocations, skill reads and fixtures. Each fixture
-states whether the cases were executed. The goal remains open for review.
+states whether the cases were executed. For `result_type="text_file"`, the
+worker writes a file in private scratch and supplies only its filename to
+`submit_work_result`. The worker-side adapter reads the existing file, decodes
+its exact UTF-8 bytes and submits the result to Harness. Names start with an
+ASCII letter or digit and can contain up to 128 letters, digits, dots,
+underscores or hyphens. The content limit is 16,384 UTF-8 bytes. After exit,
+read `work_items[].attempts[].result.text_file` for the saved filename and
+content. The result includes the observation ID and committing worker call.
+The goal remains open for review.
 
 The workspace stores one launcher configuration for this slice. Start a fresh
 workspace to use a different worker digest or endpoint. The tests in
 `test_work_live.py` exercise the ordinary workload mount boundary and the
-signed-in handoff. Run `docs/SLICE10_EVIDENCE.sh` to capture the slice checks.
+signed-in handoff. Run `docs/SLICE10A_EVIDENCE.sh` to capture the slice checks.
 Use `make nomad-down` to remove this checkout's development cluster and registry.
 
 ## Sign in to Codex
@@ -464,8 +486,13 @@ commands call the same Python models. Start FastAPI and run the CLI from the
 same workspace to use the same SQLite database.
 
 Run `make test` for the offline suite and `make check` for lint and formatting.
-Run `make test-live` separately with Codex signed in. It populates temporary workspaces through
-the CLI, verifies MCP reads and delegated writes, and checks the replies. The
-shared history test follows a revision to its committing call and a separate
-operator's history read over HTTP.
-Test teardown removes the workspace and its database even if an assertion fails.
+Run `make test-live` for the Danish-city handoff. The public model delegates the
+brief, one worker starts Codex, and a fresh owner process verifies the file
+over HTTP after exit. The target reuses the cluster and image when ready. Aim for a warm handoff within 30 seconds on the development cluster.
+Use `make test-nomad` to verify scoped worker MCP access and denied Nomad
+management and owner HTTP reads without signing in to Codex.
+
+Run `make test-live-extended` when changing operator planning, delegation or
+evidence review. It includes the existing chess delegation, fresh review and
+incorrect-result scenarios. To inspect the disjoint test IDs without starting
+sessions, set `PYTEST_ADDOPTS="--collect-only -q"` on either live target.

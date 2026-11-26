@@ -43,6 +43,7 @@ from harness_api import (
     SkillRevision,
     SkillSummary,
     SkillValidationError,
+    WorkResultType,
     WorkspaceStorageError,
 )
 
@@ -513,6 +514,7 @@ def create_server(
             brief: str,
             skill_revisions: list[SkillSelection],
             retry_key: str,
+            result_type: WorkResultType = "fixture",
         ) -> DelegatedWorkResult:
             """Send a brief and exact skill revisions to a worker on the granted goal."""
             return api.work.delegate_work(
@@ -524,6 +526,7 @@ def create_server(
                     for skill in skill_revisions
                 ],
                 retry_key,
+                result_type=result_type,
                 call=server.audited_invocation().call,
             )
 

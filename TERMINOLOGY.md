@@ -131,3 +131,17 @@ For trusted local development, the worker launcher mounts the host's file-backed
 Codex login read-only into the configured digest-pinned image. That process can
 read the credential. Token refresh that needs to persist the file requires a
 host-side refresh. The Nomad workload identity authorizes access to Harness.
+
+The work item pins its expected result type for every attempt. A `fixture` is
+the existing structured chess result. A `text_file` carries a plain filename
+and at most 16,384 UTF-8 bytes. The worker-side submission tool reads a regular
+file from private scratch. Owner HTTP activity returns its filename and exact
+content alongside the submitting worker call and observation ID after exit.
+An identical delegation replay retrieves the original commit under its own
+audit entry after a goal edit while the exact grant is still active.
+
+In a worker-enabled workspace, the host holds an owner HTTP bearer credential
+beside the database. It authorizes transport access to workspace records.
+HTTP writes continue to record unknown individual caller attribution.
+
+The shared workspace model enforces owner HTTP access before controllers call account, goal or skill operations. The storage base manages SQLite connections and schema initialization.

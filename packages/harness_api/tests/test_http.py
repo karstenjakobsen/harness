@@ -309,3 +309,24 @@ def test_http_observations_keep_unknown_caller_and_completion_citations(tmp_path
         history = client.get(path + "/history").json()
         assert history == api.get_goal_history(goal["id"])
         assert history[-1]["completion"] == decision
+
+
+def test_configuring_a_worker_protects_the_running_owner_api(tmp_path):
+    db = tmp_path / "workspace.db"
+    api = GoalAPI(db)
+    image = "example/worker@sha256:" + "a" * 64
+    with TestClient(create_app(db)) as client:
+        assert client.get("/goals").status_code == 200
+        api.work.configure_launcher(image, "local", "http://worker/mcp")
+        token_file = api.work.owner_http_token_file
+        assert token_file.stat().st_mode & 0o777 == 0o600
+        token = token_file.read_text()
+        api.work.configure_launcher(image, "local", "http://worker/mcp")
+        assert token_file.read_text() == token
+        for path in ["/goals", "/users", "/operators", "/skills", "/runs/1"]:
+            assert client.get(path).status_code == 401
+        assert client.post("/goals", json={"title": "Unauthorized"}).status_code == 401
+        client.headers["Authorization"] = "Bearer " + token
+        assert client.get("/goals").json() == []
+        token_file.unlink()
+        assert client.get("/goals").status_code == 401

@@ -54,7 +54,14 @@ from .models.skills import (
     SkillSummary,
     SkillValidationError,
 )
-from .models.work import DelegatedWorkResult, WorkAPI, WorkFixture, WorkGrant
+from .models.work import (
+    DelegatedWorkResult,
+    WorkAPI,
+    WorkFixture,
+    WorkGrant,
+    WorkResultType,
+    WorkTextFile,
+)
 from .nomad import (
     NomadBackend,
     StartOutcomeUnknown,
@@ -119,6 +126,8 @@ __all__ = [
     "WorkAPI",
     "WorkFixture",
     "WorkGrant",
+    "WorkResultType",
+    "WorkTextFile",
     "WorkerNomadBackend",
     "WorkloadConflictError",
     "WorkloadSpec",

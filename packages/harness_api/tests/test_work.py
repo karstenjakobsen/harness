@@ -55,6 +55,41 @@ def delegate(api, goal, run, skills=()):
     )
 
 
+def test_lost_delegation_reply_after_revision_edit(workspace, tmp_path):
+    from harness_api import GoalValidationError
+
+    api, goal, run = workspace
+    original = delegate(api, goal, run)
+    api.update_goal(goal, title="New requirements")
+    api = GoalAPI(tmp_path / "goals.db")
+    assert delegate(api, goal, run) == original
+    calls = api.get_run(run)["calls"]
+    assert len(calls) == 2
+    assert calls[0]["sequence"] == original["sequence"]
+    assert calls[1]["sequence"] != original["sequence"]
+    assert [c["work"]["result"] for c in calls] == ["committed", "retrieved"]
+    assert calls[1]["work"]["attempt_id"] == original["attempt_id"]
+    for key, brief, reason in [
+        ("brief", "Different", "different work"),
+        ("new", "Prepare two cases", "revision 2"),
+    ]:
+        call = api.start_tool_call(
+            run, "delegate_work", target_goal_id=goal, target_revision=1
+        )
+        with pytest.raises(GoalConflictError, match=reason):
+            api.work.delegate_work(goal, 1, brief, [], key, call=call)
+    scheduler = Scheduler()
+    api.work.dispatch(original["attempt_id"], scheduler)
+    assert scheduler.registrations == []
+    (item,) = api.get_goal_activity(goal)["work_items"]
+    (attempt,) = item["attempts"]
+    assert attempt["state"] == "declined" and "revision 2" in attempt["reason"]
+    api.withdraw_work(item["grant_id"])
+    api.grant_work(goal, item["operator_id"])
+    with pytest.raises(GoalValidationError):
+        delegate(api, goal, run)
+
+
 def test_revision_edit_before_dispatch_and_retry(workspace):
     api, goal, run = workspace
     work = delegate(api, goal, run)
@@ -493,3 +528,74 @@ def test_submission_conflict_keeps_domain_error_and_audit(workspace):
     assert current["result"]["evidence_id"] == submitted["evidence_id"]
     assert current["worker_calls"][-1]["outcome"] == "denied"
     assert len(api.get_goal_progress(goal)["evidence"]) == 1
+
+
+def test_text_file_contract_reopen_and_replay(workspace, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from harness_api import GoalValidationError
+    from harness_api.app import create_app
+
+    api, goal, run = workspace
+
+    def assign(kind):
+        call = api.start_tool_call(
+            run, "delegate_work", target_goal_id=goal, target_revision=1
+        )
+        return api.work.delegate_work(
+            goal, 1, "Deliver a file", [], "key", call=call, result_type=kind
+        )
+
+    work = assign("text_file")
+    with pytest.raises(GoalConflictError, match="different work"):
+        assign("fixture")
+    api.work.dispatch(work["attempt_id"], Scheduler())
+    api.update_goal(goal, title="Updated")
+    attempt = history(api, goal)["attempts"][0]
+    binding = attempt["job_id"], attempt["allocation_id"]
+    assert (
+        api.work.worker_call(*binding, "get_work_brief", {})["result_type"]
+        == "text_file"
+    )
+
+    def submit(**payload):
+        return api.work.worker_call(*binding, "submit_work_result", payload)
+
+    file = {"filename": "roundtrip.txt", "content": "\ufeffø\r\n" + "ø" * 8188 + "x"}
+    assert len(file["content"].encode("utf-8")) == 16384
+    for bad in [
+        {"fixture": FIXTURE},
+        {"text_file": file | {"filename": "../file"}},
+        {"text_file": file | {"content": file["content"] + "x"}},
+        {"text_file": file | {"content": "\ud800"}},
+    ]:
+        with pytest.raises(GoalValidationError):
+            submit(**bad)
+    assert history(api, goal)["attempts"][0]["result"] is None
+    result = submit(text_file=file)
+    assert result["evidence_id"] == submit(text_file=file)["evidence_id"]
+    for changed in [{"filename": "again.txt"}, {"content": "different"}]:
+        with pytest.raises(GoalConflictError):
+            submit(text_file=file | changed)
+    with TestClient(create_app(tmp_path / "goals.db")) as client:
+        assert client.get(f"/goals/{goal}").status_code == 401
+        client.headers["Authorization"] = "Bearer wrong"
+        assert client.get(f"/goals/{goal}").status_code == 401
+        client.headers["Authorization"] = (
+            "Bearer " + api.work.owner_http_token_file.read_text()
+        )
+        (item,) = (
+            client.get(f"/goals/{goal}/history?view=activity")
+            .raise_for_status()
+            .json()["work_items"]
+        )
+    (attempt,) = item["attempts"]
+    assert item["revision"] == 1 and item["result_type"] == "text_file"
+    assert attempt["result"]["text_file"] == file
+    assert attempt["result"]["evidence_id"] == result["evidence_id"]
+    first = next(
+        call
+        for call in attempt["worker_calls"]
+        if call["tool"] == "submit_work_result" and call["outcome"] == "returned"
+    )
+    assert attempt["result"]["worker_call_id"] == first["id"]

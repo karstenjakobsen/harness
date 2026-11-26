@@ -19,3 +19,7 @@ client {
     "driver.allowlist" = "docker"
   }
 }
+
+acl {
+  enabled = true
+}
