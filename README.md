@@ -150,6 +150,11 @@ Owner-only launch credentials and JSONL traces remain under
 `.harness/worker-attempts/`; stopped containers remain available for reconciliation.
 Run a foreground launch again with the same ID to inspect a lost outcome.
 
+The pinned CLI uses Bubblewrap for `workspace-write`, so the Docker host must
+permit its nested user and mount namespaces. The launcher retains Docker's
+default security profiles. A host that blocks those namespaces cannot complete
+the worker acceptance tests without a separately authorized Docker policy change.
+
 ```sh
 make test-live           # One signed-in city worker; zero operator sessions.
 make test-live-extended  # Checkout proof plus the existing signed-in scenarios.

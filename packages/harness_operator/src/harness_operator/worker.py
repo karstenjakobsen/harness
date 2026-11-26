@@ -181,6 +181,14 @@ class DockerWorkerLauncher:
             if item["source_path"] is None:
                 scratch.mkdir(mode=0o700)
             else:
+                # Hooks and worktree callers can export repository selectors.
+                # The recorded source and scratch arguments must select Git's
+                # repository, index and object storage for every preparation call.
+                git_environment = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith("GIT_")
+                }
                 # No shared objects, credentials, or writable original checkout.
                 subprocess.run(
                     [
@@ -194,6 +202,7 @@ class DockerWorkerLauncher:
                     ],
                     check=True,
                     capture_output=True,
+                    env=git_environment,
                 )
                 subprocess.run(
                     [
@@ -208,6 +217,7 @@ class DockerWorkerLauncher:
                     ],
                     check=True,
                     capture_output=True,
+                    env=git_environment,
                 )
                 subprocess.run(
                     [
@@ -221,11 +231,13 @@ class DockerWorkerLauncher:
                     ],
                     check=True,
                     capture_output=True,
+                    env=git_environment,
                 )
                 subprocess.run(
                     ["git", "-C", str(scratch), "remote", "remove", "origin"],
                     check=True,
                     capture_output=True,
+                    env=git_environment,
                 )
             self.api.set_scratch(attempt["id"], scratch)
         elif Path(attempt["scratch_path"]) != scratch or not scratch.is_dir():
@@ -319,6 +331,7 @@ class DockerWorkerLauncher:
                         )
                     environment = os.environ.copy()
                     environment.update(
+                        CODEX_HOME="/harness-codex-home",
                         HARNESS_WORKER_TOKEN=credential,
                         HARNESS_WORKER_MCP_URL=f"http://127.0.0.1:{server.port}/mcp",
                         HARNESS_WORKER_ATTEMPT_ID=attempt_id,
@@ -336,11 +349,12 @@ class DockerWorkerLauncher:
                         "--mount",
                         f"type=bind,src={scratch},dst=/workspace",
                         "--mount",
-                        f"type=bind,src={auth},dst=/home/codex/.codex",
+                        f"type=bind,src={auth},dst=/harness-codex-home",
                     ]
                     for key, value in labels.items():
                         arguments += ["--label", f"{key}={value}"]
                     for key in (
+                        "CODEX_HOME",
                         "HARNESS_WORKER_TOKEN",
                         "HARNESS_WORKER_MCP_URL",
                         "HARNESS_WORKER_ATTEMPT_ID",

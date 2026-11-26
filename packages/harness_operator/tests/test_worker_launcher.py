@@ -343,6 +343,13 @@ def test_checkout_is_a_writable_isolated_copy_without_source_remote_credentials(
     assert arguments[arguments.index("--network") + 1] == "host"
     assert arguments[-4:] == [IMAGE, "run", "--attempt-id", "checkout"]
     assert engine.environment["HARNESS_WORKER_ATTEMPT_ID"] == "checkout"
+    assert engine.environment["CODEX_HOME"] == "/harness-codex-home"
+    assert any(argument.endswith(",dst=/harness-codex-home") for argument in arguments)
+    assert "CODEX_HOME" in [
+        arguments[index + 1]
+        for index, argument in enumerate(arguments)
+        if argument == "--env"
+    ]
 
 
 def test_process_failure_preserves_submission_and_leaves_goal_open(launch_workspace):
@@ -356,6 +363,74 @@ def test_process_failure_preserves_submission_and_leaves_goal_open(launch_worksp
     assert work.read_artifact_bytes(result["artifact"]["id"]) == b"Saved deliverable"
     goal = goals.get_goal(item["goal_id"])
     assert goal["status"] == "active" and goal["revision"] == 1
+
+
+@pytest.mark.parametrize("inherited_git_environment", ["directory", "all"])
+def test_checkout_ignores_inherited_git_environment_and_preserves_source(
+    launch_workspace, tmp_path, monkeypatch, inherited_git_environment
+):
+    work, _, original_item, auth = launch_workspace
+    source = tmp_path / "source"
+    source.mkdir()
+    git(source, "init", "-q")
+    (source / "value.py").write_text("VALUE = 1\n")
+    git(source, "add", "value.py")
+    git(
+        source,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "Initial",
+    )
+    base = git(source, "rev-parse", "HEAD")
+    git(source, "remote", "add", "origin", "https://owner@example.invalid/project")
+    head = (source / ".git/HEAD").read_bytes()
+    index = (source / ".git/index").read_bytes()
+    config = (source / ".git/config").read_bytes()
+    (source / "value.py").write_text("VALUE = 99  # Owner's uncommitted edit\n")
+    item = work.create_work_item(
+        original_item["goal_id"],
+        1,
+        original_item["operator_id"],
+        "Read the base checkout.",
+        source_path=source,
+        base_sha=base,
+    )
+    with monkeypatch.context() as inherited:
+        inherited.setenv("GIT_DIR", str(source / ".git"))
+        if inherited_git_environment == "all":
+            for key, value in {
+                "GIT_WORK_TREE": source,
+                "GIT_COMMON_DIR": source / ".git",
+                "GIT_INDEX_FILE": source / ".git/index",
+                "GIT_OBJECT_DIRECTORY": source / ".git/objects",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": source / ".git/objects",
+                "GIT_NAMESPACE": "inherited-hook",
+            }.items():
+                inherited.setenv(key, str(value))
+
+        def inspect_checkout(engine):
+            assert (engine.workspace / "value.py").read_text() == "VALUE = 1\n"
+            assert (engine.workspace / ".git/HEAD").read_text().strip() == base
+            submit_file(engine)
+
+        result = DockerWorkerLauncher(
+            work,
+            engine=FakeDockerEngine(on_wait=inspect_checkout),
+            auth_path=auth,
+        ).start(item["id"], "inherited-environment", IMAGE)
+    assert result["attempt"]["exit_code"] == 0
+    assert (source / ".git/HEAD").read_bytes() == head
+    assert (source / ".git/index").read_bytes() == index
+    assert (source / ".git/config").read_bytes() == config
+    assert (
+        source / "value.py"
+    ).read_text() == "VALUE = 99  # Owner's uncommitted edit\n"
 
 
 def test_missing_recorded_container_is_not_replaced(launch_workspace):

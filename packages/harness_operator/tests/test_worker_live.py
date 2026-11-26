@@ -266,6 +266,10 @@ def assert_handoff(owner_workspace, invoke, goal, item, attempt_id, image, outpu
     assert attempt["exit_code"] == 0
     assert attempt["scratch_cleaned_at"]
     assert not Path(attempt["scratch_path"]).exists()
+    assert artifact is not None, (
+        f"Worker exited with {attempt['exit_code']} without a saved artifact; "
+        f"inspect {record['trace_path']} and the adjacent codex.stderr.log."
+    )
     assert artifact["attempt_id"] == attempt_id
     assert artifact["work_item_id"] == item["id"]
     assert artifact["goal_id"] == goal["id"]
