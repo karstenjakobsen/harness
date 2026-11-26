@@ -13,7 +13,7 @@ from mcp.types import (
     Tool,
     ToolAnnotations,
 )
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from harness_api import (
     AssessmentType,
@@ -21,6 +21,7 @@ from harness_api import (
     DecisionReference,
     DelegatedCompletion,
     DelegatedGoalResult,
+    DelegatedWorkResult,
     GoalActivity,
     GoalAPI,
     GoalConflictError,
@@ -47,10 +48,23 @@ from harness_api import (
 
 PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
 HARNESS_TOOLS = get_args(HarnessTool.__value__)
-WRITE_TOOLS = ("complete_goal", "create_goal", "create_subgoal", "revise_goal")
+WRITE_TOOLS = (
+    "delegate_work",
+    "retry_work",
+    "complete_goal",
+    "create_goal",
+    "create_subgoal",
+    "revise_goal",
+)
 HISTORY_TOOLS = ("get_goal_activity", "get_run")
 SKILL_TOOLS = ("list_skills", "read_skill")
 RUN_REQUIRED_TOOLS = WRITE_TOOLS + HISTORY_TOOLS + SKILL_TOOLS
+
+
+class SkillSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: str
+    revision: PositiveInteger
 
 
 class SkillList(TypedDict):
@@ -140,6 +154,7 @@ class HarnessServer(FastMCP):
             arguments = request.params.arguments or {}
             goal_field = "parent_goal_id" if tool == "create_subgoal" else "goal_id"
             revision_field = {
+                "delegate_work": "expected_revision",
                 "create_subgoal": "expected_parent_revision",
                 "complete_goal": "expected_revision",
                 "revise_goal": "expected_revision",
@@ -160,6 +175,9 @@ class HarnessServer(FastMCP):
                     else None,
                     target_skill_id=skill_id
                     if tool == "read_skill" and isinstance(skill_id, str)
+                    else None,
+                    target_work_item_id=_positive_id(arguments.get("work_item_id"))
+                    if tool == "retry_work"
                     else None,
                     target_run_id=_positive_id(arguments.get("run_id"))
                     if tool == "get_run"
@@ -223,7 +241,8 @@ class HarnessServer(FastMCP):
         for tool in await super().list_tools():
             if tool.name in WRITE_TOOLS and (
                 self._run_id is None
-                or self._api.get_run_write_action(self._run_id) != tool.name
+                or self._api.get_run_write_action(self._run_id)
+                != ("delegate_work" if tool.name == "retry_work" else tool.name)
             ):
                 continue
             if tool.name in RUN_REQUIRED_TOOLS:
@@ -293,9 +312,12 @@ def create_server(
     *,
     run_id: int | None = None,
     definition_grant_id: int | None = None,
+    work_grant_id: int | None = None,
 ) -> FastMCP:
     if run_id is None and (
-        completion_grant_id is not None or definition_grant_id is not None
+        completion_grant_id is not None
+        or definition_grant_id is not None
+        or work_grant_id is not None
     ):
         raise GoalValidationError("A grant requires a recorded run.")
     if run_id is not None:
@@ -305,6 +327,7 @@ def create_server(
             run["completion_grant_id"] != completion_grant_id
             or (definition_grant["id"] if definition_grant else None)
             != definition_grant_id
+            or run.get("work_grant_id") != work_grant_id
             or run["outcome"] != "unfinished"
         ):
             raise GoalValidationError("The run does not match this session.")
@@ -479,6 +502,47 @@ def create_server(
                     **_definition_fields(invocation, locals()),
                 )
 
+    if work_grant_id is not None:
+
+        @server.tool(
+            annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True)
+        )
+        def delegate_work(
+            goal_id: PositiveInteger,
+            expected_revision: PositiveInteger,
+            brief: str,
+            skill_revisions: list[SkillSelection],
+            retry_key: str,
+        ) -> DelegatedWorkResult:
+            """Send a brief and exact skill revisions to a worker on the granted goal."""
+            return api.work.delegate_work(
+                goal_id,
+                expected_revision,
+                brief,
+                [
+                    SkillReference(id=skill.id, revision=skill.revision)
+                    for skill in skill_revisions
+                ],
+                retry_key,
+                call=server.audited_invocation().call,
+            )
+
+        @server.tool(
+            annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True)
+        )
+        def retry_work(
+            work_item_id: PositiveInteger,
+            expected_latest_attempt_id: PositiveInteger,
+            retry_key: str,
+        ) -> DelegatedWorkResult:
+            """Request another attempt against the work item you reviewed."""
+            return api.work.retry_work(
+                work_item_id,
+                expected_latest_attempt_id,
+                retry_key,
+                call=server.audited_invocation().call,
+            )
+
     return server
 
 
@@ -486,6 +550,7 @@ def main() -> None:
     parser = ArgumentParser(description="Serve workspace goals over MCP stdio.")
     parser.add_argument("--completion-grant", type=int)
     parser.add_argument("--definition-grant", type=int)
+    parser.add_argument("--work-grant", type=int)
     parser.add_argument("--run-id", type=int)
     args = parser.parse_args()
     try:
@@ -493,6 +558,7 @@ def main() -> None:
             GoalAPI(local_owner=False),
             args.completion_grant,
             run_id=args.run_id,
+            work_grant_id=args.work_grant,
             definition_grant_id=args.definition_grant,
         )
     except (GoalValidationError, RunNotFoundError, WorkspaceStorageError) as error:

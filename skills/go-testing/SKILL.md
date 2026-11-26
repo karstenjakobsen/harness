@@ -1,3 +1,8 @@
+---
+name: go-testing
+description: Turn rules and counterexamples into table-driven Go tests with explicit expected results.
+---
+
 # Test a move rule in Go
 
 Give each test case a position, side to move, candidate move and expected result. Pair a move that violates the rule with a nearby legal move from the same position. A legality check that always returns false should fail the second case.

@@ -39,8 +39,12 @@ def test_generated_keys_and_integer_foreign_keys(tmp_path):
                 # The requested target can be absent. The audit still keeps its ID.
                 assert types["target_run_id"] == "INTEGER"
                 keys.remove("target_run_id")
+                assert types["target_work_item_id"] == "INTEGER"
+                keys.remove("target_work_item_id")
                 assert types["target_skill_id"] == "TEXT"
                 keys.remove("target_skill_id")
+            if table in ("work_attempts", "worker_calls"):
+                keys -= {"job_id", "allocation_id", "execution_id"}
             assert keys <= {fk[3] for fk in foreign_keys}
         with pytest.raises(sqlite3.IntegrityError):
             db.execute("DELETE FROM users WHERE id = 1")

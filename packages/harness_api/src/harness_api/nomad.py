@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .execution import ExecutionState, WorkloadSpec, WorkloadStatus
+from .models.work import WORKER_EXECUTABLE
 
 
 def _allocation_guard() -> dict:
@@ -74,18 +75,27 @@ class NomadBackend:
             raise ValueError("Invalid Nomad workload handle.")
         return f"job/{handle}"
 
-    def start(self, run_id: str, spec: WorkloadSpec) -> str:
+    @staticmethod
+    def handle(run_id: str) -> str:
         if not isinstance(run_id, str) or not run_id.strip():
             raise ValueError("Supply a nonempty execution run ID.")
-        handle = "harness-" + hashlib.sha256(run_id.encode()).hexdigest()
-        fingerprint = hashlib.sha256(
-            json.dumps([spec.image, spec.argv]).encode()
-        ).hexdigest()
-        meta = {
+        return "harness-" + hashlib.sha256(run_id.encode()).hexdigest()
+
+    def _metadata(self, run_id, spec):
+        return {
             "harness_run_id": run_id,
-            "harness_spec_sha256": fingerprint,
+            "harness_spec_sha256": hashlib.sha256(
+                json.dumps([spec.image, spec.argv]).encode()
+            ).hexdigest(),
             "harness_execution_version": "2",
         }
+
+    def _configure_job(self, job):
+        """Ordinary workloads receive the image and argument vector only."""
+
+    def start(self, run_id: str, spec: WorkloadSpec) -> str:
+        handle = self.handle(run_id)
+        meta = self._metadata(run_id, spec)
         # The Docker driver's config is decoded as HCL templates even in JSON jobs.
         argv = [arg.replace("${", "$${").replace("%{", "%%{") for arg in spec.argv]
         job = {
@@ -120,6 +130,7 @@ class NomadBackend:
                 }
             ],
         }
+        self._configure_job(job)
         try:
             self._request(
                 "POST", "jobs", {"Job": job, "EnforceIndex": True, "JobModifyIndex": 0}
@@ -157,6 +168,25 @@ class NomadBackend:
     def inspect(self, handle: str) -> WorkloadStatus:
         path = self._job_path(handle)
         job = self._request("GET", path)
+        return self._inspect_allocations(handle, path, job)
+
+    def lookup(self, run_id: str, spec: WorkloadSpec) -> WorkloadStatus:
+        """Inspect a retained registration without submitting or recreating a job."""
+        handle = self.handle(run_id)
+        path = self._job_path(handle)
+        try:
+            job = self._request("GET", path)
+            if job.get("Meta") != self._metadata(run_id, spec):
+                raise WorkloadConflictError(
+                    "The retained job does not match the saved attempt."
+                )
+            return self._inspect_allocations(handle, path, job)
+        except (OSError, HTTPException) as error:
+            raise StartOutcomeUnknown(
+                "The retained Nomad job or allocations could not be read."
+            ) from error
+
+    def _inspect_allocations(self, handle, path, job):
         # The default includes replacements and excludes older, purged job instances.
         allocations = self._request("GET", f"{path}/allocations") or []
         state: ExecutionState
@@ -214,3 +244,53 @@ class NomadBackend:
         path = self._job_path(handle)
         if not self._request("GET", path)["Stop"]:
             self._request("DELETE", f"{path}?purge=false")
+
+
+class WorkerNomadBackend(NomadBackend):
+    """The trusted development launcher selects the one credential-bearing task."""
+
+    def __init__(self, address, image, endpoint):
+        super().__init__(address)
+        self.spec = WorkloadSpec(image, (WORKER_EXECUTABLE,))
+        self.endpoint = endpoint
+
+    def _metadata(self, run_id, spec):
+        if spec != self.spec:
+            raise WorkloadConflictError(
+                "The attempt requires a different worker image or executable."
+            )
+        return {
+            **super()._metadata(run_id, spec),
+            "harness_worker_endpoint": self.endpoint,
+            "harness_worker_profile": "1",
+        }
+
+    def _configure_job(self, job):
+        group = job["TaskGroups"][0]
+        group["Volumes"] = {
+            "codex-login": {
+                "Name": "codex-login",
+                "Type": "host",
+                "Source": "harness-codex-login",
+                "ReadOnly": True,
+            }
+        }
+        task = group["Tasks"][1]
+        task["VolumeMounts"] = [
+            {
+                "Volume": "codex-login",
+                "Destination": "/worker/.codex/auth.json",
+                "ReadOnly": True,
+            }
+        ]
+        task["Identities"] = [
+            {
+                "Name": "harness",
+                "Audience": ["harness-worker"],
+                "TTL": 3600_000_000_000,
+                "File": True,
+                "Filepath": "secrets/harness.jwt",
+            }
+        ]
+        task["Env"] = {"HARNESS_WORKER_MCP_URL": self.endpoint}
+        task["Resources"] = {"CPU": 500, "MemoryMB": 512}

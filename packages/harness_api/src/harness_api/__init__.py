@@ -54,7 +54,13 @@ from .models.skills import (
     SkillSummary,
     SkillValidationError,
 )
-from .nomad import NomadBackend, StartOutcomeUnknown, WorkloadConflictError
+from .models.work import DelegatedWorkResult, WorkAPI, WorkFixture, WorkGrant
+from .nomad import (
+    NomadBackend,
+    StartOutcomeUnknown,
+    WorkerNomadBackend,
+    WorkloadConflictError,
+)
 from .skill_source import read_skill_catalog
 
 __all__ = [
@@ -71,6 +77,7 @@ __all__ = [
     "DefinitionGrant",
     "DelegatedCompletion",
     "DelegatedGoalResult",
+    "DelegatedWorkResult",
     "Evidence",
     "ExecutionBackend",
     "Goal",
@@ -109,6 +116,10 @@ __all__ = [
     "StartOutcomeUnknown",
     "User",
     "UserAPI",
+    "WorkAPI",
+    "WorkFixture",
+    "WorkGrant",
+    "WorkerNomadBackend",
     "WorkloadConflictError",
     "WorkloadSpec",
     "WorkloadStatus",

@@ -3,7 +3,7 @@
 import json
 import sqlite3
 from collections import defaultdict
-from typing import Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from . import GoalStatus
 
@@ -15,6 +15,8 @@ type HarnessTool = Literal[
     "get_run",
     "list_skills",
     "read_skill",
+    "delegate_work",
+    "retry_work",
     "complete_goal",
     "create_goal",
     "create_subgoal",
@@ -69,7 +71,15 @@ class GoalResultReference(TypedDict):
     decision: DecisionReference | None
 
 
+class WorkCallReference(TypedDict):
+    target_work_item_id: int | None
+    attempt_id: int | None
+    result: Literal["committed", "retrieved"] | None
+    reason: str | None
+
+
 class CallReadReference(CallReference):
+    work: NotRequired[WorkCallReference | None]
     outcome: CallOutcome
     committed_event_id: int | None
     retrieved_event_id: int | None
@@ -116,6 +126,7 @@ type ActivityReadEntry = (
 
 
 class ActivityReadReference(TypedDict):
+    work_items: NotRequired[list[dict[str, Any]]]
     goal_id: int
     timeline: list[ActivityReadEntry]
 
@@ -137,6 +148,7 @@ class RunCall(CallReadReference):
 
 
 class OperatorRun(TypedDict):
+    work_grant_id: int | None
     id: int
     owner_user_id: int
     mode: Literal["advisory", "delegated"]
@@ -163,6 +175,7 @@ def run_read_reference(run: OperatorRun) -> RunReadReference:
                 retrieved_event_id=call["retrieved_event_id"],
                 committed_revision=call["committed_revision"],
                 retrieved_revision=call["retrieved_revision"],
+                **({"work": call["work"]} if call.get("work") is not None else {}),
             )
             for call in run["calls"]
         ],
@@ -177,10 +190,11 @@ class RunNotFoundError(LookupError):
 def run_row(connection: sqlite3.Connection, run_id: int, owner_id: int) -> sqlite3.Row:
     row = connection.execute(
         """
-        SELECT run.*, coalesce(grant.operator_id, definition.operator_id) AS operator_id,
-               grant.goal_id AS granted_goal_id, definition.action AS definition_action,
+        SELECT run.*, coalesce(grant.operator_id, definition.operator_id, w.operator_id) AS operator_id,
+               coalesce(grant.goal_id,w.goal_id) AS granted_goal_id, definition.action AS definition_action,
                definition.goal_id AS definition_goal_id
         FROM operator_runs AS run
+        LEFT JOIN work_grants w ON w.id=run.work_grant_id
         LEFT JOIN goal_assignments AS grant ON grant.id = run.completion_grant_id
         LEFT JOIN goal_definition_grants AS definition ON definition.id = run.definition_grant_id
         WHERE run.id = ? AND run.owner_user_id = ?
@@ -213,6 +227,7 @@ def run_record(row: sqlite3.Row, calls: list[RunCall]) -> OperatorRun:
         finished_at=row["finished_at"],
         outcome=row["outcome"],
         calls=calls,
+        work_grant_id=row["work_grant_id"],
     )
 
 
@@ -262,6 +277,16 @@ def run_calls(
         RunCall(
             run_id=row["run_id"],
             sequence=row["sequence"],
+            work=(
+                WorkCallReference(
+                    target_work_item_id=row["target_work_item_id"],
+                    attempt_id=row["attempt_id"],
+                    result=row["work_kind"],
+                    reason=row["work_reason"],
+                )
+                if row["tool"] in ("delegate_work", "retry_work")
+                else None
+            ),
             tool=row["tool"],
             target_goal_id=row["target_goal_id"],
             target_revision=row["target_revision"],
@@ -294,8 +319,8 @@ def run_calls(
         for row in connection.execute(
             """
             SELECT call.*, link.goal_id AS revision_goal_id, link.revision AS saved_revision,
-                   link.kind AS revision_kind
-            FROM run_calls AS call LEFT JOIN run_call_revisions AS link USING (run_id, sequence)
+                   link.kind AS revision_kind, w.attempt_id,w.kind AS work_kind
+            FROM run_calls AS call LEFT JOIN work_call_results w USING (run_id, sequence) LEFT JOIN run_call_revisions AS link USING (run_id, sequence)
             WHERE call.run_id = ? AND call.sequence IS NOT ? ORDER BY call.sequence
             """,
             (run_id, exclude_sequence),

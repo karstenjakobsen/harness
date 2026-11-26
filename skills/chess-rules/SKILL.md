@@ -1,3 +1,8 @@
+---
+name: chess-rules
+description: Plan legal move generation and verify check, pins and king safety.
+---
+
 # Verify king safety
 
 A sliding piece can move along an open rank or file, yet a move that exposes its own king to attack is illegal. When planning move generation, separate the piece’s movement rules from the king-safety check. Apply a candidate move to a copy of the position, then test whether the opponent attacks the moving side’s king.

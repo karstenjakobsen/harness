@@ -3,4 +3,4 @@ id: go-testing
 name: Go testing
 description: Turn rules and counterexamples into table-driven Go tests with explicit expected results.
 author: Harness
-revision: 1
+revision: 2

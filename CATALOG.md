@@ -13,6 +13,7 @@ Add `--help` to any command or group to see its options.
 | `operator register` | Starts Codex device sign-in and displays the verification link and one-time code. |
 | `operator ask [--trace-file PATH] [MESSAGE]` | Opens an advisory session and prints its reply. The optional flag saves the Codex event stream, including MCP calls, to a new file. |
 | `operator ask --completion-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can complete the specific subgoal covered by the active grant. |
+| `operator ask --work-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session with goal-scoped `delegate_work` and `retry_work` authority. |
 | `operator ask --definition-grant GRANT_ID [--trace-file PATH] [MESSAGE]` | Opens a session that can create top-level goals, create draft children under one parent, or revise one goal, according to its grant. |
 
 Today, `operator ask` can read goals with `list_goals`, `get_goal_tree` and
@@ -92,6 +93,8 @@ Explicit creation and the other workspace commands print JSON.
 | `operator goal observe GOAL_ID --retry-key KEY [--reported-date YYYY-MM-DD] EVIDENCE` | Records an owner confirmation or owner-supplied reference. Reuse the key for an identical retry. Use separate keys for intentional reports about the same day. |
 | `operator goal progress GOAL_ID [--revision N]` | Assesses the current or selected revision. `evidence` contains every record considered. `days` lists each qualifying date and its supporting IDs. |
 | `operator goal complete GOAL_ID --revision N EVIDENCE [--evidence-id ID]...` | Completes the current revision and cites the supplied records from this goal. Returns the saved decision on an identical retry. |
+| `operator goal grant-work GOAL_ID OPERATOR_ID` | Grants delegation of worker tasks on this goal. Returns the exact grant for `operator ask --work-grant`. |
+| `operator goal withdraw-work GRANT_ID` | Withdraws delegation and ends access for workers and operator sessions bound to this grant. |
 | `operator goal grant-completion GOAL_ID OPERATOR_ID` | Assigns the subgoal with explicit completion authority. Returns a fresh grant `id`, the goal ID and operator ID. |
 | `operator goal withdraw-completion GRANT_ID` | Closes that assignment and invalidates sessions bound to the grant. |
 | `operator goal grant-create OPERATOR_ID` | This operator may create top-level goals in this workspace until you withdraw the grant. Returns the grant ID and operator ID. |
@@ -132,8 +135,21 @@ operator goal create --title "Track food" --duration-days 7
 | `make nomad-agent` / `make nomad-up` | Starts or reuses the Compose server and systemd user client, then waits for the host client to report a healthy Docker driver. |
 | `make test-nomad` | Brings up the development cluster and checks workload exit, concurrent start, repeated stop, literal arguments and refusal of a second placement. Cleans up its test jobs. |
 | `make nomad-down` | Attempts client and Compose cleanup independently. Removes the checkout’s Compose server, network and data volume and reports a failure if it cannot verify the systemd client cleanup. |
+| `make worker-image` | Builds the worker with Codex 0.166.0, pushes to the local loopback registry and records its digest in `.harness/nomad/worker-image`. |
+| `uv run --package harness-mcp python -m harness_mcp.worker --image DIGEST --host BRIDGE_IP` | Serves worker-only MCP and dispatches saved attempts for the current workspace on port 14660. |
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
-| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, one operator inspecting another's revision, an advisory chess plan using versioned skills, and delegated subgoal creation with HTTP attribution. |
+| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, one operator inspecting another's revision, an advisory chess plan using versioned skills, delegated subgoal creation with HTTP attribution, and the Nomad worker handoff with fresh review. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |
+
+
+A work grant permits `delegate_work(goal_id, expected_revision, brief, skill_revisions,
+retry_key)` and `retry_work(work_item_id, expected_latest_attempt_id, retry_key)`.
+The Python response type `DelegatedWorkResult` identifies the work item, attempt
+and original committing run and call. The launcher selects the image and Codex
+login volume. Each key belongs to the
+exact grant. Identical authorized replays retrieve the original attempt. A new
+retry decision must name the latest created attempt and the work item's goal
+revision must still be current. Goal history exposes declined launches and the
+reason, all attempts, skill reads and submitted fixtures. [Worker setup](README.md#delegate-work-to-a-local-nomad-worker)

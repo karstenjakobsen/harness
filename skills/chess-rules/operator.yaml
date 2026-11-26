@@ -3,4 +3,4 @@ id: chess-rules
 name: Chess rules
 description: Plan legal move generation and verify check, pins and king safety.
 author: Harness
-revision: 1
+revision: 2

@@ -12,10 +12,11 @@
 | Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
 | Workspace | The context for users, registered operators, goals, evidence, decisions and operator run history. Local commands use the current workspace database. HTTP requests use the workspace served by the selected API server. |
 | Schema snapshot | The table definitions, constraints and initial system user used to initialize an empty local database. [Workspace schema](packages/harness_api/src/harness_api/schema.sql) |
-| Harness API | The workspace operations provided by the `harness_api` package. Its public Python interfaces are `UserAPI`, `OperatorAPI`, `GoalAPI` and `SkillAPI`. The HTTP, CLI and MCP adapters call the model operations they expose. |
+| Harness API | The workspace operations provided by the `harness_api` package. Its public Python interfaces are `UserAPI`, `OperatorAPI`, `GoalAPI`, `SkillAPI` and `WorkAPI`. The HTTP, CLI and MCP adapters call the model operations they expose. |
 | HTTP API | The FastAPI interface for working with workspace users, registered operators and goals, and reading goal activity and operator runs. [Endpoint catalog](README.md#fastapi) |
 | `UserAPI` | The public Python interface for creating, reading, updating and deleting workspace user accounts. |
 | `OperatorAPI` | The public Python interface for registering, reading and unregistering operators. Unregistering also releases the operator’s open goal assignments. |
+| `WorkAPI` | The public model for work items, execution claims, retry decisions and authenticated worker calls in the same workspace. |
 | `SkillAPI` | The public model for importing the workspace owner’s catalog, listing current skills, reading exact revisions and finding the run calls that read them. |
 | `GoalAPI` | The public Python interface for goals and revisions, observations, progress assessments, completion decisions and grants. It also records operator runs and MCP tool calls and serves goal activity and run history. |
 
@@ -85,3 +86,48 @@ Progress returns every record considered in `evidence`. Only the IDs grouped und
 An observation’s reported date may be at most the UTC calendar date when Harness records it. Earlier versions accepted advance reports. These retain their IDs, retry results and citations, and are excluded from the count even after the reported date passes.
 
 Historical progress applies the selected revision’s criteria to the evidence available at read time and returns the goal’s current lifecycle status. A completion with a confirmation or reference keeps its original `statement_evidence_id` and the additional citations in `evidence_ids`. A delegated completion stores `recorded_by_operator_id`, `completion_grant_id`, `rationale` and the exact cited IDs in `evidence_ids`.
+
+## Work delegated to a worker
+
+A **work grant** authorizes a registered operator to delegate tasks for one goal.
+The recorded operator run binds to that exact grant. Withdrawing it or
+unregistering the operator ends access, including for authenticated workers.
+Regranting authority creates a new grant.
+
+`DelegatedWorkResult` identifies the work item, execution attempt, goal revision
+and original committing operator call returned by a delegation or retry.
+
+A **work item** preserves the brief, goal ID and revision, and selected immutable
+skill revisions. An **attempt** is one deliberate launch against those inputs.
+Its execution ID, image digest, original allocation and observed exit remain
+inspectable from goal activity. The **latest attempt** is the latest created.
+An earlier attempt can report late while its original authority remains active.
+Its observation stays attached to that attempt.
+
+A pending attempt can be claimed once under the current goal revision and active
+grant. After the claim, recovery looks up the saved execution ID. An unresolved
+outcome stays `unknown`. An intentional retry checks the latest reviewed attempt
+and the current goal revision in the same transaction that creates the next
+attempt. Declined launches retain the reason in history. A goal edit during
+execution permits evidence against the original revision.
+
+A **worker call** records an invocation on the worker-only MCP endpoint. Harness
+verifies the Nomad signature, audience, task and allocation, then rechecks the
+grant and attempt inside every model operation. The first result observation
+and its committing worker call are saved together. Repeated identical
+submissions retrieve that observation. In Python, conflicting submissions raise
+`GoalConflictError` after the denied call is recorded. The `worker_result` source records
+`worker_attempt_id`, `worker_allocation_id` and `requesting_operator_id`.
+The user submitter and observer fields stay null because the reporting actor is
+the authenticated worker.
+
+A skill assignment records which instructions were available to an attempt.
+Worker `list_skills` records descriptions exposed, and `read_skill` records
+instructions exposed. The fixture reports whether its cases were executed.
+Execution success and the operator's assessment of the evidence are separate
+saved facts. A completion requires the existing completion grant and decision.
+
+For trusted local development, the worker launcher mounts the host's file-backed
+Codex login read-only into the configured digest-pinned image. That process can
+read the credential. Token refresh that needs to persist the file requires a
+host-side refresh. The Nomad workload identity authorizes access to Harness.

@@ -32,6 +32,7 @@ ready_node() {
 }
 
 start_client() {
+    python3 dev/nomad/client-config.py .harness/nomad/worker.hcl
     mkdir -p -- "$(dirname -- "$unit_link")"
     if [[ ! -e $unit_link && ! -L $unit_link ]]; then
         ln -s -- "$source_unit" "$unit_link"
@@ -77,12 +78,23 @@ down() {
         echo "Nomad client cleanup could not be verified. Retry from the checkout's systemd user session." >&2
         status=1
     fi
-    compose down --volumes || return 1
+    compose --profile worker down --volumes || return 1
     return "$status"
 }
 
 case "${1:-}" in
     server) start_server ;;
+    worker-image)
+        compose up -d worker-registry
+        image=127.0.0.1:14661/harness-worker
+        docker build --tag "$image:local" dev/worker
+        docker push "$image:local"
+        ref=$(docker image inspect "$image:local" | jq -er --arg prefix "$image@" '.[0].RepoDigests[] | select(startswith($prefix))')
+        test -n "$ref"
+        echo "$ref" > .harness/nomad/worker-image.tmp
+        mv .harness/nomad/worker-image.tmp .harness/nomad/worker-image
+        echo "$ref"
+        ;;
     agent) client_session && start_client ;;
     down) down ;;
     identity)
@@ -99,5 +111,5 @@ case "${1:-}" in
         [[ -z $container && -z $volumes && ! -L $unit_link ]] && ! systemctl --user is-active --quiet "$unit" ||
             fail "Cold-start evidence requires the project cluster and its data volume to be down."
         ;;
-    *) fail "Expected server, agent, down, identity, or assert-down." ;;
+    *) fail "Expected server, agent, worker-image, down, identity, or assert-down." ;;
 esac

@@ -12,16 +12,23 @@ type EvidenceSource = Literal[
     "owner_supplied_reference",
     "unattributed_confirmation",
     "unattributed_reference",
+    "worker_result",
 ]
 
 
 class EvidenceStatement(TypedDict):
+    worker_attempt_id: NotRequired[int]
+    worker_allocation_id: NotRequired[str]
+    requesting_operator_id: NotRequired[int]
     evidence_kind: EvidenceSource
     evidence: str
     reported_date: NotRequired[str | None]
 
 
 class Evidence(TypedDict):
+    worker_attempt_id: NotRequired[int]
+    worker_allocation_id: NotRequired[str]
+    requesting_operator_id: NotRequired[int]
     evidence_id: int
     goal_id: int
     revision: int
@@ -54,7 +61,7 @@ class DateAssessment(TypedDict):
 def evidence_record(row: sqlite3.Row) -> Evidence:
     payload: EvidenceStatement = json.loads(row["payload"])
     source = payload["evidence_kind"]
-    return Evidence(
+    record = Evidence(
         evidence_id=row["id"],
         goal_id=row["goal_id"],
         revision=row["revision"],
@@ -67,6 +74,13 @@ def evidence_record(row: sqlite3.Row) -> Evidence:
         observed_by=row["actor_user_id"] if source == "owner_confirmation" else None,
         requested_by=None,
     )
+    if source == "worker_result":
+        record.update(
+            worker_attempt_id=payload["worker_attempt_id"],
+            worker_allocation_id=payload["worker_allocation_id"],
+            requesting_operator_id=payload["requesting_operator_id"],
+        )
+    return record
 
 
 def goal_evidence(connection: sqlite3.Connection, goal_id: int) -> list[Evidence]:

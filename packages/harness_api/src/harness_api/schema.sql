@@ -135,7 +135,17 @@ CREATE TABLE goal_creation_retries (
     PRIMARY KEY (grant_id, retry_key)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE work_grants (
+    id INTEGER PRIMARY KEY,
+    operator_id INTEGER NOT NULL REFERENCES operators(id),
+    goal_id INTEGER NOT NULL REFERENCES goals(id),
+    granted_at TEXT NOT NULL,
+    withdrawn_at TEXT
+) STRICT;
+
 CREATE TABLE operator_runs (
+    work_grant_id INTEGER REFERENCES work_grants(id)
+      CHECK (work_grant_id IS NULL OR (completion_grant_id IS NULL AND definition_grant_id IS NULL)),
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
     owner_user_id INTEGER NOT NULL REFERENCES users(id),
     completion_grant_id INTEGER REFERENCES goal_assignments(id),
@@ -153,9 +163,11 @@ CREATE TABLE run_calls (
     sequence INTEGER NOT NULL CHECK (sequence > 0),
     tool TEXT NOT NULL CHECK (tool IN (
         'list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal', 'create_goal', 'create_subgoal', 'revise_goal',
-        'get_goal_activity', 'get_run', 'list_skills', 'read_skill'
+        'get_goal_activity', 'get_run', 'list_skills', 'read_skill', 'delegate_work', 'retry_work'
     )),
     -- Requested IDs can be invalid or belong to a different owner.
+    target_work_item_id INTEGER,
+    work_reason TEXT,
     target_goal_id INTEGER CHECK (target_goal_id > 0),
     target_skill_id TEXT CHECK (target_skill_id IS NULL OR tool = 'read_skill'),
     target_revision INTEGER CHECK (target_revision > 0),
@@ -259,3 +271,78 @@ CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1
 BEGIN
     SELECT RAISE(ABORT, 'The system user admin cannot be deleted.');
 END;
+
+CREATE TABLE work_items (
+    id INTEGER PRIMARY KEY,
+    grant_id INTEGER NOT NULL REFERENCES work_grants(id),
+    goal_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    brief TEXT NOT NULL,
+    FOREIGN KEY (goal_id, revision) REFERENCES goal_revisions(goal_id, revision)
+) STRICT;
+
+CREATE TABLE work_skills (
+    work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+    snapshot_id INTEGER NOT NULL REFERENCES skill_revisions(id),
+    PRIMARY KEY(work_item_id, snapshot_id)
+) STRICT;
+
+CREATE TABLE work_attempts (
+    id INTEGER PRIMARY KEY,
+    work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+    execution_id TEXT NOT NULL UNIQUE,
+    image TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    claimed_at TEXT,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending','running','succeeded','failed','stopped','unknown','declined')),
+    reason TEXT,
+    job_id TEXT UNIQUE,
+    allocation_id TEXT,
+    replacements TEXT NOT NULL DEFAULT '[]',
+    exit_code INTEGER
+) STRICT;
+
+CREATE INDEX attempts_by_item ON work_attempts(work_item_id, id);
+CREATE TABLE work_decisions (
+    grant_id INTEGER NOT NULL REFERENCES work_grants(id),
+    retry_key TEXT NOT NULL,
+    request TEXT NOT NULL,
+    attempt_id INTEGER UNIQUE NOT NULL REFERENCES work_attempts(id),
+    PRIMARY KEY(grant_id, retry_key)
+) STRICT;
+
+CREATE TABLE work_call_results (
+    run_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    attempt_id INTEGER NOT NULL REFERENCES work_attempts(id),
+    kind TEXT NOT NULL CHECK(kind IN ('committed','retrieved')),
+    PRIMARY KEY(run_id, sequence),
+    FOREIGN KEY(run_id, sequence) REFERENCES run_calls(run_id, sequence)
+) STRICT;
+CREATE UNIQUE INDEX work_committing_call ON work_call_results(attempt_id) WHERE kind='committed';
+
+CREATE TABLE worker_calls (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES work_attempts(id),
+    allocation_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('unfinished','returned','denied')),
+    reason TEXT,
+    returned_skills TEXT,
+    evidence_id INTEGER REFERENCES goal_events(id)
+) STRICT;
+
+CREATE TABLE work_results (
+    attempt_id INTEGER PRIMARY KEY REFERENCES work_attempts(id),
+    call_id INTEGER NOT NULL UNIQUE REFERENCES worker_calls(id),
+    evidence_id INTEGER NOT NULL UNIQUE REFERENCES goal_events(id)
+) STRICT;
+
+CREATE TABLE worker_configuration (
+    id INTEGER PRIMARY KEY CHECK (id=1),
+    image TEXT NOT NULL,
+    nomad_address TEXT NOT NULL,
+    endpoint TEXT NOT NULL
+) STRICT;

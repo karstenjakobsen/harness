@@ -27,7 +27,7 @@ same command. Use `make check` to run the Ruff lint and format checks.
 ## Local Nomad workloads
 
 Use a Linux host with Docker Compose, a running systemd user manager with access
-to the local Docker Engine, and `bash`, `flock`, `curl`, `jq`, GNU Make and
+to the local Docker Engine, and `bash`, `flock`, `curl`, `jq`, GNU Make `python3` and
 `uv`. Compose runs the digest-pinned Nomad **2.1.1** server, publishes its
 loopback ports, and checks for an elected leader. The systemd user service
 copies the matching binary from that container into its runtime directory and
@@ -77,6 +77,75 @@ A start retry against a job registered before the prestart check raises
 `WorkloadConflictError`. Capture outcomes before Nomad collects their records.
 Slice 10 worker grants must bind to the authenticated original allocation before
 accepting evidence or authorizing an external action. [Execution contract and acceptance](docs/SLICE9_TODO.md)
+
+## Delegate work to a local Nomad worker
+
+Use a fresh workspace after the Slice 10 schema change. Build the worker image
+from the checkout, start the development cluster, then start worker MCP from the
+workspace containing the goals.
+
+```sh
+make worker-image
+make nomad-up
+```
+
+The build starts a registry bound to `127.0.0.1:14661`, pushes the image and writes
+its pullable digest to `.harness/nomad/worker-image`. The image pins Codex CLI
+`0.166.0`. Nomad's Docker driver pulls that digest from the same local host.
+
+`make nomad-up` reads the calling shell's Codex home and configures its existing
+`auth.json` as a read-only host volume for the client. `CODEX_HOME` defaults to
+`~/.codex`. If the client was already
+running before the volume was configured, restart this checkout's client unit.
+Use `dev/nomad/cluster.sh identity` to find its unit name. For keyring-only or
+missing credentials, sign in on the host with file-backed credential storage
+before starting the client. The worker process has access to this login.
+Codex may need to persist a refreshed login. Refresh the login on the host when
+needed. [Codex credential storage](https://learn.chatgpt.com/docs/auth#credential-storage)
+
+Use a local interface address reachable from Docker containers. On native Linux
+this is normally the bridge gateway from `docker network inspect bridge`. With
+Docker Desktop, use the local interface address or a configured forwarding
+address. From the goal workspace run the following with that address and the
+built digest.
+
+```sh
+uv run --project /path/to/harness --package harness-mcp python -m harness_mcp.worker \
+  --image '127.0.0.1:14661/harness-worker@sha256:…' --host 172.17.0.1
+```
+
+The worker-only endpoint is `http://172.17.0.1:14660/mcp`. It verifies the
+Nomad-signed identity for the worker task on each request. The owner HTTP service
+remains on loopback. The launcher supplies the fixed executable, image and login
+mount. An ordinary workload using the same digest receives no login mount.
+
+Create an active chess subgoal and a registered operator using the owner CLI.
+Use their returned integer IDs in these commands.
+
+```sh
+operator goal grant-work GOAL_ID OPERATOR_ID
+operator ask --work-grant GRANT_ID \
+  "Prepare two test cases showing when a pinned rook may move and when it may not."
+operator goal history GOAL_ID
+operator goal withdraw-work GRANT_ID
+```
+
+The operator chooses the brief and exact skill revisions. It can inspect the
+saved attempts and request a deliberate retry using the latest created attempt's
+ID. A changed goal revision declines a pending launch or new retry and records
+the reason. An already dispatched worker can still report against its pinned
+revision while its grant remains active.
+
+A fresh advisory `operator ask` session can start from only the goal ID.
+`GET /goals/{id}/history?view=activity` returns the same `work_items`, with
+attempts, committing calls, allocations, skill reads and fixtures. Each fixture
+states whether the cases were executed. The goal remains open for review.
+
+The workspace stores one launcher configuration for this slice. Start a fresh
+workspace to use a different worker digest or endpoint. The tests in
+`test_work_live.py` exercise the ordinary workload mount boundary and the
+signed-in handoff. Run `docs/SLICE10_EVIDENCE.sh` to capture the slice checks.
+Use `make nomad-down` to remove this checkout's development cluster and registry.
 
 ## Sign in to Codex
 
@@ -388,7 +457,7 @@ or completion transaction saves its committing call even if the call remains
 `unfinished` after an interruption. Direct owner completions
 have `committing_call: null`. All MCP goal writes require a recorded run.
 
-The `harness_api` package follows MVC. `GoalAPI`, `SkillAPI`, `UserAPI`, and `OperatorAPI`
+The `harness_api` package follows MVC. `GoalAPI`, `SkillAPI`, `WorkAPI`, `UserAPI`, and `OperatorAPI`
 own persistence and business rules. The FastAPI controllers call those models,
 and Pydantic views define the HTTP request and response bodies. Workspace CLI
 commands call the same Python models. Start FastAPI and run the CLI from the

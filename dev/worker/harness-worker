@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+if ! test -r "$CODEX_HOME/auth.json" || ! codex login status >/dev/null 2>&1; then
+    echo 'Sign in to Codex on the Nomad client host using file-backed credential storage.' >&2
+    exit 1
+fi
+codex --version
+# The named identity has the worker MCP audience.
+log=$(mktemp)
+reply=$(mktemp)
+trap 'rm -f "$log" "$reply"' EXIT
+export HARNESS_WORKER_TOKEN="$(cat /secrets/harness.jwt)"
+if ! codex --ask-for-approval never exec --ephemeral --ignore-user-config --skip-git-repo-check --sandbox read-only --output-last-message "$reply" \
+    -c "mcp_servers.worker.url=\"$HARNESS_WORKER_MCP_URL\"" \
+    -c 'mcp_servers.worker.bearer_token_env_var="HARNESS_WORKER_TOKEN"' \
+    -c 'mcp_servers.worker.required=true' \
+    -c 'mcp_servers.worker.tools.submit_work_result.approval_mode="approve"' \
+    'Read your work brief and pinned goal through worker MCP. Consult your assigned skill revisions. Perform the requested preparation and submit the actual cases using submit_work_result. Report executed=true only if the cases ran against a move generator.' > "$log" 2>&1; then
+    if grep -q "usage limit" "$log"; then
+        echo 'The local Codex account reached its usage limit. Retry after capacity is available.' >&2
+        exit 1
+    fi
+    grep -E '^ERROR:|^Error:' "$log" | tail -n 5 >&2 || true
+    echo 'Worker Codex call failed. Verify the worker endpoint and refresh the local Codex login on the host if needed.' >&2
+    exit 1
+fi
+cat "$reply"

@@ -319,6 +319,12 @@ def assert_day_pass_answer(reply):
         text,
     ):
         return
+    if re.search(
+        r"\b(?:a )?(?:direct )?confirmation from you that (?:the |your )?"
+        r"(?:gym )?membership is active would satisfy (?:the )?(?:saved )?criteria\b",
+        text,
+    ):
+        return
     joining = r"join(?:ed|ing)?|sign(?:ed)? up|a (?:gym )?member"
     membership = rf"\b(?:membership|{joining})\b"
     missing = (
@@ -355,6 +361,7 @@ def assert_day_pass_answer(reply):
     [
         "The day pass doesn't establish that your membership is active.",
         "An active gym membership is still unconfirmed.",
+        "A direct confirmation from you that the membership is active would satisfy the saved criteria.",
         "Your membership hasn’t been confirmed.",
         "The receipt shows a visit, not an active membership.",
         "What's missing is your confirmation of an active membership.",

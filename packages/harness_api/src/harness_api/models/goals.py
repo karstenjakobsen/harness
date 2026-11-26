@@ -7,7 +7,15 @@ from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
 from types import EllipsisType
-from typing import Literal, TypedDict, Unpack, cast, get_args, overload
+from typing import (
+    Any,
+    Literal,
+    TypedDict,
+    Unpack,
+    cast,
+    get_args,
+    overload,
+)
 
 from ..database import (
     ADMIN_USER_ID,
@@ -16,7 +24,7 @@ from ..database import (
     WorkspaceStorageError,
     utc_timestamp,
 )
-from . import GoalStatus
+from . import GoalConflictError, GoalStatus, GoalValidationError
 from .activity import (
     ActivityReadEntry,
     ActivityReadReference,
@@ -53,6 +61,7 @@ from .evidence import (
     is_future_dated,
 )
 from .skills import SkillAPI, is_skill_id
+from .work import WorkAPI, WorkGrant, active_grant, work_history
 
 EVENT_COLUMNS = """
 event.id AS event_id, event.actor_user_id, event.recorded_at, statement.payload, event.statement_evidence_id,
@@ -218,6 +227,7 @@ type ActivityEntry = (
 
 
 class GoalActivity(TypedDict):
+    work_items: list[dict[str, Any]]
     goal_id: int
     timeline: list[ActivityEntry]
 
@@ -252,20 +262,15 @@ def _activity_read_reference(activity: GoalActivity) -> ActivityReadReference:
             )
         else:
             timeline.append(entry)
-    return ActivityReadReference(goal_id=activity["goal_id"], timeline=timeline)
+    reference = ActivityReadReference(goal_id=activity["goal_id"], timeline=timeline)
+    if activity["work_items"]:
+        reference["work_items"] = activity["work_items"]
+    return reference
 
 
 class GoalNotFoundError(LookupError):
     def __init__(self, goal_id: int) -> None:
         super().__init__(f"Goal {goal_id} was not found.")
-
-
-class GoalValidationError(ValueError):
-    """A goal operation received invalid input."""
-
-
-class GoalConflictError(RuntimeError):
-    """The current state of a goal prevents the requested operation."""
 
 
 class GoalStorageError(WorkspaceStorageError):
@@ -462,6 +467,41 @@ class GoalAPI(WorkspaceDatabase):
         """The skill catalog in the same workspace as these runs."""
         return SkillAPI(self._path)
 
+    @cached_property
+    def work(self) -> WorkAPI:
+        return WorkAPI(self._path)
+
+    def grant_work(self, goal_id: int, operator_id: int) -> WorkGrant:
+        _validate_positive_integer(operator_id, "Operator ID")
+        if self._submitter != ADMIN_USER_ID:
+            raise GoalValidationError("Only the local owner can grant work.")
+        with self._write() as db:
+            self._get_goal(db, goal_id)
+            if not db.execute(
+                "SELECT 1 FROM operators WHERE id=? AND owner_user_id=? AND deleted_at IS NULL",
+                (operator_id, ADMIN_USER_ID),
+            ).fetchone():
+                raise GoalValidationError(
+                    "Choose a registered operator in this workspace."
+                )
+            grant_id = db.execute(
+                "INSERT INTO work_grants(goal_id,operator_id,granted_at) VALUES (?,?,?) RETURNING id",
+                (goal_id, operator_id, utc_timestamp()),
+            ).fetchone()[0]
+            return active_grant(db, grant_id)
+
+    def withdraw_work(self, grant_id: int) -> WorkGrant:
+        _validate_positive_integer(grant_id, "Grant ID")
+        if self._submitter != ADMIN_USER_ID:
+            raise GoalValidationError("Only the local owner can withdraw work.")
+        with self._write() as db:
+            grant = active_grant(db, grant_id)
+            db.execute(
+                "UPDATE work_grants SET withdrawn_at=? WHERE id=?",
+                (utc_timestamp(), grant_id),
+            )
+            return grant
+
     def save_goal_draft(
         self,
         original_message: str,
@@ -616,6 +656,7 @@ class GoalAPI(WorkspaceDatabase):
             connection.execute("BEGIN")
             self._get_goal(connection, goal_id)
             self._validate_history_call(connection, call, "get_goal_activity", goal_id)
+            items = work_history(connection, goal_id)
             history = self._goal_history(connection, goal_id)
             calls, decision_commits, revision_commits = related_calls(
                 connection, goal_id, ADMIN_USER_ID, call
@@ -653,33 +694,46 @@ class GoalAPI(WorkspaceDatabase):
                         committing_call=decision_commits.get(decision["event_id"]),
                     )
                 )
-        return GoalActivity(
-            goal_id=goal_id, timeline=sorted(timeline, key=_activity_order)
+        result = GoalActivity(
+            goal_id=goal_id,
+            timeline=sorted(timeline, key=_activity_order),
+            work_items=items,
         )
+        return result
 
     def start_run(
         self,
         completion_grant_id: int | None = None,
         *,
         definition_grant_id: int | None = None,
+        work_grant_id: int | None = None,
     ) -> OperatorRun:
         """Bind a run to the exact grant checked at launch, or start an advisory run."""
-        if completion_grant_id is not None and definition_grant_id is not None:
+        if (
+            sum(
+                g is not None
+                for g in (completion_grant_id, definition_grant_id, work_grant_id)
+            )
+            > 1
+        ):
             raise GoalValidationError("A run can bind only one grant.")
         with self._write() as connection:
             if completion_grant_id is not None:
                 self._get_completion_grant(connection, completion_grant_id)
             if definition_grant_id is not None:
                 self._get_definition_grant(connection, definition_grant_id)
+            if work_grant_id is not None:
+                active_grant(connection, work_grant_id)
             run_id = connection.execute(
                 """
-                INSERT INTO operator_runs (owner_user_id, completion_grant_id, definition_grant_id, started_at)
-                VALUES (?, ?, ?, ?) RETURNING id
+                INSERT INTO operator_runs (owner_user_id, completion_grant_id, definition_grant_id, work_grant_id, started_at)
+                VALUES (?, ?, ?, ?, ?) RETURNING id
                 """,
                 (
                     ADMIN_USER_ID,
                     completion_grant_id,
                     definition_grant_id,
+                    work_grant_id,
                     utc_timestamp(),
                 ),
             ).fetchone()[0]
@@ -702,7 +756,7 @@ class GoalAPI(WorkspaceDatabase):
 
     def get_run_write_action(
         self, run_id: int
-    ) -> DefinitionAction | Literal["complete_goal"] | None:
+    ) -> DefinitionAction | Literal["complete_goal", "delegate_work"] | None:
         """Return the action the run's exact grant currently authorizes."""
         _validate_positive_integer(run_id, "Run ID")
         with self._connection("ro") as connection:
@@ -711,6 +765,9 @@ class GoalAPI(WorkspaceDatabase):
             if run["outcome"] != "unfinished":
                 return None
             try:
+                if run["work_grant_id"] is not None:
+                    active_grant(connection, run["work_grant_id"])
+                    return "delegate_work"
                 if run["definition_grant_id"] is not None:
                     return self._get_definition_grant(
                         connection, run["definition_grant_id"]
@@ -759,6 +816,7 @@ class GoalAPI(WorkspaceDatabase):
         target_revision: int | None = None,
         target_run_id: int | None = None,
         target_skill_id: str | None = None,
+        target_work_item_id: int | None = None,
     ) -> CallReference:
         _validate_positive_integer(run_id, "Run ID")
         if tool not in get_args(HarnessTool.__value__):
@@ -783,6 +841,14 @@ class GoalAPI(WorkspaceDatabase):
             run = run_row(connection, run_id, ADMIN_USER_ID)
             if run["outcome"] != "unfinished":
                 raise GoalConflictError(f"Run {run_id} already finished.")
+            if target_work_item_id is not None:
+                if tool != "retry_work":
+                    raise GoalValidationError("Only retry_work targets a work item.")
+                item = connection.execute(
+                    "SELECT goal_id FROM work_items w JOIN goals g ON g.id=w.goal_id WHERE w.id=? AND g.owner_user_id=?",
+                    (target_work_item_id, ADMIN_USER_ID),
+                ).fetchone()
+                target_goal_id = item[0] if item else None
             sequence = connection.execute(
                 "SELECT coalesce(max(sequence), 0) + 1 FROM run_calls WHERE run_id = ?",
                 (run_id,),
@@ -790,10 +856,10 @@ class GoalAPI(WorkspaceDatabase):
             connection.execute(
                 """
                 INSERT INTO run_calls (
-                    run_id, sequence, tool, target_goal_id, target_revision, target_run_id, target_skill_id,
+                    run_id, sequence, tool, target_goal_id, target_revision, target_run_id, target_skill_id, target_work_item_id,
                     started_at, resolved_goal_id
                 ) VALUES (
-                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :target_run_id, :target_skill_id,
+                    :run_id, :sequence, :tool, :target_goal_id, :target_revision, :target_run_id, :target_skill_id, :target_work_item_id,
                     :started_at,
                     (SELECT id FROM goals WHERE id = :target_goal_id
                         AND owner_user_id = :owner AND deleted_at IS NULL)
@@ -806,6 +872,7 @@ class GoalAPI(WorkspaceDatabase):
                     "target_goal_id": target_goal_id,
                     "target_revision": target_revision,
                     "target_run_id": target_run_id,
+                    "target_work_item_id": target_work_item_id,
                     "target_skill_id": target_skill_id
                     if is_skill_id(target_skill_id)
                     else None,
@@ -834,12 +901,19 @@ class GoalAPI(WorkspaceDatabase):
             raise GoalValidationError("A returned call requires result references.")
         with self._write() as connection:
             attempt = self._open_tool_call(connection, call)
-            if outcome == "denied" and any(
-                attempt[field] is not None
-                for field in (
-                    "revision_kind",
-                    "committed_event_id",
-                    "retrieved_event_id",
+            work_result = connection.execute(
+                "SELECT 1 FROM work_call_results WHERE run_id=:run_id AND sequence=:sequence",
+                call,
+            ).fetchone()
+            if outcome == "denied" and (
+                work_result
+                or any(
+                    attempt[field] is not None
+                    for field in (
+                        "revision_kind",
+                        "committed_event_id",
+                        "retrieved_event_id",
+                    )
                 )
             ):
                 raise GoalValidationError(
@@ -976,6 +1050,22 @@ class GoalAPI(WorkspaceDatabase):
             "get_run",
         ):
             raise GoalValidationError("The result type must match the tool call.")
+        if attempt["tool"] in ("delegate_work", "retry_work"):
+            result = connection.execute(
+                """SELECT i.goal_id,i.revision FROM work_call_results c
+               JOIN work_attempts a ON a.id=c.attempt_id JOIN work_items i ON i.id=a.work_item_id
+               WHERE c.run_id=? AND c.sequence=?""",
+                (attempt["run_id"], attempt["sequence"]),
+            ).fetchone()
+            if (
+                result is None
+                or len(goals) != 1
+                or goals[0]["goal_id"] != result["goal_id"]
+                or goals[0]["revision"] != result["revision"]
+            ):
+                raise GoalValidationError(
+                    "The result must reference the call's work item."
+                )
         if attempt["tool"] == "complete_goal":
             event_id = attempt["committed_event_id"] or attempt["retrieved_event_id"]
             if (

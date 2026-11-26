@@ -1,4 +1,10 @@
 services:
+  worker-registry:
+    image: registry:2
+    profiles: ["worker"]
+    ports:
+      - "127.0.0.1:14661:5000"
+
   server:
     image: hashicorp/nomad:2.1.1@sha256:1a9a0a9ab149a6dd05fd5219e11273a20507a108ab191db26360f0843359ddf7
     command: ["agent", "-config=/config/server.hcl"]

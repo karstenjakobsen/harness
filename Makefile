@@ -34,3 +34,7 @@ nomad-down:
 
 test-nomad: nomad-up
 	HARNESS_NOMAD_ADDR=http://127.0.0.1:14646 $(UV) run --locked --all-packages pytest -q -s -m nomad
+
+.PHONY: worker-image
+worker-image:
+	dev/nomad/cluster.sh worker-image

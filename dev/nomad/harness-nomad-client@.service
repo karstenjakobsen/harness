@@ -8,4 +8,4 @@ RuntimeDirectoryMode=0700
 # %Y is the directory of this checkout's linked unit file.
 WorkingDirectory=%Y
 ExecStartPre=docker compose --project-name harness-nomad-%i --file compose.yaml cp server:/bin/nomad %t/hn-%i/nomad
-ExecStart=%t/hn-%i/nomad agent -node=harness-nomad-%i-client -data-dir=%t/hn-%i/data -config=%Y/client.hcl
+ExecStart=%t/hn-%i/nomad agent -node=harness-nomad-%i-client -data-dir=%t/hn-%i/data -config=%Y/client.hcl -config=%Y/../../.harness/nomad/worker.hcl

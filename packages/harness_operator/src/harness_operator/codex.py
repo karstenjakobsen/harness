@@ -30,6 +30,9 @@ When goal history is relevant, use get_goal_activity to compare saved revisions
 and find a committing call. Use get_run with its run ID to identify the registered
 operator and verify the exact sequence and committed change. A change can be committed
 while the call outcome is unfinished. If asked why and no rationale was recorded, say so.
+For worker handoffs, get_goal_activity returns work_items with the actual cases,
+worker calls and exit status. Inspect each position and move, explain what was
+executed, and judge whether a correction is needed.
 If the tool fails, say that you could not retrieve the goals.
 """
 
@@ -44,6 +47,16 @@ evidence sufficient, call complete_goal with the revision you reviewed, the
 supporting evidence IDs and your rationale. If evidence is insufficient, leave
 the goal open and explain what is missing or ask for clarification. Report the
 result and distinguish the cited evidence from your decision.
+"""
+
+WORK_INSTRUCTIONS = """\
+The owner granted worker delegation for goal {goal_id}. Inspect its current
+revision and discover skills. Choose the brief and exact skill revisions and use
+delegate_work when appropriate. Reuse the same retry key and inputs after an
+uncertain reply. Inspect goal activity for the saved attempts and actual result.
+Use retry_work for a deliberate new attempt against the same brief after reviewing
+the latest created attempt. A changed brief requires a new delegation request.
+If the goal revision changed, reread its definition before deciding what to ask.
 """
 
 CREATE_INSTRUCTIONS = """\
@@ -118,18 +131,22 @@ def _run_codex(
     reply_path: Path | None = None,
     completion_grant_id: int | None = None,
     definition_grant: DefinitionGrant | None = None,
+    work_grant_id: int | None = None,
     run_id: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     mcp_args = ["-P", "-m", "harness_mcp.server"]
     if run_id is not None:
         mcp_args.extend(["--run-id", str(run_id)])
-    write_tool = None
+    write_tools = []
     if completion_grant_id is not None:
         mcp_args.extend(["--completion-grant", str(completion_grant_id)])
-        write_tool = "complete_goal"
+        write_tools.append("complete_goal")
     if definition_grant is not None:
         mcp_args.extend(["--definition-grant", str(definition_grant["id"])])
-        write_tool = definition_grant["action"]
+        write_tools.append(definition_grant["action"])
+    if work_grant_id is not None:
+        mcp_args.extend(["--work-grant", str(work_grant_id)])
+        write_tools.extend(["delegate_work", "retry_work"])
     command = [
         "codex",
         "--ask-for-approval",
@@ -149,11 +166,11 @@ def _run_codex(
         "--ephemeral",
         "--skip-git-repo-check",
     ]
-    if write_tool is not None:
+    for allowed_tool in write_tools:
         command.extend(
             [
                 "-c",
-                f'mcp_servers.harness_mcp.tools.{write_tool}.approval_mode="approve"',
+                f'mcp_servers.harness_mcp.tools.{allowed_tool}.approval_mode="approve"',
             ]
         )
     if schema is not None:
@@ -179,10 +196,15 @@ def ask_codex(
     *,
     completion_grant_id: int | None = None,
     definition_grant_id: int | None = None,
+    work_grant_id: int | None = None,
 ) -> int:
     api = GoalAPI()
     api.skills.import_catalog(read_skill_catalog())
-    run = api.start_run(completion_grant_id, definition_grant_id=definition_grant_id)
+    run = api.start_run(
+        completion_grant_id,
+        definition_grant_id=definition_grant_id,
+        work_grant_id=work_grant_id,
+    )
     grant = run["definition_grant"]
     if grant is not None:
         instructions = {
@@ -190,6 +212,8 @@ def ask_codex(
             "create_subgoal": SUBGOAL_INSTRUCTIONS,
             "revise_goal": REVISION_INSTRUCTIONS,
         }[grant["action"]].format(goal_id=grant["goal_id"])
+    elif work_grant_id is not None:
+        instructions = WORK_INSTRUCTIONS.format(goal_id=run["granted_goal_id"])
     elif completion_grant_id is not None:
         instructions = DELEGATED_INSTRUCTIONS.format(goal_id=run["granted_goal_id"])
     else:
@@ -217,6 +241,7 @@ def ask_codex(
                 reply_path=reply_path,
                 completion_grant_id=completion_grant_id,
                 definition_grant=grant,
+                work_grant_id=work_grant_id,
                 run_id=run["id"],
             )
             if reply_path is not None and result.returncode == 0:

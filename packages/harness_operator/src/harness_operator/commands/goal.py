@@ -265,3 +265,18 @@ def observe(goal_id: int, **report) -> None:
 def progress(goal_id: int, revision: int | None) -> None:
     """Show the assessment, all evidence considered, and the dates that counted."""
     print_record(GoalAPI().get_goal_progress(goal_id, revision))
+
+
+@goal.command()
+@click.argument("goal_id", type=POSITIVE_INTEGER)
+@click.argument("operator_id", type=POSITIVE_INTEGER)
+def grant_work(goal_id: int, operator_id: int) -> None:
+    """Authorize one operator to delegate work on this goal."""
+    print_record(GoalAPI().grant_work(goal_id, operator_id))
+
+
+@goal.command()
+@click.argument("grant_id", type=POSITIVE_INTEGER)
+def withdraw_work(grant_id: int) -> None:
+    """Close this grant and its worker access."""
+    print_record(GoalAPI().withdraw_work(grant_id))
