@@ -95,7 +95,7 @@ Historical progress applies the selected revision’s criteria to the evidence a
 | Term | Meaning in Harness |
 | --- | --- |
 | Work item | An immutable assignment with a generated integer ID: one goal ID and revision, registered operator, brief, exact skill revisions and workspace input. A changed brief creates a new work item. |
-| Work attempt | One execution of a work item, identified by a caller-selected string ID. Repeating a launch with that ID recovers the same attempt and container. An intentional retry uses a fresh attempt ID under the same work item. |
+| Work attempt | One execution of a work item, identified by a caller-selected string ID within its workspace database. Repeating a launch with that ID recovers the same attempt and container. An intentional retry uses a fresh attempt ID under the same work item. |
 | Attempt grant | Authority bound to one attempt and its credential. It permits the four worker MCP operations while the registered operator, open goal and bound revision remain valid. A withdrawn or replaced grant does not authorize an old credential. |
 | Workspace input | Either an empty directory or an isolated checkout of a local source repository at the recorded base SHA. The trusted launcher prepares a fresh scratch directory and keeps the original checkout separate. |
 | Work artifact | An independent copy of the submitted file's bytes in the workspace database, with a generated ID, relative path, SHA-256, size and worker attribution. Its metadata retains the checkout base SHA when one was assigned. |

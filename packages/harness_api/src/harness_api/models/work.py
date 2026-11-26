@@ -106,7 +106,7 @@ class WorkConflictError(RuntimeError):
     """An immutable identity or saved outcome conflicts with the request."""
 
 
-class WorkAuthorizationError(PermissionError):
+class WorkAuthorizationError(RuntimeError):
     """The exact worker credential does not currently authorize this operation."""
 
 
@@ -703,11 +703,8 @@ class WorkAPI(WorkspaceDatabase):
             raise error
         return attempt
 
-    def authenticate_worker(self, credential: str) -> WorkAttempt:
-        return self.resolve_attempt(credential)
-
     def record_worker_failure(
-        self, attempt_id: str, credential: str, tool: str, error: str
+        self, attempt_id: str, credential: str, tool: str
     ) -> None:
         with self._worker_call(attempt_id, credential, tool) as call:
             call.outcome = "denied"

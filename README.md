@@ -149,6 +149,12 @@ Docker's `no` restart policy, and removes scratch and the copied login after exi
 Owner-only launch credentials and JSONL traces remain under
 `.harness/worker-attempts/`; stopped containers remain available for reconciliation.
 Run a foreground launch again with the same ID to inspect a lost outcome.
+Runtime state is isolated by the selected database's canonical path. Recovering
+a running or exited container does not require the original login file and does
+not overwrite the session's private login copy.
+Use a fresh POC workspace for acceptance after this runtime layout change;
+attempt directories created before database isolation cannot be resumed by the
+revised launcher. Saved artifact bytes remain in their original database.
 
 The pinned CLI uses Bubblewrap for `workspace-write`, so the Docker host must
 permit its nested user and mount namespaces. The launcher retains Docker's

@@ -24,6 +24,10 @@ class WorkerLaunchError(RuntimeError):
     pass
 
 
+class WorkerTimeoutError(WorkerLaunchError):
+    pass
+
+
 class _WorkerServer:
     def __init__(self, api, port=0):
         self.listener = socket.socket()
@@ -54,14 +58,21 @@ class _WorkerServer:
         self.listener.close()
 
 
+def _run_docker(*arguments, timeout=30, **kwargs):
+    try:
+        return subprocess.run(
+            ["docker", *map(str, arguments)],
+            timeout=timeout,
+            check=False,
+            **kwargs,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise WorkerTimeoutError("Docker operation timed out.") from error
+
+
 def _docker(*arguments, timeout=30, **kwargs):
-    result = subprocess.run(
-        ["docker", *map(str, arguments)],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-        **kwargs,
+    result = _run_docker(
+        *arguments, timeout=timeout, capture_output=True, text=True, **kwargs
     )
     if result.returncode:
         raise WorkerLaunchError(
@@ -71,18 +82,34 @@ def _docker(*arguments, timeout=30, **kwargs):
 
 
 def _inspect_container(name):
-    result = subprocess.run(
-        ["docker", "inspect", "--type", "container", name],
+    result = _run_docker(
+        "inspect",
+        "--type",
+        "container",
+        name,
         capture_output=True,
         text=True,
-        check=False,
-        timeout=30,
     )
     if result.returncode:
         if "No such" in result.stderr:
             return None
         raise WorkerLaunchError("Docker container inspection failed.")
     return json.loads(result.stdout)[0]
+
+
+def _git(*arguments, environment):
+    try:
+        subprocess.run(
+            ["git", *map(str, arguments)],
+            check=True,
+            capture_output=True,
+            timeout=30,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise WorkerLaunchError("Git workspace preparation timed out.") from error
+    except subprocess.CalledProcessError as error:
+        raise WorkerLaunchError("Git workspace preparation failed.") from error
 
 
 def _save_json(path, value):
@@ -123,13 +150,14 @@ class DockerEngine:
         _docker("stop", "--time", "5", container_id)
 
     def write_logs(self, container_id, stdout, stderr):
-        subprocess.run(
-            ["docker", "logs", container_id],
+        result = _run_docker(
+            "logs",
+            container_id,
             stdout=stdout,
             stderr=stderr,
-            check=True,
-            timeout=30,
         )
+        if result.returncode:
+            raise WorkerLaunchError("Docker logs could not be retrieved.")
 
 
 class DockerWorkerLauncher:
@@ -139,8 +167,9 @@ class DockerWorkerLauncher:
         self.api = api
         self.engine = engine if engine is not None else DockerEngine()
         self.auth_path = Path(auth_path) if auth_path is not None else None
-        self.root = api.database_path.parent / "worker-attempts"
-        self.namespace = hashlib.sha256(str(api.database_path).encode()).hexdigest()
+        database_path = api.database_path.resolve()
+        self.namespace = hashlib.sha256(str(database_path).encode()).hexdigest()
+        self.root = database_path.parent / "worker-attempts" / self.namespace
 
     def directory(self, attempt_id):
         # Validate before using an identifier as a path component.
@@ -190,68 +219,62 @@ class DockerWorkerLauncher:
                     if not key.startswith("GIT_")
                 }
                 # No shared objects, credentials, or writable original checkout.
-                subprocess.run(
-                    [
-                        "git",
-                        "--no-replace-objects",
-                        "-C",
-                        item["source_path"],
-                        "cat-file",
-                        "-e",
-                        f"{item['base_sha']}^{{commit}}",
-                    ],
-                    check=True,
-                    capture_output=True,
-                    env=git_environment,
+                _git(
+                    "--no-replace-objects",
+                    "-C",
+                    item["source_path"],
+                    "cat-file",
+                    "-e",
+                    f"{item['base_sha']}^{{commit}}",
+                    environment=git_environment,
                 )
-                subprocess.run(
-                    [
-                        "git",
-                        "clone",
-                        "--no-hardlinks",
-                        "--dissociate",
-                        "--no-checkout",
-                        "--",
-                        item["source_path"],
-                        str(scratch),
-                    ],
-                    check=True,
-                    capture_output=True,
-                    env=git_environment,
+                _git(
+                    "clone",
+                    "--no-hardlinks",
+                    "--dissociate",
+                    "--no-checkout",
+                    "--",
+                    item["source_path"],
+                    scratch,
+                    environment=git_environment,
                 )
-                subprocess.run(
-                    [
-                        "git",
-                        "--no-replace-objects",
-                        "-C",
-                        str(scratch),
-                        "checkout",
-                        "--detach",
-                        item["base_sha"],
-                    ],
-                    check=True,
-                    capture_output=True,
-                    env=git_environment,
+                _git(
+                    "--no-replace-objects",
+                    "-C",
+                    scratch,
+                    "checkout",
+                    "--detach",
+                    item["base_sha"],
+                    environment=git_environment,
                 )
-                subprocess.run(
-                    ["git", "-C", str(scratch), "remote", "remove", "origin"],
-                    check=True,
-                    capture_output=True,
-                    env=git_environment,
+                _git(
+                    "-C",
+                    scratch,
+                    "remote",
+                    "remove",
+                    "origin",
+                    environment=git_environment,
                 )
             self.api.set_scratch(attempt["id"], scratch)
         elif Path(attempt["scratch_path"]) != scratch or not scratch.is_dir():
             raise WorkerLaunchError("The recorded scratch workspace is unavailable.")
-        auth = directory / "codex-home"
-        auth.mkdir(mode=0o700, exist_ok=True)
-        shutil.copyfile(self.auth_path or _auth_source(), auth / "auth.json")
-        os.chmod(auth / "auth.json", 0o600)
         uid, gid = os.getuid() or 1000, os.getgid() or 1000
         if os.getuid() == 0:
-            for root in (scratch, auth):
-                for path in [root, *root.rglob("*")]:
-                    os.chown(path, uid, gid, follow_symlinks=False)
-        return scratch, auth, uid, gid
+            for path in [scratch, *scratch.rglob("*")]:
+                os.chown(path, uid, gid, follow_symlinks=False)
+        return scratch, uid, gid
+
+    def _prepare_auth(self, directory, uid, gid):
+        auth = directory / "codex-home"
+        auth.mkdir(mode=0o700, exist_ok=True)
+        login_file = auth / "auth.json"
+        if not login_file.is_file():
+            shutil.copyfile(self.auth_path or _auth_source(), login_file)
+            os.chmod(login_file, 0o600)
+        if os.getuid() == 0:
+            for path in [auth, *auth.rglob("*")]:
+                os.chown(path, uid, gid, follow_symlinks=False)
+        return auth
 
     def _cleanup(self, attempt, directory):
         scratch = directory / "scratch"
@@ -306,7 +329,7 @@ class DockerWorkerLauncher:
                 self.api.grant_attempt(attempt_id, credential)
             else:
                 self.api.authorize_attempt(attempt_id, credential)
-            scratch, auth, uid, gid = self._prepare(attempt, item, directory)
+            scratch, uid, gid = self._prepare(attempt, item, directory)
             identity = hashlib.sha256(attempt_id.encode()).hexdigest()[:20]
             name = f"harness-worker-{self.namespace[:12]}-{identity}"
             labels = {
@@ -329,6 +352,7 @@ class DockerWorkerLauncher:
                         raise WorkerLaunchError(
                             "The original container is missing; refusing a replacement."
                         )
+                    auth = self._prepare_auth(directory, uid, gid)
                     environment = os.environ.copy()
                     environment.update(
                         CODEX_HOME="/harness-codex-home",
@@ -379,6 +403,7 @@ class DockerWorkerLauncher:
                     )
                 self.api.record_launch(attempt_id, container["Id"], image_id)
                 if container["State"]["Status"] == "created":
+                    self._prepare_auth(directory, uid, gid)
                     try:
                         self.engine.start(container["Id"])
                     except WorkerLaunchError:
@@ -387,7 +412,7 @@ class DockerWorkerLauncher:
                             raise
                 try:
                     exit_code = self.engine.wait(container["Id"], timeout)
-                except subprocess.TimeoutExpired:
+                except WorkerTimeoutError:
                     self.engine.stop(container["Id"])
                     exit_code = self.engine.wait(container["Id"], 30)
                 with (

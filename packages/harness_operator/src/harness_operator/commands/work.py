@@ -79,7 +79,8 @@ def get_work_artifact(goal_id, output):
     if not artifacts:
         raise click.ClickException("This goal has no saved worker artifact.")
     artifact = artifacts[-1]
+    content = api.read_artifact_bytes(artifact["id"])
     # Exclusive creation avoids replacing an unrelated owner file.
     with output.open("xb") as destination:
-        destination.write(api.read_artifact_bytes(artifact["id"]))
+        destination.write(content)
     print_record(artifact)

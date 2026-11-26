@@ -154,6 +154,8 @@ Repeating a launch with the same attempt ID resolves to its original attempt
 and starts at most one container, including after a lost response or cleanup.
 Conflicting reuse is rejected. Use a fresh attempt ID to retry the same work
 item, or create another work item when changing the brief.
+Runtime files are isolated by the selected workspace database. Recovery of a
+running or exited container does not require the original development login file.
 
 Worker MCP provides only `get_work_brief()`, `list_skills()`,
 `read_skill(id, revision)` and `submit_work_result(relative_path)`. The first

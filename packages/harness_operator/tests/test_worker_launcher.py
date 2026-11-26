@@ -10,7 +10,12 @@ import httpx
 import pytest
 
 from harness_api import GoalAPI, OperatorAPI, WorkAPI, WorkConflictError
-from harness_operator.worker import DockerWorkerLauncher, WorkerLaunchError
+from harness_operator.worker import (
+    DockerEngine,
+    DockerWorkerLauncher,
+    WorkerLaunchError,
+    WorkerTimeoutError,
+)
 
 IMAGE = "sha256:" + "a" * 64
 OTHER_IMAGE = "sha256:" + "b" * 64
@@ -32,6 +37,7 @@ class FakeDockerEngine:
         self.lose_create_response = False
         self.lose_start_response = False
         self.fail_wait = False
+        self.wait_timeout_once = False
         self.forbid_calls = False
 
     def _call(self, name):
@@ -85,6 +91,9 @@ class FakeDockerEngine:
     def wait(self, container_id, timeout):
         self._call("wait")
         assert timeout > 0
+        if self.wait_timeout_once:
+            self.wait_timeout_once = False
+            raise WorkerTimeoutError("Docker wait timed out.")
         if self.fail_wait:
             raise WorkerLaunchError("The launcher lost contact while waiting.")
         if self.on_wait is not None:
@@ -446,6 +455,171 @@ def test_missing_recorded_container_is_not_replaced(launch_workspace):
     with pytest.raises(WorkerLaunchError, match="missing; refusing a replacement"):
         launcher.start(item["id"], "missing-container", IMAGE)
     assert engine.create_count == engine.start_count == 1
+
+
+@pytest.mark.parametrize("remove_private_auth", [False, True])
+def test_interrupted_launch_recovery_does_not_require_original_login(
+    launch_workspace, remove_private_auth
+):
+    work, _, item, auth = launch_workspace
+    engine = FakeDockerEngine()
+    engine.fail_wait = True
+    launcher = DockerWorkerLauncher(work, engine=engine, auth_path=auth)
+    with pytest.raises(WorkerLaunchError, match="lost contact"):
+        launcher.start(item["id"], "recovery", IMAGE)
+    private_auth = launcher.directory("recovery") / "codex-home/auth.json"
+    private_auth.write_text('{"fixture": "refreshed by the running session"}')
+    if remove_private_auth:
+        private_auth.unlink()
+    auth.unlink()
+    engine.fail_wait = False
+
+    def finish(engine):
+        if not remove_private_auth:
+            assert "refreshed" in private_auth.read_text()
+        submit_file(engine)
+
+    engine.on_wait = finish
+    result = launcher.start(item["id"], "recovery", IMAGE)
+    assert result["attempt"]["exit_code"] == 0
+    assert result["artifact"] is not None
+    assert engine.create_count == engine.start_count == 1
+    assert not private_auth.exists()
+
+
+def test_different_databases_in_one_directory_do_not_share_attempt_state(
+    launch_workspace,
+):
+    work, _, item, auth = launch_workspace
+    first_engine = FakeDockerEngine()
+    first_engine.fail_wait = True
+    first = DockerWorkerLauncher(work, engine=first_engine, auth_path=auth)
+    with pytest.raises(WorkerLaunchError, match="lost contact"):
+        first.start(item["id"], "same-attempt", IMAGE)
+    marker = first_engine.workspace / "in-progress.txt"
+    marker.write_text("First workspace's active work")
+
+    other_database = work.database_path.with_name("other-workspace.db")
+    other_goal = GoalAPI(other_database).create_goal("Other work", status="active")
+    other_operator = OperatorAPI(other_database).register_operator("Other builder")
+    other_api = WorkAPI(other_database)
+    other_item = other_api.create_work_item(
+        other_goal["id"], 1, other_operator["id"], "Other assignment"
+    )
+    second_engine = FakeDockerEngine(on_wait=submit_file)
+    second = DockerWorkerLauncher(other_api, engine=second_engine, auth_path=auth)
+    result = second.start(other_item["id"], "same-attempt", IMAGE)
+    assert result["artifact"] is not None
+    assert marker.read_text() == "First workspace's active work"
+    assert first.directory("same-attempt") != second.directory("same-attempt")
+    first_engine.fail_wait = False
+    first_engine.on_wait = submit_file
+    first.start(item["id"], "same-attempt", IMAGE)
+    assert first_engine.create_count == first_engine.start_count == 1
+
+
+@pytest.mark.parametrize("alias_kind", ["directory", "database"])
+def test_workspace_path_alias_replays_the_same_attempt(
+    launch_workspace, tmp_path, alias_kind
+):
+    work, _, item, auth = launch_workspace
+    engine = FakeDockerEngine(on_wait=submit_file)
+    launcher = DockerWorkerLauncher(work, engine=engine, auth_path=auth)
+    result = launcher.start(item["id"], "aliased-workspace", IMAGE)
+    if alias_kind == "directory":
+        alias = tmp_path / "workspace-alias"
+        alias.symlink_to(work.database_path.parent, target_is_directory=True)
+        alias_database = alias / work.database_path.name
+    else:
+        alias_database = tmp_path / "database-alias.db"
+        alias_database.symlink_to(work.database_path)
+    alias_launcher = DockerWorkerLauncher(
+        WorkAPI(alias_database), engine=engine, auth_path=auth
+    )
+    engine.forbid_calls = True
+    assert alias_launcher.start(item["id"], "aliased-workspace", IMAGE) == result
+
+
+@pytest.mark.parametrize("failure", ["missing_base", "timeout"])
+def test_checkout_preparation_failure_raises_a_launcher_error(
+    launch_workspace, tmp_path, monkeypatch, failure
+):
+    work, _, original, auth = launch_workspace
+    source = tmp_path / "source"
+    source.mkdir()
+    git(source, "init", "-q")
+    item = work.create_work_item(
+        original["goal_id"],
+        1,
+        original["operator_id"],
+        "Check the recorded base",
+        source_path=source,
+        base_sha="c" * 40,
+    )
+    if failure == "timeout":
+
+        def timeout(arguments, **kwargs):
+            assert kwargs["timeout"] == 30
+            raise subprocess.TimeoutExpired(arguments, kwargs["timeout"])
+
+        monkeypatch.setattr("harness_operator.worker.subprocess.run", timeout)
+    engine = FakeDockerEngine()
+    with pytest.raises(WorkerLaunchError, match="Git"):
+        DockerWorkerLauncher(work, engine=engine, auth_path=auth).start(
+            item["id"], "missing-base", IMAGE
+        )
+    assert engine.create_count == engine.start_count == 0
+
+
+@pytest.mark.parametrize(
+    "operation", ["image_id", "inspect", "create", "start", "wait", "logs"]
+)
+def test_docker_timeouts_raise_launcher_errors(tmp_path, monkeypatch, operation):
+    def timeout(arguments, **kwargs):
+        raise subprocess.TimeoutExpired(arguments, kwargs["timeout"])
+
+    monkeypatch.setattr("harness_operator.worker.subprocess.run", timeout)
+    engine = DockerEngine()
+    with (tmp_path / "output").open("w") as output:
+        invoke = {
+            "image_id": lambda: engine.image_id(IMAGE),
+            "inspect": lambda: engine.inspect("container"),
+            "create": lambda: engine.create(["create"], {}),
+            "start": lambda: engine.start("container"),
+            "wait": lambda: engine.wait("container", 600),
+            "logs": lambda: engine.write_logs("container", output, output),
+        }[operation]
+        with pytest.raises(WorkerLaunchError, match="timed out"):
+            invoke()
+
+
+def test_docker_log_failure_raises_a_launcher_error(tmp_path, monkeypatch):
+    def failed(arguments, **kwargs):
+        if kwargs.get("check"):
+            raise subprocess.CalledProcessError(7, arguments)
+        return subprocess.CompletedProcess(arguments, 7)
+
+    monkeypatch.setattr("harness_operator.worker.subprocess.run", failed)
+    with (
+        (tmp_path / "output").open("w") as output,
+        pytest.raises(WorkerLaunchError, match="logs"),
+    ):
+        DockerEngine().write_logs("container", output, output)
+
+
+def test_worker_deadline_stops_container_and_records_exit(launch_workspace):
+    work, _, item, auth = launch_workspace
+    engine = FakeDockerEngine(exit_code=137)
+    engine.wait_timeout_once = True
+    launcher = DockerWorkerLauncher(work, engine=engine, auth_path=auth)
+    result = launcher.start(item["id"], "deadline", IMAGE, timeout=1)
+    assert engine.calls.count("wait") == 2
+    assert "stop" in engine.calls
+    assert engine.create_count == engine.start_count == 1
+    assert result["attempt"]["exit_code"] == 137
+    assert result["artifact"] is None
+    assert result["attempt"]["scratch_cleaned_at"] is not None
+    assert not (launcher.directory("deadline") / "codex-home").exists()
 
 
 def test_replay_finishes_cleanup_after_exit_was_saved_before_host_crash(

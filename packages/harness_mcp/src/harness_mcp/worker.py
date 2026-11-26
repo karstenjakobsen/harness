@@ -2,7 +2,7 @@
 
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -14,10 +14,21 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from harness_api import WorkAPI, WorkAuthorizationError
+from harness_api import (
+    SkillRevision,
+    SkillSummary,
+    WorkAPI,
+    WorkArtifact,
+    WorkAuthorizationError,
+    WorkBrief,
+)
 
 PositiveInteger = Annotated[int, Field(strict=True, gt=0, lt=2**63)]
 StrictString = Annotated[str, Field(strict=True)]
+
+
+class SkillList(TypedDict):
+    skills: list[SkillSummary]
 
 
 @dataclass(frozen=True)
@@ -131,7 +142,6 @@ class _WorkerServer(FastMCP):
                     session.attempt_id,
                     session.credential,
                     name if tool is not None else "unknown_tool",
-                    "Invalid worker tool request.",
                 )
             raise
 
@@ -148,25 +158,25 @@ def create_worker_app(
     server = _WorkerServer(api, allowed_hosts)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    def get_work_brief() -> dict[str, Any]:
+    def get_work_brief() -> WorkBrief:
         """Read your immutable assignment, goal revision and workspace input."""
         session = server.authenticated_session()
         return api.get_work_brief(session.attempt_id, session.credential)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    def list_skills() -> dict[str, Any]:
+    def list_skills() -> SkillList:
         """List only the exact skill revisions assigned to this attempt."""
         session = server.authenticated_session()
         return {"skills": api.list_skills(session.attempt_id, session.credential)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    def read_skill(id: StrictString, revision: PositiveInteger) -> dict[str, Any]:
+    def read_skill(id: StrictString, revision: PositiveInteger) -> SkillRevision:
         """Read the instructions for one assigned skill revision."""
         session = server.authenticated_session()
         return api.read_skill(session.attempt_id, session.credential, id, revision)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
-    def submit_work_result(relative_path: StrictString) -> dict[str, Any]:
+    def submit_work_result(relative_path: StrictString) -> WorkArtifact:
         """Save a file from your workspace for review and return its artifact ID.
 
         The first save is authoritative. Retrying its relative path returns the

@@ -192,6 +192,31 @@ def test_launch_identity_retry_and_changed_brief_preserve_prior_attempt(workspac
 
 
 @pytest.mark.parametrize(
+    "operation", ["create_attempt", "grant_attempt", "record_launch"]
+)
+@pytest.mark.parametrize("invalid_binding", ["revision", "operator"])
+def test_owner_work_operations_preserve_authorization_errors_without_writes(
+    workspace, operation, invalid_binding
+):
+    path, goals, work, item, attempt, _ = workspace
+    before = work.list_attempts(item["id"])
+    if invalid_binding == "revision":
+        goals.update_goal(item["goal_id"], title="Revised goal")
+    else:
+        OperatorAPI(path).unregister_operator(item["operator_id"])
+    operations = {
+        "create_attempt": lambda: work.create_attempt("fresh-attempt", item["id"]),
+        "grant_attempt": lambda: work.grant_attempt(attempt["id"], "new-credential"),
+        "record_launch": lambda: work.record_launch(
+            attempt["id"], "container-123", "sha256:" + "a" * 64
+        ),
+    }
+    with pytest.raises(WorkAuthorizationError, match=invalid_binding):
+        operations[operation]()
+    assert work.list_attempts(item["id"]) == before
+
+
+@pytest.mark.parametrize(
     "relative",
     ["../outside", "/etc/passwd", "a/../../outside", "", ".", "dir/../result"],
 )
