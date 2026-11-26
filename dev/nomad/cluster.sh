@@ -48,35 +48,52 @@ start_client() {
     done
 }
 
-down() {
-    if [[ -L $unit_link ]]; then
-        [[ $unit_link -ef $source_unit ]] || fail "Another unit already owns $unit_link."
-        if [[ $(systemctl --user show "$unit" --property=LoadState --value) != not-found ]]; then
-            systemctl --user stop "$unit"
-        fi
-        unlink "$unit_link"
-        systemctl --user daemon-reload
+client_session() {
+    if [[ -z ${XDG_RUNTIME_DIR:-} ]]; then
+        echo "Missing XDG_RUNTIME_DIR for the systemd user session." >&2
+        return 1
     fi
-    compose down --volumes
+    unit_link="$XDG_RUNTIME_DIR/systemd/user/$unit"
+    systemctl --user show --property=Version >/dev/null
 }
 
-if [[ ${1:-} != server ]]; then
-    unit_link="${XDG_RUNTIME_DIR:?}/systemd/user/$unit"
-    systemctl --user show --property=Version >/dev/null ||
-        fail "Cannot reach the host systemd user manager."
-fi
+stop_client() {
+    client_session || return 1
+    local loaded
+    loaded=$(systemctl --user show "$unit" --property=LoadState --value) || [[ $loaded == not-found ]] || return 1
+    if [[ ! -L $unit_link && $loaded == not-found ]]; then return 0; fi
+    if [[ ! $unit_link -ef $source_unit ]]; then
+        echo "Cannot identify $unit as this checkout's client." >&2
+        return 1
+    fi
+    if [[ $loaded != not-found ]]; then systemctl --user stop "$unit" || return 1; fi
+    unlink "$unit_link" || return 1
+    systemctl --user daemon-reload
+}
+
+down() {
+    local status=0
+    if ! stop_client; then
+        echo "Nomad client cleanup could not be verified. Retry from the checkout's systemd user session." >&2
+        status=1
+    fi
+    compose down --volumes || return 1
+    return "$status"
+}
 
 case "${1:-}" in
     server) start_server ;;
-    agent) start_client ;;
+    agent) client_session && start_client ;;
     down) down ;;
     identity)
+        client_session
         container=$(compose ps --quiet server)
         invocation=$(systemctl --user show "$unit" --property=InvocationID --value)
         [[ -n $container && -n $invocation && $unit_link -ef $source_unit ]]
         echo "server=$container client_unit=$unit client_invocation=$invocation"
         ;;
     assert-down)
+        client_session
         container=$(compose ps --all --quiet server)
         volumes=$(docker volume ls --quiet --filter "label=com.docker.compose.project=$project")
         [[ -z $container && -z $volumes && ! -L $unit_link ]] && ! systemctl --user is-active --quiet "$unit" ||

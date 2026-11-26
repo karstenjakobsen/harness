@@ -130,8 +130,8 @@ operator goal create --title "Track food" --duration-days 7
 | `make api` | Starts FastAPI at `http://127.0.0.1:8000`. |
 | `make nomad-server` | Starts the checkout’s Nomad 2.1.1 Compose service and waits for its leader health check. |
 | `make nomad-agent` / `make nomad-up` | Starts or reuses the Compose server and systemd user client, then waits for the host client to report a healthy Docker driver. |
-| `make test-nomad` | Brings up the development cluster, checks successful exit, failed exit and concurrent start followed by repeated stop, then cleans up its test jobs. |
-| `make nomad-down` | Stops and unlinks the checkout’s systemd client unit, then removes its Compose server, network and data volume. |
+| `make test-nomad` | Brings up the development cluster and checks workload exit, concurrent start, repeated stop, literal arguments and refusal of a second placement. Cleans up its test jobs. |
+| `make nomad-down` | Attempts client and Compose cleanup independently. Removes the checkout’s Compose server, network and data volume and reports a failure if it cannot verify the systemd client cleanup. |
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |

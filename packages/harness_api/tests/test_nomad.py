@@ -43,8 +43,10 @@ def cluster():
         def do_GET(self):
             path = self.path.removeprefix("/v1/")
             if path.startswith("allocation/"):
-                self.reply(200, allocations[0])
-            elif path.endswith("/allocations"):
+                self.reply(
+                    200, next(a for a in allocations if a["ID"] == path.split("/")[1])
+                )
+            elif path.partition("?")[0].endswith("/allocations"):
                 self.reply(200, allocations)
             else:
                 job = jobs.get(path.removeprefix("job/"))
@@ -84,6 +86,8 @@ def test_start_recovers_committed_job_and_rejects_changed_spec(cluster):
         assert request["EnforceIndex"] is True
         assert request["JobModifyIndex"] == 0
     (group,) = jobs[handle]["TaskGroups"]
+    assert group["Disconnect"]["Replace"] is False
+    assert group["Disconnect"]["LostAfter"] > 0
     assert group["Count"] == 1
     assert group["RestartPolicy"] == {"Attempts": 0, "Mode": "fail"}
     assert group["ReschedulePolicy"] == {"Attempts": 0, "Unlimited": False}
@@ -137,3 +141,49 @@ def test_rejects_floating_image_and_empty_command():
         WorkloadSpec("busybox:latest", ("true",))
     with pytest.raises(ValueError, match="executable"):
         WorkloadSpec(IMAGE, ())
+
+
+def test_client_loss_and_successful_replacement_stay_uncertain(cluster):
+    backend, _, _, allocations = cluster
+    handle = backend.start("lost", SPEC)
+    original = {"ID": "original", "CreateIndex": 2, "ClientStatus": "lost"}
+    replacement = {
+        "ID": "replacement",
+        "CreateIndex": 3,
+        "PreviousAllocation": "original",
+        "ClientStatus": "complete",
+        "DesiredStatus": "run",
+        "TaskStates": {"workload": {"Events": [{"Type": "Terminated", "ExitCode": 0}]}},
+    }
+    allocations.append(original)
+    status = backend.inspect(handle)
+    assert (status.state, status.allocation_id, status.exit_code) == (
+        "unknown",
+        "original",
+        None,
+    )
+    allocations.insert(0, replacement)
+    status = backend.inspect(handle)
+    assert (status.state, status.allocation_id, status.exit_code) == (
+        "unknown",
+        "original",
+        None,
+    )
+    assert status.replacement_allocation_ids == ("replacement",)
+    # Even if Nomad retains only the linked successor, its exit cannot settle the attempt.
+    allocations.remove(original)
+    status = backend.inspect(handle)
+    assert status.state == "unknown" and status.exit_code is None
+    assert status.allocation_id is None
+    assert status.replacement_allocation_ids == ("replacement",)
+
+
+def test_retry_cannot_adopt_a_retained_job_without_the_allocation_guard(cluster):
+    backend, jobs, _, _ = cluster
+    handle = backend.start("existing", SPEC)
+    jobs[handle]["Meta"].pop("harness_execution_version")
+    with pytest.raises(WorkloadConflictError):
+        backend.start("existing", SPEC)
+    assert backend.inspect(handle).state == "pending"
+    backend.stop(handle)
+    assert jobs[handle]["Stop"]

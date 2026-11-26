@@ -37,26 +37,46 @@ workloads. The server API is at `http://127.0.0.1:14646`. Reserve local ports
 
 ```sh
 make nomad-up       # Start the server, then the host client. Wait for Docker readiness.
-make test-nomad    # Starts or reuses the cluster and runs three real workload tests.
+make test-nomad    # Starts or reuses the cluster and runs the real workload tests.
 make nomad-down    # Stop the client and remove the Compose server and its data volume.
 ```
 
 `make nomad-up` links a checkout-specific unit into the systemd user manager
 for the current login session. While it is running, `dev/nomad/cluster.sh identity`
 prints the container ID for `docker logs` and the unit name for `journalctl --user -u`.
+After a server-only or partial startup, `make nomad-down` still attempts Compose
+cleanup if the systemd user session is unavailable. It returns a nonzero status
+and reports when client cleanup could not be verified.
 
 In Python, construct `NomadBackend(address)` with an already-running cluster.
 `start(run_id, WorkloadSpec(image, argv))` accepts an image pinned by digest
-and a tuple starting with the executable. It returns a handle for one batch
-job. Repeating the same request retrieves that handle. A changed spec under
+and a literal argument tuple starting with the executable. It returns a handle
+for one batch job. For example, `("printf", "%s", "${NOMAD_ALLOC_ID}")` prints
+`${NOMAD_ALLOC_ID}`. Repeating the same request retrieves that handle. A changed spec under
 the same ID raises `WorkloadConflictError`. If registration cannot be
 confirmed, retry `StartOutcomeUnknown` with the original ID and spec.
 
 `inspect(handle)` reports state, job ID, allocation ID once placed and exit code
 when observed. After `stop(handle)`, poll for `stopped`. A task that exits
-unsuccessfully reports `failed`. Retry identity lasts while Nomad retains the
-job. Capture the task outcome and stdout while its allocation is available.
-The test target cleans up its own jobs. [Execution contract and acceptance](docs/SLICE9_TODO.md)
+unsuccessfully reports `failed`. A disconnected or lost allocation reports
+`unknown` with an unknown exit code. The original allocation can reconnect
+within a one-hour window. Nomad is configured to keep it and suppress replacement
+during that window. [Nomad disconnect policy](https://developer.hashicorp.com/nomad/docs/job-specification/disconnect)
+
+Before the workload starts, a pinned Nomad CLI prestart task checks its allocation
+and the job’s placements through the task-local API socket. Only a sole allocation
+with no predecessor or successor passes. A failed read also blocks launch. On a
+cluster with ACLs, the prestart task’s workload identity needs access to read its
+allocation and the job’s allocations. This check also covers a placement created
+after disconnect expiry or by a scheduler override.
+
+If multiple placements are observed, `inspect` returns `unknown`. It keeps
+the original `allocation_id` when identifiable and exposes additional IDs in
+`replacement_allocation_ids`. Inspect and stop remain available for older jobs.
+A start retry against a job registered before the prestart check raises
+`WorkloadConflictError`. Capture outcomes before Nomad collects their records.
+Slice 10 worker grants must bind to the authenticated original allocation before
+accepting evidence or authorizing an external action. [Execution contract and acceptance](docs/SLICE9_TODO.md)
 
 ## Sign in to Codex
 

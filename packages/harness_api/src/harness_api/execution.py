@@ -36,6 +36,7 @@ class WorkloadStatus:
     job_id: str
     allocation_id: str | None = None
     exit_code: int | None = None
+    replacement_allocation_ids: tuple[str, ...] = ()
 
 
 class ExecutionBackend(Protocol):

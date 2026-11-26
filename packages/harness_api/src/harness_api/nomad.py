@@ -11,6 +11,31 @@ from urllib.request import Request, urlopen
 from .execution import ExecutionState, WorkloadSpec, WorkloadStatus
 
 
+def _allocation_guard() -> dict:
+    """Check Nomad's placement records before the workload is allowed to start."""
+    script = """\
+set -eu
+export NOMAD_ADDR=unix:///secrets/api.sock
+original=$(nomad alloc status -t '{{if not (or .PreviousAllocation .NextAllocation)}}{{.ID}}{{end}}' "$NOMAD_ALLOC_ID")
+placements=$(nomad job allocs -t '{{range .}}{{println .ID}}{{end}}' "$NOMAD_JOB_ID")
+if [ "$original" != "$NOMAD_ALLOC_ID" ] || [ "$placements" != "$NOMAD_ALLOC_ID" ]; then
+    echo "Refusing to launch the workload in a replacement or ambiguous allocation." >&2
+    exit 1
+fi
+"""
+    return {
+        "Name": "guard",
+        "Driver": "docker",
+        "Lifecycle": {"Hook": "prestart", "Sidecar": False},
+        "Identity": {"Env": True},
+        "Config": {
+            "image": "hashicorp/nomad@sha256:1a9a0a9ab149a6dd05fd5219e11273a20507a108ab191db26360f0843359ddf7",
+            "entrypoint": ["sh"],
+            "args": ["-c", script],
+        },
+    }
+
+
 class WorkloadConflictError(ValueError):
     """A retained job already uses this run ID with another specification."""
 
@@ -56,7 +81,13 @@ class NomadBackend:
         fingerprint = hashlib.sha256(
             json.dumps([spec.image, spec.argv]).encode()
         ).hexdigest()
-        meta = {"harness_run_id": run_id, "harness_spec_sha256": fingerprint}
+        meta = {
+            "harness_run_id": run_id,
+            "harness_spec_sha256": fingerprint,
+            "harness_execution_version": "2",
+        }
+        # The Docker driver's config is decoded as HCL templates even in JSON jobs.
+        argv = [arg.replace("${", "$${").replace("%{", "%%{") for arg in spec.argv]
         job = {
             "ID": handle,
             "Name": handle,
@@ -69,16 +100,22 @@ class NomadBackend:
                     "Count": 1,
                     "RestartPolicy": {"Attempts": 0, "Mode": "fail"},
                     "ReschedulePolicy": {"Attempts": 0, "Unlimited": False},
+                    "Disconnect": {
+                        "Replace": False,
+                        "LostAfter": 3_600_000_000_000,  # one hour, in nanoseconds
+                        "Reconcile": "keep_original",
+                    },
                     "Tasks": [
+                        _allocation_guard(),
                         {
                             "Name": "workload",
                             "Driver": "docker",
                             "Config": {
                                 "image": spec.image,
-                                "entrypoint": spec.argv[:1],
-                                "args": spec.argv[1:],
+                                "entrypoint": argv[:1],
+                                "args": argv[1:],
                             },
-                        }
+                        },
                     ],
                 }
             ],
@@ -120,6 +157,7 @@ class NomadBackend:
     def inspect(self, handle: str) -> WorkloadStatus:
         path = self._job_path(handle)
         job = self._request("GET", path)
+        # The default includes replacements and excludes older, purged job instances.
         allocations = self._request("GET", f"{path}/allocations") or []
         state: ExecutionState
         if not allocations:
@@ -127,8 +165,23 @@ class NomadBackend:
             if job.get("Status") == "dead" and not job["Stop"]:
                 state = "unknown"
             return WorkloadStatus(state, handle)
-        latest = max(allocations, key=lambda alloc: alloc["CreateIndex"])
-        alloc = self._request("GET", f"allocation/{latest['ID']}")
+        ordered = sorted(allocations, key=lambda a: (a["CreateIndex"], a["ID"]))
+        alloc = self._request("GET", f"allocation/{ordered[0]['ID']}")
+        replacements = [a["ID"] for a in ordered[1:]]
+        original_id = alloc["ID"]
+        if alloc.get("PreviousAllocation"):
+            # GC may have removed one or more predecessors.
+            original_id = None
+            replacements.insert(0, alloc["ID"])
+        successor = alloc.get("NextAllocation")
+        if successor and successor not in replacements:
+            replacements.append(successor)
+        if replacements:
+            return WorkloadStatus(
+                "unknown", handle, original_id, None, tuple(replacements)
+            )
+        if alloc["ClientStatus"] in ("unknown", "lost"):
+            return WorkloadStatus("unknown", handle, original_id)
         task = (alloc.get("TaskStates") or {}).get("workload") or {}
         events = task.get("Events") or []
         exit_code = next(
