@@ -1,5 +1,10 @@
 # Slice 10 evidence — 2026-11-26
 
+Post-review source `470ce80` passes `make check`, `make test` (255 passed,
+16 deselected) and `git diff --check`. See the [implementation review](SLICE10_REVIEW.md)
+for the fixes and current verification. The signed-in output below predates those
+fixes; Docker handoff acceptance remains incomplete.
+
 Implementation: `55f75d9` on `slice-10-docker-worker` (baseline `157346c`).
 
 **Acceptance is incomplete.** The evidence script exited 1. The image built and
