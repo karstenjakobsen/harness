@@ -80,9 +80,9 @@ Exit code 0. Elapsed 33 s.
 
 ~~~text
 dev/nomad/cluster.sh server
- Container harness-nomad-0b269c4e35b3-server-1 Running 
- Container harness-nomad-0b269c4e35b3-server-1 Waiting 
- Container harness-nomad-0b269c4e35b3-server-1 Healthy 
+ Container harness-nomad-0b269c4e35b3-server-1 Running
+ Container harness-nomad-0b269c4e35b3-server-1 Waiting
+ Container harness-nomad-0b269c4e35b3-server-1 Healthy
 Nomad v2.1.1
 BuildDate 2026-10-29T14:48:23Z
 Revision d0f21042997689c7690421ede8849be694e2ce46
@@ -96,7 +96,7 @@ Exit code 0. Elapsed 1 s.
 
 ~~~text
 dev/nomad/cluster.sh worker-image
- Container harness-nomad-0b269c4e35b3-worker-registry-1 Running 
+ Container harness-nomad-0b269c4e35b3-worker-registry-1 Running
 #0 building with "default" instance using docker driver
 
 #1 [internal] load build definition from Dockerfile
@@ -176,9 +176,9 @@ Exit code 0. Elapsed 10 s.
 
 ~~~text
 dev/nomad/cluster.sh server
- Container harness-nomad-0b269c4e35b3-server-1 Running 
- Container harness-nomad-0b269c4e35b3-server-1 Waiting 
- Container harness-nomad-0b269c4e35b3-server-1 Healthy 
+ Container harness-nomad-0b269c4e35b3-server-1 Running
+ Container harness-nomad-0b269c4e35b3-server-1 Waiting
+ Container harness-nomad-0b269c4e35b3-server-1 Healthy
 Nomad v2.1.1
 BuildDate 2026-10-29T14:48:23Z
 Revision d0f21042997689c7690421ede8849be694e2ce46
@@ -233,9 +233,9 @@ collected 234 items / 233 deselected / 1 selected
 
 packages/harness_operator/tests/test_work_live.py make[1]: Entering directory '/home/karsten/projects/github/karstenjakobsen/harness'
 dev/nomad/cluster.sh server
- Container harness-nomad-0b269c4e35b3-server-1 Running 
- Container harness-nomad-0b269c4e35b3-server-1 Waiting 
- Container harness-nomad-0b269c4e35b3-server-1 Healthy 
+ Container harness-nomad-0b269c4e35b3-server-1 Running
+ Container harness-nomad-0b269c4e35b3-server-1 Waiting
+ Container harness-nomad-0b269c4e35b3-server-1 Healthy
 Nomad v2.1.1
 BuildDate 2026-10-29T14:48:23Z
 Revision d0f21042997689c7690421ede8849be694e2ce46
@@ -511,3 +511,225 @@ Verified HTTP response excerpts
 }
 Goal 1 after the run: revision 1, 0 descendants.
 .
+Owner request
+Break my “Build a chess game in Go” goal into subgoals and save them for review. For each subgoal, say how we could tell it was done.
+
+Advisory reply (zero children saved)
+**Build a chess game in Go** (goal #1) is active at revision 1 and has no saved subgoals. Subgoal creation is unavailable this turn, so the plan below is proposed for review and remains unsaved.
+
+I’ve assumed a local, two-player terminal game for the first playable version.
+
+| Proposed subgoal | How to tell it’s done |
+|---|---|
+| 1. Model the board and game state | Go tests verify the standard starting position, White to move, and correct board and turn updates after a move and a capture. |
+| 2. Enforce ordinary moves and king safety | Table-driven tests cover each piece’s movement, blockers, captures, and check. With White’s king on e1 and rook on e2, and Black’s king on a8 and rook on e8, `e2f2` is rejected without changing the board or turn, while `e2e3` is accepted. |
+| 3. Implement special moves | Tests verify both sides of each rule, including castling through an attacked square, en passant after its one-turn window, and all four promotion choices. |
+| 4. Detect game endings | Known positions and move sequences produce the expected results for checkmate, stalemate, dead positions, and draws by repetition or move count. Tests distinguish claimable draws from automatic draws. |
+| 5. Make a game playable in the terminal | Two players can start a game, enter moves, recover from invalid input, and finish with the correct result. A scripted Fool’s Mate verifies the full loop, and `go test ./...` passes. |
+
+**Small next step:** Write the starting-position test. Check all 32 pieces and verify that White moves first.
+
+Delegated reply
+**#1 · Active · Build a chess game in Go**
+I saved four draft subgoals and verified them in goal #1’s tree. Open each child by ID to review its saved success criteria. The plan assumes a local two-player terminal game.
+
+- **#2 · Draft · Represent and update chess positions.** Done when Go tests verify the starting board and turn, FEN round-trips, state updates after a quiet move and a capture, and rejection of malformed FEN.
+- **#3 · Draft · Generate legal moves and enforce king safety.** Done when tests verify piece movement and responses to check, count 20 legal opening moves, and show that a pinned rook can play `e2e3` while `e2f2` is rejected without changing the board or turn.
+- **#4 · Draft · Implement special moves and game results.** Done when tests cover castling, en passant, all four promotion choices, checkmate, stalemate, and draw rules, and verify that play stops once the game ends.
+- **#5 · Draft · Deliver a playable two-player terminal game.** Done when players can see the board and turn, enter moves, and see the result. A scripted Fool’s Mate must show Black winning by checkmate and verify that invalid input leaves the same player to move. `go test ./...` must pass.
+
+A small first step is to write the starting-position test for #2.
+
+/goals/1/history?view=activity → /runs/2
+Operator 1, grant 1, parent 1 at revision 1 (active)
+Call 6 → /goals/2/history?view=activity → revision 1, draft: Represent and update chess positions
+  Table-driven Go tests verify the standard starting position and side to move, FEN round-trips preserving board, turn, castling rights, en passant target and move counters, and correct state updates after a quiet move and a capture. Malformed FEN returns an error.
+Call 7 → /goals/3/history?view=activity → revision 1, draft: Generate legal moves and enforce king safety
+  Separate candidate generation from king-safety filtering. Table-driven Go tests cover piece movement, blockers, captures, and responding to check. From FEN k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1, e2f2 is illegal and leaves the board and side to move unchanged when rejected, while e2e3 is legal. The starting position has 20 legal moves.
+Call 8 → /goals/4/history?view=activity → revision 1, draft: Implement special moves and game results
+  Table-driven Go tests cover castling on either side and rejection through check, en passant and its expiry, and promotion to each of the four valid pieces. Tests distinguish checkmate from stalemate and verify dead positions and the claimable and automatic repetition and move-count draws. Terminal games reject further moves.
+Call 9 → /goals/5/history?view=activity → revision 1, draft: Deliver a playable two-player terminal game
+  Two local players can start a game, see the board and whose turn it is, enter coordinate moves including promotion, and see the final result. A scripted session plays Fool’s Mate, checks that an invalid move leaves the same player to move, and verifies that Black wins by checkmate. go test ./... passes.
+Call 3 list_skills → [{'id': 'chess-rules', 'revision': 2}, {'id': 'go-testing', 'revision': 2}]
+Call 4 read_skill → [{'id': 'chess-rules', 'revision': 2}]
+Call 5 read_skill → [{'id': 'go-testing', 'revision': 2}]
+.
+packages/harness_operator/tests/test_work_live.py make[1]: Entering directory '/home/karsten/projects/github/karstenjakobsen/harness'
+dev/nomad/cluster.sh server
+ Container harness-nomad-0b269c4e35b3-server-1 Running
+ Container harness-nomad-0b269c4e35b3-server-1 Waiting
+ Container harness-nomad-0b269c4e35b3-server-1 Healthy
+Nomad v2.1.1
+BuildDate 2026-10-29T14:48:23Z
+Revision d0f21042997689c7690421ede8849be694e2ce46
+dev/nomad/cluster.sh agent
+{"node":"ccc93a6d-75af-ddf3-6151-3249d138e594","name":"harness-nomad-0b269c4e35b3-client","status":"ready","docker":true}
+make[1]: Leaving directory '/home/karsten/projects/github/karstenjakobsen/harness'
+make[1]: Entering directory '/home/karsten/projects/github/karstenjakobsen/harness'
+make[1]: '.harness/nomad/worker-image' is up to date.
+make[1]: Leaving directory '/home/karsten/projects/github/karstenjakobsen/harness'
+{
+  "goal_id": 2,
+  "work_item_id": 1,
+  "delegating_call": {
+    "run_id": 1,
+    "sequence": 6
+  },
+  "brief": "Prepare exactly two pinned-rook legality fixtures on the same four-piece board, White to move: White king e1 and rook e2, Black king a8 and rook e8, all other squares empty (FEN k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1). Expect e2e3 legal because it keeps blocking the e-file, and e2f2 illegal because it exposes White's king. For rejection, note that the board and side to move should stay unchanged.",
+  "assigned_skills": [
+    {
+      "id": "chess-rules",
+      "revision": 2
+    },
+    {
+      "id": "go-testing",
+      "revision": 2
+    }
+  ],
+  "worker_calls": [
+    {
+      "id": 1,
+      "attempt_id": 1,
+      "allocation_id": "025022c8-1a7f-a793-ee7e-7f6ca3746a11",
+      "tool": "list_skills",
+      "recorded_at": "2026-11-26 16:17:06.614515",
+      "outcome": "returned",
+      "reason": null,
+      "returned_skills": [
+        {
+          "id": "chess-rules",
+          "revision": 2
+        },
+        {
+          "id": "go-testing",
+          "revision": 2
+        }
+      ],
+      "evidence_id": null
+    },
+    {
+      "id": 2,
+      "attempt_id": 1,
+      "allocation_id": "025022c8-1a7f-a793-ee7e-7f6ca3746a11",
+      "tool": "get_work_brief",
+      "recorded_at": "2026-11-26 16:17:06.681687",
+      "outcome": "returned",
+      "reason": null,
+      "returned_skills": null,
+      "evidence_id": null
+    },
+    {
+      "id": 3,
+      "attempt_id": 1,
+      "allocation_id": "025022c8-1a7f-a793-ee7e-7f6ca3746a11",
+      "tool": "read_skill",
+      "recorded_at": "2026-11-26 16:17:11.570890",
+      "outcome": "returned",
+      "reason": null,
+      "returned_skills": [
+        {
+          "id": "chess-rules",
+          "revision": 2
+        }
+      ],
+      "evidence_id": null
+    },
+    {
+      "id": 4,
+      "attempt_id": 1,
+      "allocation_id": "025022c8-1a7f-a793-ee7e-7f6ca3746a11",
+      "tool": "read_skill",
+      "recorded_at": "2026-11-26 16:17:11.599135",
+      "outcome": "returned",
+      "reason": null,
+      "returned_skills": [
+        {
+          "id": "go-testing",
+          "revision": 2
+        }
+      ],
+      "evidence_id": null
+    },
+    {
+      "id": 5,
+      "attempt_id": 1,
+      "allocation_id": "025022c8-1a7f-a793-ee7e-7f6ca3746a11",
+      "tool": "submit_work_result",
+      "recorded_at": "2026-11-26 16:17:15.599795",
+      "outcome": "returned",
+      "reason": null,
+      "returned_skills": null,
+      "evidence_id": 1
+    }
+  ],
+  "image": "127.0.0.1:14661/harness-worker@sha256:40db34e858694fa1f43a50e4b191dcbc08410c71951903227c7d301550e27d0f",
+  "allocation_id": "025022c8-1a7f-a793-ee7e-7f6ca3746a11",
+  "exit_code": 0,
+  "fixture": {
+    "cases": [
+      {
+        "expected_legal": true,
+        "fen": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1",
+        "move": "e2e3",
+        "reason": "The white rook stays on the e-file and blocks the black rook on e8 from attacking the white king on e1."
+      },
+      {
+        "expected_legal": false,
+        "fen": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1",
+        "move": "e2f2",
+        "reason": "The white rook leaves the e-file, exposing the white king on e1 to the black rook on e8. Rejection must leave the board unchanged and White to move."
+      }
+    ],
+    "executed": false
+  },
+  "fresh_review": {
+    "cases": [
+      {
+        "fen": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1",
+        "move": "e2e3",
+        "expected_legal": true
+      },
+      {
+        "fen": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1",
+        "move": "e2f2",
+        "expected_legal": false
+      }
+    ],
+    "tests_executed": false,
+    "needs_correction": false,
+    "explanation": "Goal 2 is active. The worker submitted both fixtures as evidence ID 1 and exited with code 0. Review confirms that e2e3 keeps the white rook between the black rook on e8 and the white king on e1, while e2f2 exposes the king to check. Both fixtures match the brief. The worker recorded that no tests ran. The proposed next step is to run both cases against the Go implementation and verify that rejecting e2f2 preserves the board and leaves White to move."
+  },
+  "controlled_fixture": {
+    "cases": [
+      {
+        "fen": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1",
+        "move": "e2f2",
+        "expected_legal": true,
+        "reason": "Rooks move horizontally."
+      }
+    ],
+    "executed": false
+  },
+  "review_of_error": "**Goal 2 \u00b7 Verify pinned rook legality \u00b7 Active (open).** The latest worker result, evidence #2, is incorrect and incomplete.\n\nBoth attempts used the requested four-piece position with White to move: White king on e1 and rook on e2, Black king on a8 and rook on e8.\n\n- **`e2f2` is illegal.** The latest submission correctly notes that rooks can move horizontally, but this move clears the e-file and exposes White\u2019s king on e1 to the black rook on e8. Rejecting it should preserve the board and leave White to move.\n- **`e2e3` is legal.** The rook stays on the e-file and continues to shield White\u2019s king. The latest submission omitted this required case.\n\nThe first attempt submitted both correct expectations as evidence #1 and exited with code 0. The retry submitted evidence #2 while it was still running, with no exit code recorded. Neither attempt executed the fixtures.\n\nI recommend keeping Goal 2 open and restoring the two-case fixture from evidence #1 as the corrected result.\n",
+  "goal_status": "active"
+}
+.
+
+================ 9 passed, 225 deselected in 322.70s (0:05:22) =================
+~~~
+
+Exit code 0. Elapsed 347 s.
+
+## Review verification
+
+The review moved workspace access rules into the shared model and the worker executable into the execution contract. The FIFO regression reproduced a blocked scratch write before the nonblocking regular-file check was added. The controlled chess fixture now runs in an idle allocation to prevent a competing submission.
+
+~~~text
+ty 0.0.108
+ty check packages/harness_api/src packages/harness_mcp/src packages/harness_operator/src --python .venv
+All checks passed!
+~~~
+
+Exit code 0.
+
+The offline suite ran with PYTHONWARNINGS=error. All 216 tests passed. Nomad passed seven tests with the opt-in heartbeat-loss case skipped. The warm file handoff took 18.61 seconds with one worker Codex session and zero operator sessions. All nine extended live cases passed.

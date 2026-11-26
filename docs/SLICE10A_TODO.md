@@ -43,4 +43,10 @@ An owner can recover a worker’s file from goal activity after the allocation e
 
 ## Verification
 
-The warm city handoff took 19.08 seconds against the 30-second development target. A fresh owner process retrieved `cities.txt` from observation 1 after the worker exited with code 0. The goal stayed active. Pytest collected one default case and nine disjoint extended cases. All passed. The offline suite passed 216 tests. Nomad passed seven tests and skipped its opt-in heartbeat-loss scenario. [Captured results](SLICE10A_EVIDENCE.md) · [Evidence script](SLICE10A_EVIDENCE.sh)
+The warm city handoff took 18.61 seconds against the 30-second development target. A fresh owner process retrieved `cities.txt` from observation 1 after the worker exited with code 0. The goal stayed active. Pytest collected one default case and nine disjoint extended cases. All passed. The offline suite passed 216 tests. Nomad passed seven tests and skipped its opt-in heartbeat-loss scenario. [Captured results](SLICE10A_EVIDENCE.md) · [Evidence script](SLICE10A_EVIDENCE.sh)
+
+## Post-implementation review
+
+Owner HTTP access rules now live in the shared workspace model. The SQLite base manages connections and schema initialization. Both the work model and Nomad adapter import the worker executable from the execution contract. The existing API names, result defaults and observation attribution are preserved.
+
+The worker adapter rejects FIFO writes through a nonblocking open and a regular-file check. The regression first reproduced a missing reply, then passed with the fix. The test bounds reply and shutdown waits. The controlled incorrect chess fixture uses an idle allocation so a model-generated submission cannot race the injected fixture. Nomad job construction passes the source type check with its dynamic JSON fields explicitly annotated.
