@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "name": "Moving a pinned rook off its file exposes the white king",
+      "input": {"position": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1", "move": "e2f2"},
+      "expected_legal": false,
+      "reason": "The move uncovers the black rook's line from e8 to the white king on e1."
+    },
+    {
+      "name": "Moving the pinned rook along its file keeps the king protected",
+      "input": {"position": "k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1", "move": "e2e3"},
+      "expected_legal": true,
+      "reason": "The white rook on e3 still blocks the black rook's line to e1."
+    }
+  ],
+  "execution": {"status": "pending"}
+}

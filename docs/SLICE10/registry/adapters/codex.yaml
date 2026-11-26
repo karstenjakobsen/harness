@@ -1,0 +1,10 @@
+kind: adapter
+id: codex
+# Design example for how one package can serve both runtime entry points.
+sessions:
+  operator:
+    transport: stdio
+    attach: [profile, skill-discovery]
+  worker:
+    transport: http
+    attach: [brief, profile, assigned-skill-reads, result-submission]

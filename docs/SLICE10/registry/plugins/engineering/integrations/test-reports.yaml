@@ -1,0 +1,12 @@
+kind: integration
+id: test-reports
+stage: preview
+binding: workspace-test-reports
+configuration:
+  report_scope:
+    type: string
+    required: true
+  credential_ref:
+    type: secret_reference
+    required: true
+requested_tools: [read_test_summary]

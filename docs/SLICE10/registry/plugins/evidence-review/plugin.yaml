@@ -1,0 +1,13 @@
+kind: plugin
+id: evidence-review
+revision: 1
+name: Evidence review
+description: Review a worker's structured test-case evidence.
+stage: preview
+dependencies:
+  - id: engineering
+    revision: 1
+skills: []
+profiles:
+  - id: result-reviewer
+    file: profiles/result-reviewer.yaml

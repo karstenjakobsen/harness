@@ -1,0 +1,10 @@
+{
+  "revision": 1,
+  "registries": [
+    {
+      "id": "local-examples",
+      "catalog": "catalog.json",
+      "description": "A catalog reference for the proposal's local examples."
+    }
+  ]
+}

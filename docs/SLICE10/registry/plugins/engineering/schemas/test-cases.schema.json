@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["cases", "execution"],
+  "additionalProperties": false,
+  "properties": {
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": ["name", "input", "expected_legal", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "maxLength": 160},
+          "input": {
+            "type": "object",
+            "required": ["position", "move"],
+            "additionalProperties": false,
+            "properties": {
+              "position": {"type": "string", "minLength": 1, "maxLength": 128},
+              "move": {"type": "string", "pattern": "^[a-h][1-8][a-h][1-8][qrbn]?$"}
+            }
+          },
+          "expected_legal": {"type": "boolean"},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+        }
+      }
+    },
+    "execution": {
+      "oneOf": [
+        {"const": {"status": "pending"}},
+        {
+          "type": "object",
+          "required": ["status", "summary"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"enum": ["passed", "failed"]},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 512}
+          }
+        }
+      ]
+    }
+  }
+}

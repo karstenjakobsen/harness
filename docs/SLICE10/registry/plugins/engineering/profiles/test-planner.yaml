@@ -1,0 +1,8 @@
+kind: profile
+id: test-planner
+role: operator
+instructions: >-
+  Define observable acceptance criteria, scope one worker brief, and review
+  submitted cases against the exact goal revision. State which checks still
+  need to run before the owner can assess the goal.
+skills: [planning-and-task-breakdown, code-review-and-quality, chess-rules, go-testing]
