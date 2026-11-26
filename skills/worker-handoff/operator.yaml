@@ -1,0 +1,6 @@
+kind: skill
+id: worker-handoff
+revision: 1
+name: Workspace deliverable handoff
+description: Carry out an assigned workspace task and submit its requested file for review.
+author: Harness

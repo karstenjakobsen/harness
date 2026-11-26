@@ -75,8 +75,93 @@ the original `allocation_id` when identifiable and exposes additional IDs in
 `replacement_allocation_ids`. Inspect and stop remain available for older jobs.
 A start retry against a job registered before the prestart check raises
 `WorkloadConflictError`. Capture outcomes before Nomad collects their records.
-Slice 10 worker grants must bind to the authenticated original allocation before
-accepting evidence or authorizing an external action. [Execution contract and acceptance](docs/SLICE9_TODO.md)
+A future Nomad worker integration must bind grants to the authenticated original
+allocation before accepting evidence or authorizing an external action. The
+Docker-first worker below does not use Nomad. [Execution contract and acceptance](docs/SLICE9_TODO.md)
+
+## One-shot Docker workers
+
+A worker runs one Codex session, reads its assignment over authenticated worker
+MCP, uses ordinary editing and shell tools in `/workspace`, submits the requested
+file, and exits. The same image and entrypoint handle an empty workspace or a
+checkout. Only the immutable brief, assigned skill revisions and initial files vary.
+
+```sh
+make setup
+make worker-image
+export HARNESS_WORKER_IMAGE="$(docker image inspect --format '{{.Id}}' harness-worker:slice10)"
+```
+
+The thin image builds on
+`ghcr.io/icoretech/codex-docker:0.166.0@sha256:c0568397f66fb8cc22c541fbafe26948da5000d24770b0ac2e918517dfc02615`.
+It adds Python and the `harness-worker run --attempt-id ID` entrypoint. Workers run
+by immutable Docker image content ID, not a mutable tag. The base registry digest
+and worker content ID are recorded separately in the acceptance evidence.
+
+Activate this checkout's `.venv` and run the following owner commands in a **fresh
+workspace directory**, using the returned IDs. The development schema is
+unversioned; existing populated pre-Slice-10 databases require a new directory.
+
+```sh
+operator register Builder
+operator goal create --title "Prepare the city file"
+operator work create --goal-id 1 --revision 1 --operator-id 1 \
+  --skill worker-handoff@1 \
+  --brief "Write København, Aarhus, Odense, Aalborg and Esbjerg, one per line in that order, to cities.txt. Submit cities.txt."
+operator work start 1 --attempt-id cities-1 --image "$HARNESS_WORKER_IMAGE"
+operator work show cities-1
+operator work artifact 1 --output cities.txt
+```
+
+`work create` imports the committed skill catalog and records an exact goal
+revision. For checkout work, add `--source /absolute/local/repository --base-sha
+FULL_COMMIT_SHA`. The trusted launcher makes an isolated clone without shared Git
+objects or an origin remote; the worker never mounts the original checkout.
+
+The launcher starts a loopback-only Streamable HTTP service for that same Harness
+workspace and supplies an attempt-bound bearer credential. The worker sees only
+`get_work_brief`, `list_skills`, `read_skill` and `submit_work_result(relative_path)`.
+The public `WorkAPI` rechecks the credential, registered operator, exact grant,
+assigned skills and current goal revision. A withdrawn grant stays invalid for
+existing sessions even after another grant is issued. Operators and advisory MCP
+sessions do not gain worker submission authority from an assignment alone.
+
+The trusted host reads the submitted regular file through its recorded workspace
+mount. Artifact bytes, metadata, attribution and the attempt link are saved in one
+SQLite transaction outside scratch. **The first successful save is authoritative.**
+An authorized same-attempt, same-path retry returns the original artifact ID even
+after scratch cleanup or changes to the source file. A different path conflicts.
+Files are limited to 16 MiB; absolute paths, traversal and symlink paths are denied.
+
+Launch retries with the same attempt ID, work item and image recover the original
+container or outcome. A deterministic Docker name, persisted launch metadata and
+host lock prevent a lost response from creating a second process. An unavailable
+original container is not replaced. An intentional retry uses a new attempt ID;
+changing the brief creates a new work item. Submitted artifacts and process exit
+codes are recorded separately. Neither submission nor exit code zero completes
+the goal; completion remains a separate audited operator decision.
+
+This development launcher requires Linux Docker host networking so the container
+can reach the loopback MCP service. It mounts only the attempt scratch and a
+private copy of the current Codex `auth.json`; it does not mount personal Codex
+configuration or the Harness database. It selects the host's non-root UID, uses
+Docker's `no` restart policy, and removes scratch and the copied login after exit.
+Owner-only launch credentials and JSONL traces remain under
+`.harness/worker-attempts/`; stopped containers remain available for reconciliation.
+Run a foreground launch again with the same ID to inspect a lost outcome.
+
+```sh
+make test-live           # One signed-in city worker; zero operator sessions.
+make test-live-extended  # Checkout proof plus the existing signed-in scenarios.
+docs/SLICE10_EVIDENCE.sh # Required checks and both live targets.
+```
+
+The checkout proof first runs the acceptance test at its recorded base SHA and
+requires failure. The worker changes the implementation and submits an ordinary
+patch file through the same file tool. After scratch cleanup, acceptance applies
+the saved patch to a clean base checkout and reruns the same unchanged test.
+Patches changing acceptance tests are rejected. Both worker cases use the same
+built image content ID. [Slice 10 acceptance](docs/SLICE10_TODO.md)
 
 ## Sign in to Codex
 

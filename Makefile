@@ -1,6 +1,7 @@
 UV ?= uv
+WORKER_IMAGE ?= harness-worker:slice10
 
-.PHONY: setup api check format test test-live nomad-server nomad-agent nomad-up nomad-down test-nomad
+.PHONY: setup api check format test test-live test-live-extended worker-image nomad-server nomad-agent nomad-up nomad-down test-nomad
 
 setup:
 	$(UV) sync --locked --all-packages
@@ -18,8 +19,16 @@ format:
 test:
 	$(UV) run --locked --all-packages pytest -m "not live and not nomad"
 
-test-live:
-	$(UV) run --locked --all-packages pytest -m live
+worker-image:
+	docker build --provenance=false --tag $(WORKER_IMAGE) --file dev/worker/Dockerfile .
+
+test-live: worker-image
+	HARNESS_WORKER_IMAGE="$$(docker image inspect --format '{{.Id}}' $(WORKER_IMAGE))" \
+		$(UV) run --locked --all-packages pytest -s -m "live and worker_city"
+
+test-live-extended: worker-image
+	HARNESS_WORKER_IMAGE="$$(docker image inspect --format '{{.Id}}' $(WORKER_IMAGE))" \
+		$(UV) run --locked --all-packages pytest -s -m "live and not worker_city"
 
 nomad-server:
 	dev/nomad/cluster.sh server

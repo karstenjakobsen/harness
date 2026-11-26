@@ -253,6 +253,114 @@ CREATE TABLE run_call_skills (
 
 CREATE INDEX calls_by_skill_revision ON run_call_skills(snapshot_id);
 
+CREATE TABLE work_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    goal_id INTEGER NOT NULL,
+    goal_revision INTEGER NOT NULL,
+    operator_id INTEGER NOT NULL REFERENCES operators(id),
+    brief TEXT NOT NULL,
+    source_path TEXT,
+    base_sha TEXT,
+    created_at TEXT NOT NULL,
+    CHECK ((source_path IS NULL) = (base_sha IS NULL)),
+    FOREIGN KEY (goal_id, goal_revision) REFERENCES goal_revisions(goal_id, revision)
+) STRICT;
+
+CREATE INDEX work_items_by_goal ON work_items(goal_id, id);
+
+CREATE TABLE work_item_skills (
+    work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    snapshot_id INTEGER NOT NULL REFERENCES skill_revisions(id),
+    PRIMARY KEY (work_item_id, position),
+    UNIQUE (work_item_id, snapshot_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE work_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+    attempt_key TEXT NOT NULL UNIQUE,
+    work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+    created_at TEXT NOT NULL,
+    scratch_path TEXT UNIQUE,
+    scratch_cleaned_at TEXT,
+    container_key TEXT UNIQUE,
+    image_digest TEXT,
+    launched_at TEXT,
+    exit_code INTEGER,
+    exited_at TEXT,
+    artifact_id INTEGER UNIQUE REFERENCES work_artifacts(id),
+    CHECK ((container_key IS NULL) = (image_digest IS NULL)),
+    CHECK ((container_key IS NULL) = (launched_at IS NULL)),
+    CHECK ((exit_code IS NULL) = (exited_at IS NULL)),
+    CHECK (exited_at IS NULL OR launched_at IS NOT NULL),
+    CHECK (scratch_cleaned_at IS NULL OR scratch_path IS NOT NULL),
+    UNIQUE (id, work_item_id)
+) STRICT;
+
+CREATE INDEX attempts_by_work_item ON work_attempts(work_item_id, created_at, id);
+
+CREATE TABLE work_attempt_grants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+    attempt_id INTEGER NOT NULL REFERENCES work_attempts(id),
+    credential_hash TEXT NOT NULL UNIQUE,
+    granted_at TEXT NOT NULL,
+    revoked_at TEXT,
+    UNIQUE (id, attempt_id)
+) STRICT;
+
+CREATE UNIQUE INDEX active_attempt_grant ON work_attempt_grants(attempt_id)
+    WHERE revoked_at IS NULL;
+
+CREATE TABLE work_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+    attempt_id INTEGER NOT NULL UNIQUE,
+    work_item_id INTEGER NOT NULL,
+    grant_id INTEGER NOT NULL,
+    relative_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    content BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK (length(content) = size_bytes),
+    FOREIGN KEY (attempt_id, work_item_id) REFERENCES work_attempts(id, work_item_id),
+    FOREIGN KEY (grant_id, attempt_id) REFERENCES work_attempt_grants(id, attempt_id)
+) STRICT;
+
+CREATE TABLE worker_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+    attempt_id INTEGER NOT NULL REFERENCES work_attempts(id),
+    grant_id INTEGER REFERENCES work_attempt_grants(id),
+    tool TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('returned', 'denied', 'failed')),
+    arguments TEXT NOT NULL CHECK (json_type(arguments) = 'object'),
+    artifact_id INTEGER REFERENCES work_artifacts(id),
+    error TEXT,
+    CHECK ((outcome = 'returned') = (error IS NULL))
+) STRICT;
+
+CREATE INDEX worker_calls_by_attempt ON worker_calls(attempt_id, id);
+
+CREATE TRIGGER immutable_work_item BEFORE UPDATE ON work_items
+BEGIN SELECT RAISE(ABORT, 'Work items are immutable.'); END;
+
+CREATE TRIGGER retain_work_item BEFORE DELETE ON work_items
+BEGIN SELECT RAISE(ABORT, 'Work items are retained.'); END;
+
+CREATE TRIGGER immutable_work_item_skill BEFORE UPDATE ON work_item_skills
+BEGIN SELECT RAISE(ABORT, 'Assigned skill revisions are immutable.'); END;
+
+CREATE TRIGGER retain_work_item_skill BEFORE DELETE ON work_item_skills
+BEGIN SELECT RAISE(ABORT, 'Assigned skill revisions are retained.'); END;
+
+CREATE TRIGGER immutable_work_artifact BEFORE UPDATE ON work_artifacts
+BEGIN SELECT RAISE(ABORT, 'Saved work artifacts are immutable.'); END;
+
+CREATE TRIGGER retain_work_artifact BEFORE DELETE ON work_artifacts
+BEGIN SELECT RAISE(ABORT, 'Saved work artifacts are retained.'); END;
+
 INSERT INTO users (username, display_name) VALUES ('admin', 'admin');
 
 CREATE TRIGGER keep_system_admin BEFORE DELETE ON users WHEN OLD.id = 1

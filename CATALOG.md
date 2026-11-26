@@ -122,6 +122,46 @@ operator goal create "Help me track food for seven days."
 operator goal create --title "Track food" --duration-days 7
 ```
 
+## Worker assignments
+
+These owner commands use `WorkAPI` in the current workspace and print JSON.
+Create a goal and named operator first. Work creation imports the committed
+skill catalog and records the exact assigned revisions. The worker uses its
+attempt credential to access worker MCP; it runs one Codex session and leaves
+goal review to the operator.
+
+| Command | What it does |
+| --- | --- |
+| `operator work create --goal-id ID --revision N --operator-id ID --brief TEXT [--skill ID@REVISION]... [--source PATH --base-sha SHA]` | Saves an immutable work item. Omit source options for an empty workspace, or supply both a local Git repository and its exact base commit SHA. Returns the generated work item ID. |
+| `operator work start WORK_ITEM_ID --attempt-id ID --image SHA256 [--timeout SECONDS]` | Starts or recovers one attempt using an immutable Docker image ID, waits for exit and removes scratch and the runtime Codex login copy. The timeout defaults to 600 seconds. `HARNESS_WORKER_IMAGE` can supply the image option. |
+| `operator work show ATTEMPT_ID` | Returns `attempt`, `work_item`, worker MCP `calls`, saved `artifact` metadata and `trace_path`. Container exit code is separate from artifact submission. The saved Codex trace survives scratch cleanup. |
+| `operator work artifact GOAL_ID --output NEW_PATH` | Copies the latest saved artifact for the goal into a new owner file and returns its metadata. Rejects an existing output path. Works in a fresh owner process after worker scratch cleanup. |
+
+`make worker-image` builds `harness-worker:slice10` from the digest-pinned
+`ghcr.io/icoretech/codex-docker:0.166.0` base. Select the built image's immutable
+ID with `docker image inspect --format '{{.Id}}' harness-worker:slice10` and pass
+that `sha256:...` value to `--image`. Both acceptance cases use this same built
+image. Sign in through `operator register` before running a worker; the launcher
+copies only the development `auth.json` into its temporary Codex home.
+
+The container entrypoint is `harness-worker run --attempt-id ID`. The trusted
+launcher supplies the worker MCP URL and attempt credential at runtime, mounts
+fresh scratch writable at `/workspace` for a non-root user, and sets Docker's
+restart policy to `no`. The current launcher uses Docker's host network and a
+loopback MCP endpoint with a local Docker engine.
+
+Repeating a launch with the same attempt ID resolves to its original attempt
+and starts at most one container, including after a lost response or cleanup.
+Conflicting reuse is rejected. Use a fresh attempt ID to retry the same work
+item, or create another work item when changing the brief.
+
+Worker MCP provides only `get_work_brief()`, `list_skills()`,
+`read_skill(id, revision)` and `submit_work_result(relative_path)`. The first
+successful submission saves an independent file copy linked to its attempt,
+goal revision, registered operator and grant. An authorized same-path retry
+returns that original artifact without rereading scratch; another path
+conflicts. Ordinary files, patches and test reports share this contract.
+
 ## Development commands
 
 | Command | What it does |
@@ -135,5 +175,7 @@ operator goal create --title "Track food" --duration-days 7
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
-| `make test-live` | Runs signed-in acceptance for goal plans, progress, delegated completion, creation and revision history, one operator inspecting another's revision, an advisory chess plan using versioned skills, and delegated subgoal creation with HTTP attribution. |
+| `make worker-image` | Builds the thin worker image as `harness-worker:slice10`. Set `WORKER_IMAGE` to choose another build tag. |
+| `make test-live` | Builds the worker image and runs only the city handoff: one signed-in worker session, zero operator sessions, exact five-city file retrieval by goal ID after scratch cleanup, with attribution and the goal still open at its original revision. |
+| `make test-live-extended` | Uses the same worker image for the checkout handoff, proving a saved ordinary patch turns a specific failing test green without changing that test or the original checkout. Also runs the existing signed-in operator scenarios for plans, progress, delegation, revision history, skills and HTTP attribution. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |

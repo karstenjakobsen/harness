@@ -11,7 +11,11 @@ from harness_api import (
     GoalValidationError,
     RunNotFoundError,
     SkillCatalogError,
+    WorkAuthorizationError,
+    WorkConflictError,
+    WorkNotFoundError,
     WorkspaceStorageError,
+    WorkValidationError,
 )
 
 from .codex import ask_codex as ask_codex
@@ -25,10 +29,22 @@ from .commands.register import register
 from .commands.run import run
 from .commands.unregister import unregister
 from .commands.user import user
+from .commands.work import work
+from .worker import WorkerLaunchError
 
 
 @click.group(
-    commands=[ask, get_operator, goal, list_operators, register, run, unregister, user]
+    commands=[
+        ask,
+        get_operator,
+        goal,
+        list_operators,
+        register,
+        run,
+        unregister,
+        user,
+        work,
+    ]
 )
 def cli() -> None:
     """Ask Codex about goals and manage the current workspace."""
@@ -50,6 +66,11 @@ def main() -> int:
         RunNotFoundError,
         SkillCatalogError,
         WorkspaceStorageError,
+        WorkConflictError,
+        WorkNotFoundError,
+        WorkAuthorizationError,
+        WorkValidationError,
+        WorkerLaunchError,
     ) as error:
         click.echo(f"operator: {error}", err=True)
         return 1

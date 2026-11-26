@@ -8,6 +8,8 @@ members = ["packages/harness_api", "packages/harness_mcp", "packages/harness_ope
 markers = [
     "live: requires a signed-in Codex session and the real MCP server",
     "nomad: runs workloads on the development Nomad cluster",
+    "worker_city: default signed-in Docker worker file handoff",
+    "worker_extended: extended signed-in checkout patch handoff",
 ]
 testpaths = ["packages/harness_api/tests", "packages/harness_mcp/tests", "packages/harness_operator/tests"]
 

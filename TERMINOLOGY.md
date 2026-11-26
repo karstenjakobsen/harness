@@ -10,14 +10,16 @@
 | Assignment | The recorded relationship between a goal and the registered operator responsible for it. Unregistering the operator releases its open assignments and invalidates its grants. Delegated writes require an explicit grant. |
 | Delegation | The owner’s explicit grant of a specific action and scope to a registered operator. A top-level creation grant covers the owner’s workspace. A subgoal creation grant authorizes draft children of one parent, whose ID is the grant’s `goal_id`. A revision grant covers one goal. A completion grant uses the ID of the assignment created when the owner grants completion of one subgoal. |
 | Assistant | The Codex session that answers `operator ask` or drafts a goal definition. The CLI executable is named `operator`. |
-| Workspace | The context for users, registered operators, goals, evidence, decisions and operator run history. Local commands use the current workspace database. HTTP requests use the workspace served by the selected API server. |
+| Workspace | The context for users, registered operators, goals, evidence, decisions, operator run history and worker handoffs. Local commands use the current workspace database. HTTP requests use the workspace served by the selected API server. |
 | Schema snapshot | The table definitions, constraints and initial system user used to initialize an empty local database. [Workspace schema](packages/harness_api/src/harness_api/schema.sql) |
-| Harness API | The workspace operations provided by the `harness_api` package. Its public Python interfaces are `UserAPI`, `OperatorAPI`, `GoalAPI` and `SkillAPI`. The HTTP, CLI and MCP adapters call the model operations they expose. |
+| Harness API | The workspace operations provided by the `harness_api` package. Its public Python interfaces are `UserAPI`, `OperatorAPI`, `GoalAPI`, `SkillAPI` and `WorkAPI`. The HTTP, CLI and MCP adapters call the model operations they expose. |
 | HTTP API | The FastAPI interface for working with workspace users, registered operators and goals, and reading goal activity and operator runs. [Endpoint catalog](README.md#fastapi) |
 | `UserAPI` | The public Python interface for creating, reading, updating and deleting workspace user accounts. |
 | `OperatorAPI` | The public Python interface for registering, reading and unregistering operators. Unregistering also releases the operator’s open goal assignments. |
 | `SkillAPI` | The public model for importing the workspace owner’s catalog, listing current skills, reading exact revisions and finding the run calls that read them. |
 | `GoalAPI` | The public Python interface for goals and revisions, observations, progress assessments, completion decisions and grants. It also records operator runs and MCP tool calls and serves goal activity and run history. |
+| `WorkAPI` | The public model for immutable work items, worker attempts and grants, scoped skill reads, saved artifacts and worker MCP audit calls. It checks the exact attempt authority and goal revision on worker operations. |
+| Worker | One Codex session executing one attempt in a Docker container. It uses ordinary file and shell tools in `/workspace` and worker MCP to read its assignment and submit a file. A worker session is separate from an `operator ask` session. |
 
 ## Identity and attribution
 
@@ -31,6 +33,8 @@
 | Advisory `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. History tools require a recorded run and can read across operators in the same workspace. |
 | `operator ask --completion-grant GRANT_ID` | The assistant can also complete the specific subgoal covered by the active grant. Harness derives the registered operator from the grant. |
 | `operator ask --definition-grant GRANT_ID` | The assistant can create top-level goals, create draft children under one parent, or revise one goal. The run’s bound grant determines the registered operator, permitted action and scope. |
+| `operator work` owner commands | The local workspace owner selects the goal revision, registered operator, brief, skill revisions and optional source checkout. The trusted launcher binds an attempt to its workspace, Docker container and credential. |
+| Worker MCP | A Bearer credential establishes one attempt and its exact grant. Tools accept no caller-selected attempt, operator or goal ID. Saved artifacts retain the attempt, work item, goal revision, registered operator and grant; every worker operation, including a retry, rechecks that authority. |
 
 In a delegated session, Harness binds the assistant to a registered operator and a specific grant at startup. A replacement grant requires a fresh session. The **decision maker** is the actor who exercises the delegated authority. The **evidence submitter** is the actor who supplied a cited record. If the owner confirms “My membership is active” and an operator uses that confirmation to complete the subgoal, the evidence keeps the owner’s user ID and the decision records the registered operator’s ID. These IDs refer to different tables and can have the same numeric value. [Delegated completion plan](docs/SLICE3_TODO.md#delegated-completion)
 
@@ -85,3 +89,31 @@ Progress returns every record considered in `evidence`. Only the IDs grouped und
 An observation’s reported date may be at most the UTC calendar date when Harness records it. Earlier versions accepted advance reports. These retain their IDs, retry results and citations, and are excluded from the count even after the reported date passes.
 
 Historical progress applies the selected revision’s criteria to the evidence available at read time and returns the goal’s current lifecycle status. A completion with a confirmation or reference keeps its original `statement_evidence_id` and the additional citations in `evidence_ids`. A delegated completion stores `recorded_by_operator_id`, `completion_grant_id`, `rationale` and the exact cited IDs in `evidence_ids`.
+
+## Worker handoffs
+
+| Term | Meaning in Harness |
+| --- | --- |
+| Work item | An immutable assignment with a generated integer ID: one goal ID and revision, registered operator, brief, exact skill revisions and workspace input. A changed brief creates a new work item. |
+| Work attempt | One execution of a work item, identified by a caller-selected string ID. Repeating a launch with that ID recovers the same attempt and container. An intentional retry uses a fresh attempt ID under the same work item. |
+| Attempt grant | Authority bound to one attempt and its credential. It permits the four worker MCP operations while the registered operator, open goal and bound revision remain valid. A withdrawn or replaced grant does not authorize an old credential. |
+| Workspace input | Either an empty directory or an isolated checkout of a local source repository at the recorded base SHA. The trusted launcher prepares a fresh scratch directory and keeps the original checkout separate. |
+| Work artifact | An independent copy of the submitted file's bytes in the workspace database, with a generated ID, relative path, SHA-256, size and worker attribution. Its metadata retains the checkout base SHA when one was assigned. |
+| Worker call | An audited worker MCP operation with its attempt, grant, arguments, timestamps and `returned`, `denied` or `failed` outcome. A successful submission links the saved artifact. |
+
+Worker MCP exposes `get_work_brief()`, `list_skills()`,
+`read_skill(id, revision)` and `submit_work_result(relative_path)`. Skill reads
+are limited to the exact revisions assigned to that work item. The trusted host
+reads a regular file inside that attempt's mounted workspace and commits its
+independent copy before acknowledging a submission.
+
+The first successful save is authoritative. An authorized retry with the same
+relative path returns the original artifact ID without rereading scratch, even
+after cleanup or changes to the scratch file. A different path conflicts and
+leaves the saved artifact intact. A source fix, ordinary patch and test report
+use this same file handoff; the model does not infer test success from their
+contents.
+
+Container exit code and artifact submission are separate recorded outcomes.
+Neither completes or revises the goal. The operator reviews the retained result
+and makes any completion decision separately. [Worker commands](CATALOG.md#worker-assignments)
