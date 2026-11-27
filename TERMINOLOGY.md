@@ -159,3 +159,8 @@ Its experiment checks that field and the original active revision before
 deployment and after observation. The drift deadline starts at the deliberate
 mode reset, after persisting the observation intent. Submission sends the exact
 job bytes validated against the checkpoint digest.
+
+The service receipt identifies each original disposable regular file by device
+and inode. Its `cleanup_pending` phase records that shutdown observation and
+artifact verification succeeded. The receipt reaches `finished` when teardown
+also succeeds.

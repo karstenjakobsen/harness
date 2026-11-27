@@ -65,3 +65,8 @@ The required live worker and separate service run passed all three observations.
 - [x] Submit the exact validated job bytes and handle incomplete Docker inspection results through cleanup.
 - [x] Start the drift clock directly before the mode reset, after recording observation intent.
 - [x] Reproduce seven regression failures before fixing them. Verify all 26 Slice 12 cases, the 274-test offline suite and a fresh live worker/service run.
+
+## Observer and cleanup follow-up
+
+- [x] Record and pin the initial device and inode of each disposable file. Check the identity and regular-file type on every no-follow open. Use the checked descriptor for mode resets, mode samples and content hashes. Exercise replacements of both entries and verify an unrelated file retains its mode.
+- [x] Persist `cleanup_pending` after shutdown and artifact verification. Resume teardown from a reopened receipt through either `stop` or `cleanup`. Verify that an interruption after resource removal preserves the passing observations through finalization.

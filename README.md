@@ -372,6 +372,13 @@ independent Docker inspection checks mount permissions and hashes the script
 visible in the allocation. The current experiment requires the Docker CLI to
 reach the same single Nomad client's Docker daemon.
 
+The checkpoint records the device and inode of each disposable file and keeps a
+hard link to each in an unmounted directory until cleanup. Each time the host
+opens a data file, it rejects symlinks and checks the descriptor identifies
+the original regular file before sampling it or resetting the target mode.
+For an older, unsubmitted receipt, repeat `checkpoint` to stage fresh originals.
+An already deployed service without recorded file identities can be cleaned up.
+
 `observe` first waits up to ten seconds to see startup correction from `0644` to
 `0600`. It then deliberately sets `0644` again and requires a second correction
 within three seconds. The worker brief specifies polling once per second. Both
@@ -379,9 +386,10 @@ observations preserve contents and the sibling's `0644` mode. `stop` confirms
 Nomad shutdown and no running replacement, resets `0644`, and samples for at
 least four seconds. The receipt retains timestamped samples and monotonic elapsed
 times for all three stages. The drift clock starts immediately before the
-deliberate mode change, after the initial receipt write. It then exports the
-script again and removes the
-service job, volume registrations and staged directories.
+deliberate mode change, after the initial receipt write. After verifying shutdown
+and the exported script, `stop` saves the `cleanup_pending` phase before removing
+the job, volume registrations and staged directories. If interrupted in that phase,
+repeat `stop` or run `cleanup` to finish teardown with the saved observations.
 
 Use `.venv/bin/python dev/phase2/standing.py cleanup --receipt "$receipt"` to
 recover an interrupted service. Repeating `submit` never registers the service

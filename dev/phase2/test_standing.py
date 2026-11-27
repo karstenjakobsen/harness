@@ -4,7 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import experiment
@@ -68,6 +68,12 @@ def test_checkpoint_is_offline_and_preserves_delivery(delivered, monkeypatch):
     assert saved["job_id"] != worker["job_id"]
     assert saved["phase"] == "checkpoint" and saved["allocation_id"] is None
     assert saved["artifact"]["attempt_id"] == worker["attempt_id"]
+    for name, expected in saved["files"].items():
+        original = (standing.service_path(path).parent / "data" / name).stat()
+        assert (expected["device"], expected["inode"]) == (
+            original.st_dev,
+            original.st_ino,
+        )
     assert standing.digest(Path(saved["script_path"])) == saved["artifact"]["sha256"]
     assert not Path(saved["script_path"]).stat().st_mode & 0o222
     assert task["Config"]["entrypoint"] == ["/bin/sh"]
@@ -123,6 +129,23 @@ def test_repeated_checkpoint_rejects_a_different_image(delivered):
     with pytest.raises(ValueError, match="image"):
         standing.checkpoint(worker, path, "sha256:" + "b" * 64)
     assert json.loads(standing.service_path(path).read_text()) == saved
+
+
+def test_older_checkpoint_can_record_fresh_file_identities_before_submit(delivered):
+    worker, worker_path, _ = delivered
+    saved = standing.checkpoint(worker, worker_path, standing.SHELL_IMAGE)
+    path = standing.service_path(worker_path)
+    for entry in saved["files"].values():
+        del entry["device"], entry["inode"]
+    shutil.rmtree(path.parent / "originals")
+    experiment.save_json(path, saved)
+    data = path.parent / "data"
+    with pytest.raises(RuntimeError, match="no recorded file identity"):
+        standing.sample_files(saved, data, 0)
+    updated = standing.checkpoint(worker, worker_path, standing.SHELL_IMAGE)
+    assert updated["phase"] == "checkpoint" and updated["job_id"] == saved["job_id"]
+    sample = standing.sample_files(json.loads(path.read_text()), data, 0)
+    assert all(sample[name]["mode"] == "0644" for name in updated["files"])
 
 
 @pytest.mark.parametrize("changed", ["script_path", "job_path"])
@@ -211,6 +234,45 @@ def test_observer_rejects_unintended_changes(delivered, damage):
         standing.observe_mode(saved, data, "startup", 1, lambda: None, lambda: None)
 
 
+@pytest.mark.parametrize("name", ["target", "sibling"])
+@pytest.mark.parametrize("replacement", ["regular", "symlink"])
+def test_observer_rejects_replaced_file(delivered, name, replacement):
+    worker, path, _ = delivered
+    saved = standing.checkpoint(worker, path, standing.SHELL_IMAGE)
+    data = standing.service_path(path).parent / "data"
+    entry = data / name
+    original = entry.rename(data / "moved")
+    if replacement == "symlink":
+        # Even a link resolving to the original inode must be rejected.
+        entry.symlink_to(original)
+    else:
+        entry.write_bytes(original.read_bytes())
+    with pytest.raises((OSError, RuntimeError)):
+        standing.observe_mode(
+            saved, data, "shutdown", 0, lambda: None, lambda: None, hold=True
+        )
+    assert not saved["observations"]["shutdown"]["passed"]
+
+
+@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+def test_drift_reset_preserves_unrelated_file_mode(delivered, tmp_path, link):
+    worker, path, _ = delivered
+    saved = standing.checkpoint(worker, path, standing.SHELL_IMAGE)
+    data = standing.service_path(path).parent / "data"
+    target = data / "target"
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_bytes(target.read_bytes())
+    unrelated.chmod(0o600)
+    target.unlink()
+    if link == "hardlink":
+        target.hardlink_to(unrelated)
+    else:
+        target.symlink_to(unrelated)
+    with pytest.raises((OSError, RuntimeError)):
+        standing.observe_mode(saved, data, "drift", 0, lambda: None, lambda: None)
+    assert unrelated.stat().st_mode & 0o777 == 0o600
+
+
 def test_shutdown_rejects_a_still_correcting_service(delivered):
     worker, path, _ = delivered
     saved = standing.checkpoint(worker, path, standing.SHELL_IMAGE)
@@ -271,6 +333,8 @@ def scheduler():
             return httpx.Response(200, json=list(state["volumes"].values()))
         if route.startswith("/v1/volume/host/"):
             identifier = route.split("/")[4]
+            if identifier not in state["volumes"]:
+                return httpx.Response(404)
             if request.method == "DELETE":
                 del state["volumes"][identifier]
                 return httpx.Response(200, json={})
@@ -302,6 +366,11 @@ def scheduler():
                 if state["job"]
                 else httpx.Response(404)
             )
+        if route == "/v1/client/allocation/service-allocation/gc":
+            if state.get("collected"):
+                return httpx.Response(404)
+            state["collected"] = True
+            return httpx.Response(200)
         if route.startswith("/v1/client/"):
             return httpx.Response(200, content=b"")
         raise AssertionError(route)
@@ -374,6 +443,21 @@ def test_cleanup_refuses_a_volume_owned_by_another_directory(
     assert state["volumes"] and saved["cleanup_pending"]
 
 
+def test_verified_cleanup_resumes_after_allocation_gc(delivered, scheduler):
+    worker, worker_path, _ = delivered
+    saved = standing.checkpoint(worker, worker_path, standing.SHELL_IMAGE)
+    path = standing.service_path(worker_path)
+    saved.update(phase="cleanup_pending", allocation_id="service-allocation")
+    client, state = scheduler
+    state.update(
+        job={"Meta": saved["metadata"], "Stop": True}, stopped=True, collected=True
+    )
+    standing.stop(client, worker, worker_path, saved, path)
+    finished = json.loads(path.read_text())
+    assert finished["phase"] == "finished" and finished["verified"]
+    assert state["job"] is None
+
+
 def test_replacement_allocation_is_rejected(delivered, scheduler):
     worker, worker_path, _ = delivered
     saved = standing.checkpoint(worker, worker_path, standing.SHELL_IMAGE)
@@ -382,6 +466,49 @@ def test_replacement_allocation_is_rejected(delivered, scheduler):
     saved["allocation_id"] = "original-allocation"
     with pytest.raises(RuntimeError, match="replaced"):
         standing.current_allocation(client, saved)
+
+
+@pytest.mark.parametrize("retry_step", ["stop", "cleanup"])
+def test_interrupted_verified_cleanup_resumes_from_disk(
+    delivered, scheduler, monkeypatch, retry_step
+):
+    worker, worker_path, _ = delivered
+    saved = standing.checkpoint(worker, worker_path, standing.SHELL_IMAGE)
+    path = standing.service_path(worker_path)
+    client, state = scheduler
+    state["job"] = {"Meta": saved["metadata"]}
+    saved.update(phase="drift_observed", allocation_id="service-allocation")
+    standing.register_volumes(client, saved, path)
+    monkeypatch.setattr(standing, "SHUTDOWN_SECONDS", 0)
+    monkeypatch.setattr(standing.httpx, "Client", lambda **kwargs: nullcontext(client))
+    monkeypatch.setattr(
+        sys, "argv", ["standing.py", "stop", "--receipt", str(worker_path)]
+    )
+    remove = standing.remove_staging
+
+    def interrupt_after_removal(path):
+        remove(path)
+        raise OSError("interrupted during final cleanup")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(standing, "remove_staging", interrupt_after_removal)
+        assert standing.main() == 1
+    pending = json.loads(path.read_text())
+    assert pending["phase"] == "cleanup_pending"
+    assert pending["observations"]["shutdown"]["passed"]
+    assert state["job"] is None and state["volumes"] == {}
+    for directory in ("data", "originals", "delivery"):
+        assert not (path.parent / directory).exists()
+
+    monkeypatch.setattr(
+        sys, "argv", ["standing.py", retry_step, "--receipt", str(worker_path)]
+    )
+    assert standing.main() == 0
+    finished = json.loads(path.read_text())
+    assert finished["observations"] == pending["observations"]
+    assert finished["phase"] == "finished" and finished["verified"]
+    assert all(finished["cleanup"].values()) and not finished["cleanup_pending"]
+    assert state["posts"] == 0
 
 
 def test_cli_rejected_repeat_submission_preserves_completed_receipt(delivered):

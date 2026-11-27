@@ -1,5 +1,51 @@
 # Slice 12 evidence — 2026-11-27
 
+## Observer file identity and interrupted cleanup — 2026-11-27
+
+The original observer accepted same-content replacements for both disposable files.
+The regression suite now checks regular-file and symlink replacements, including a
+symlink that resolves to the original inode. The drift-reset tests verify that an
+unrelated file retains mode `0600` when the target entry refers to it.
+
+The cleanup regression interrupts teardown after the job, volumes and directories
+have gone. It reopens the receipt through each of `stop` and `cleanup`. Both commands
+preserve the recorded shutdown samples and finish without another submission.
+A separate regression covers a retry after Nomad has already collected the allocation.
+[Observer and recovery tests](../../dev/phase2/test_standing.py)
+
+### Offline checks
+
+Final `make check` and `make test` output included
+
+```text
+All checks passed!
+119 files already formatted
+================ 284 passed, 14 deselected in 235.89s (0:03:55) ================
+```
+
+### Live worker and service
+
+`HARNESS_PHASE2_MCP_URL=http://host.docker.internal:8001/mcp bash docs/phase2/SLICE12_EVIDENCE.sh`
+exited 0 for a fresh run. The evidence script verified one worker session, zero AI
+operator sessions, and retrieval of the submitted script after cleanup. The receipt
+is at `.harness/phase2/slice12-Wpc5cC/phase2/service/receipt.json`.
+
+| Observation | Elapsed seconds | Samples | Target mode at acceptance |
+| --- | ---: | ---: | --- |
+| Startup | 0.009660 | 1 | `0600` |
+| Deliberate drift | 0.221975 | 3 | `0600` |
+| After confirmed shutdown | 4.038092 | 38 | `0644` throughout |
+
+The evidence script checked both content hashes, the sibling’s `0644` mode, and
+removal of both jobs and their volumes. A final read of the service receipt and
+its staging directory produced
+
+```text
+target device=2096 inode=281475
+sibling device=2096 inode=281490
+finished, verified, data/delivery/originals removed
+```
+
 ## Engineering review follow-up — 2026-11-27
 
 The review found six issues and fixed them with seven regression cases that

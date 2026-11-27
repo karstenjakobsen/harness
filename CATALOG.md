@@ -196,7 +196,9 @@ submitting it. Checkpoint retries retain their selected image and discard failed
 staging. `submit` rechecks the script and job digests and sends the validated job
 bytes once. The file-mode fixture seeds the goal with `--duration standing`.
 `observe` requires startup correction before deliberately introducing drift.
-`stop` confirms shutdown, samples the reset target for four seconds and cleans
-up. `cleanup` recovers the recorded service's jobs, volumes and directories.
+`stop` confirms shutdown and samples the reset target for four seconds. After
+verification it saves `cleanup_pending`. Both `stop` and `cleanup` can resume
+teardown from that phase and finalize the verified receipt. For an abandoned
+experiment, `cleanup` removes the recorded job, volumes and directories.
 Scheduler commands accept `--nomad-addr` and keep the original destination.
 [Manual sequence and acceptance](README.md#run-the-slice-12-standing-service-experiment)

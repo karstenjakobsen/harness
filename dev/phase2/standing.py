@@ -7,9 +7,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -37,11 +39,38 @@ def service_path(worker_path):
 
 
 def remove_staging(path):
-    for name in ("delivery", "data"):
+    for name in ("delivery", "data", "originals"):
         directory = path.parent / name
         if directory.exists():
             directory.chmod(0o700)
             shutil.rmtree(directory)
+
+
+def stage_files(directory):
+    data = directory / "data"
+    data.mkdir(exist_ok=True)
+    # Keep an unmounted link so unlinking a data entry cannot recycle its inode
+    # between observer processes.
+    originals = directory / "originals"
+    originals.mkdir(mode=0o700, exist_ok=True)
+    files = {}
+    for name in ("target", "sibling"):
+        contents = f"Slice 12 {name} contents must remain unchanged.\n".encode()
+        original = originals / name
+        with original.open("wb") as file:
+            file.write(contents)
+            os.fchmod(file.fileno(), 0o644)
+            info = os.fstat(file.fileno())
+        entry = data / name
+        entry.unlink(missing_ok=True)
+        entry.hardlink_to(original)
+        files[name] = {
+            "sha256": hashlib.sha256(contents).hexdigest(),
+            "initial_mode": "0644",
+            "device": info.st_dev,
+            "inode": info.st_ino,
+        }
+    return files
 
 
 def verify_handoff(worker, worker_path):
@@ -103,17 +132,19 @@ def checkpoint(worker, worker_path, image):
             raise ValueError("The checkpoint already selects another shell image.")
         verify_handoff(worker, worker_path)
         validate_checkpoint(saved)
+        if any("inode" not in entry for entry in saved["files"].values()):
+            # An older, unsubmitted checkpoint can safely stage fresh originals.
+            saved["files"] = stage_files(path.parent)
+            experiment.save_json(path, saved)
         return saved
     inspection = verify_handoff(worker, worker_path)
     directory = path.parent
     directory.mkdir(exist_ok=True)
     delivery = directory / "delivery"
-    data = directory / "data"
     # A failed checkpoint can be retried before there has been any submission.
     try:
         delivery.mkdir(exist_ok=True)
         delivery.chmod(0o700)
-        data.mkdir(exist_ok=True)
         artifact = experiment.export_artifact(
             worker,
             delivery / "maintain-mode.sh",
@@ -122,12 +153,7 @@ def checkpoint(worker, worker_path, image):
         )
         (delivery / "maintain-mode.sh").chmod(0o444)
         delivery.chmod(0o555)
-        files = {}
-        for name in ("target", "sibling"):
-            file = data / name
-            file.write_text(f"Slice 12 {name} contents must remain unchanged.\n")
-            file.chmod(0o644)
-            files[name] = {"sha256": digest(file), "initial_mode": "0644"}
+        files = stage_files(directory)
         identifier = f"phase2-service-{uuid4().hex}"
         metadata = {
             "phase2_attempt_id": worker["attempt_id"],
@@ -315,11 +341,8 @@ def submit(client, worker, worker_path, saved, path, timeout=30):
         )
     verify_handoff(worker, worker_path)
     payload = validate_checkpoint(saved)
-    sample_files(saved, path.parent / "data", time.monotonic())
-    if any(
-        (path.parent / "data" / name).stat().st_mode & 0o777 != 0o644
-        for name in saved["files"]
-    ):
+    sample = sample_files(saved, path.parent / "data", time.monotonic())
+    if any(sample[name]["mode"] != "0644" for name in saved["files"]):
         raise ValueError("Both disposable files must start at 0644.")
     if experiment.retained_job(client, saved) is not None:
         raise ValueError("A job already owns this service ID.")
@@ -363,12 +386,30 @@ def submit(client, worker, worker_path, saved, path, timeout=30):
     return saved
 
 
+@contextmanager
+def open_original(data, name, expected):
+    if "device" not in expected or "inode" not in expected:
+        raise RuntimeError(f"The checkpoint has no recorded file identity for {name}.")
+
+    def opener(path, flags):
+        return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
+
+    with open(data / name, "rb", opener=opener) as file:
+        info = os.fstat(file.fileno())
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (
+            expected["device"],
+            expected["inode"],
+        ):
+            raise RuntimeError(f"The service replaced the original {name} file.")
+        yield file, info
+
+
 def sample_files(saved, data, started):
     sample = {"at": datetime.now(UTC).isoformat()}
     for name, expected in saved["files"].items():
-        file = data / name
-        mode = f"{file.stat().st_mode & 0o7777:04o}"
-        actual = digest(file)
+        with open_original(data, name, expected) as (file, info):
+            mode = f"{stat.S_IMODE(info.st_mode):04o}"
+            actual = hashlib.file_digest(file, "sha256").hexdigest()
         sample[name] = {"mode": mode, "sha256": actual}
         if actual != expected["sha256"]:
             raise RuntimeError(f"The service changed {name} contents.")
@@ -385,7 +426,9 @@ def observe_mode(saved, data, stage, deadline, check, persist, *, hold=False):
     started = time.monotonic()
     try:
         if stage in ("drift", "shutdown"):
-            (data / "target").chmod(0o644)
+            with open_original(data, "target", saved["files"]["target"]) as (file, _):
+                started = time.monotonic()
+                os.fchmod(file.fileno(), 0o644)
         while True:
             check()
             sample = sample_files(saved, data, started)
@@ -485,9 +528,9 @@ def cleanup(client, saved, path):
                 )
                 if response.is_success:
                     (path.parent / f"{stream}.log").write_bytes(response.content)
-            experiment.request(
-                client, "GET", f"client/allocation/{allocation['ID']}/gc"
-            )
+            collected = client.get(f"client/allocation/{allocation['ID']}/gc")
+            if collected.status_code != 404:
+                collected.raise_for_status()
         experiment.request(client, "DELETE", f"job/{saved['job_id']}?purge=true")
     if experiment.retained_job(client, saved) is not None:
         raise RuntimeError("The service job survived cleanup.")
@@ -501,28 +544,34 @@ def cleanup(client, saved, path):
             "directories_removed": True,
         },
     )
+    if saved["phase"] == "cleanup_pending":
+        saved.update(phase="finished", verified=True)
     experiment.save_json(path, saved)
 
 
 def stop(client, worker, worker_path, saved, path):
     if saved["phase"] == "finished":
         return saved
+    if saved["phase"] == "cleanup_pending":
+        cleanup(client, saved, path)
+        return saved
     if saved["phase"] not in ("drift_observed", "stopping"):
         raise ValueError(
             "Require startup and drift observations before shutdown acceptance."
         )
-    saved["phase"] = "stopping"
-    experiment.save_json(path, saved)
-    stop_allocations(client, saved, path)
-    observe_mode(
-        saved,
-        path.parent / "data",
-        "shutdown",
-        SHUTDOWN_SECONDS,
-        lambda: current_allocation(client, saved, stopped=True),
-        lambda: experiment.save_json(path, saved),
-        hold=True,
-    )
+    if not saved["observations"].get("shutdown", {}).get("passed"):
+        saved["phase"] = "stopping"
+        experiment.save_json(path, saved)
+        stop_allocations(client, saved, path)
+        observe_mode(
+            saved,
+            path.parent / "data",
+            "shutdown",
+            SHUTDOWN_SECONDS,
+            lambda: current_allocation(client, saved, stopped=True),
+            lambda: experiment.save_json(path, saved),
+            hold=True,
+        )
     inspection = verify_handoff(worker, worker_path)
     experiment.save_json(path.parent / "after-service-attempt.json", inspection)
     artifact = experiment.export_artifact(
@@ -533,9 +582,9 @@ def stop(client, worker, worker_path, saved, path):
     )
     if artifact != saved["artifact"]:
         raise RuntimeError("The saved artifact metadata changed.")
-    cleanup(client, saved, path)
-    saved.update(phase="finished", verified=True)
+    saved["phase"] = "cleanup_pending"
     experiment.save_json(path, saved)
+    cleanup(client, saved, path)
     return saved
 
 
@@ -563,7 +612,12 @@ def main():
                 allowed = {
                     "submit": {"checkpoint"},
                     "observe": {"running", "drift_observed"},
-                    "stop": {"drift_observed", "stopping", "finished"},
+                    "stop": {
+                        "drift_observed",
+                        "stopping",
+                        "cleanup_pending",
+                        "finished",
+                    },
                 }
                 if args.step in allowed and saved["phase"] not in allowed[args.step]:
                     raise ValueError(
@@ -603,6 +657,9 @@ def main():
                         subprocess.SubprocessError,
                         httpx.HTTPError,
                     ) as error:
+                        if saved["phase"] in ("cleanup_pending", "finished"):
+                            # The on-disk receipt can resume verified teardown.
+                            raise
                         saved.update(error=str(error), verified=False)
                         try:
                             cleanup(client, saved, path)
