@@ -135,3 +135,11 @@ one real Codex worker session, zero AI operator sessions and the artifact saved
 through authenticated worker MCP. The owner retrieves that artifact through
 Harness after worker exit and scratch cleanup. Optional scripted smoke tests
 record their scheduler results in their own receipts. [Slice 11 experiment](docs/phase2/SLICE11.md)
+
+The container worker uses Codex `danger-full-access`, with isolation supplied by
+the container user, mounts and Docker's security profiles. A terminal experiment
+receipt retains its allocation and exit before teardown. `verify_pending` retries
+the final Harness export, and `cleanup_pending` retries teardown. An interrupted
+active run is stopped and its exact runtime is cleaned up. Executing the workload
+again uses a fresh attempt. Runtime process identity and grant ownership let
+recovery target that run's listener, credential and private files.

@@ -155,6 +155,14 @@ bytes with the attempt, goal revision, operator and grant. An authorized retry
 of that path returns the original artifact after scratch changes or cleanup.
 Another path conflicts. Goal completion remains a separate decision.
 
+The generic container worker runs Codex with `--sandbox danger-full-access`.
+Docker's default security profiles and the container's user and mounts supply
+its execution boundary. The development experiment persists terminal outcomes
+before teardown. Repeating `run` for a `verify_pending` receipt retries the
+Harness export. Recovering an interrupted active run revokes its credential,
+stops its owned MCP process and removes its runtime, job and volumes. Another
+execution uses a fresh attempt. [Experiment commands and recovery](README.md#run-the-slice-11-worker-experiment)
+
 `make worker-image` preserves the generic `harness-worker:slice10` image and its
 `harness-worker run --attempt-id ID` entrypoint. The person launching the workload
 provides scratch, endpoint, credential and model access at runtime. During Phase 2,

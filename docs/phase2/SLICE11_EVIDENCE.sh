@@ -28,6 +28,7 @@ fi
 import hashlib
 import json
 import re
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,10 @@ evidence = Path(sys.argv[2])
 receipt = json.loads(path.read_text())
 outcome = receipt["execution"]
 assert receipt["mode"] == "worker" and outcome["verified"]
+job = json.loads(Path(receipt["job_path"]).read_text())
+task = job["Job"]["TaskGroups"][0]["Tasks"][0]
+assert not task["Config"].get("security_opt")
+assert receipt["runtime"]["cleaned"]
 assert outcome["allocation_count"] == 1 and outcome["exit_code"] == 0
 assert outcome["worker_sessions"] == 1 and outcome["ai_operator_sessions"] == 0
 trace = path.parent / "evidence/stdout.log"
@@ -45,12 +50,15 @@ assert sum(event.get("type") == "thread.started" for event in events) == 1
 assert all(command[0] != "ask" for command in receipt["owner_commands"])
 assert not (path.parent / "scratch").exists()
 assert not (path.parent / "runtime").exists()
+with socket.socket() as connection:
+    assert connection.connect_ex(("127.0.0.1", receipt["mcp_port"])) != 0
 
 def owner(*args):
     result = subprocess.run([receipt["operator_cli"], *map(str, args)], cwd=receipt["workspace"], capture_output=True, text=True, check=True, timeout=30)
     return json.loads(result.stdout)
 
 inspection = owner("work", "show", receipt["attempt_id"])
+assert inspection["attempt"]["grant_id"] is None
 for tool in ("get_work_brief", "read_skill", "submit_work_result"):
     assert any(call["tool"] == tool and call["outcome"] == "returned" for call in inspection["calls"])
 artifact = owner("work", "artifact", receipt["goal_id"], "--output", evidence / "retrieved-cities.txt")

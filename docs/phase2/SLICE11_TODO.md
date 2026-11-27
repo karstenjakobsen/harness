@@ -16,6 +16,14 @@ writes the deliverable and submits it through worker MCP. [Slice 11 plan](SLICE1
 - [x] Add Make targets, update the command catalog and terminology, and document the individual steps and a receipt in the README.
 - [x] Run `make check` and `make test`. Create and run `SLICE11_EVIDENCE.sh`, capture actual output in `SLICE11_EVIDENCE.md`, and report required live acceptance separately from smoke tests.
 
-Verified on 2026-11-27. Required live worker acceptance passed with the owner-approved
-per-job seccomp and AppArmor exceptions. `make check` passed and `make test` passed
-244 tests. Optional scheduler smoke tests also passed. [Captured evidence](SLICE11_EVIDENCE.md) · [Evidence script](SLICE11_EVIDENCE.sh)
+Verified on 2026-11-27. Updated live worker acceptance passed with Codex
+`danger-full-access` and Docker default security profiles. `make check` passed
+and `make test` passed 248 tests. Optional scheduler smoke tests also passed. [Captured evidence](SLICE11_EVIDENCE.md) · [Evidence script](SLICE11_EVIDENCE.sh)
+
+## Container isolation and recovery review
+
+- [x] Run the container worker with Codex full access and default Docker security profiles.
+- [x] Persist the observed allocation and exit before cleanup. Retry a failed final export through Harness while retaining one Nomad submission.
+- [x] Record runtime grant and MCP process ownership before execution. Recover interruption by revoking the old credential, stopping its listener and removing the private directory.
+- [x] Exercise both regressions with real CLI processes, SQLite files and MCP listeners, including older failed-export receipts and process identity mismatches.
+- [x] Capture the updated live and offline evidence.

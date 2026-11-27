@@ -137,20 +137,28 @@ MCP and removes its job, volumes and runtime directories after execution. Schedu
 observations stay in the experiment receipt. The goal remains active at its
 original revision. [Slice 11 acceptance](docs/phase2/SLICE11.md)
 
-On the Docker Desktop host used for the captured run, Bubblewrap required the
-owner-approved per-task `seccomp=unconfined` and `apparmor=unconfined` options.
-The same generic image then completed its real worker handoff. Reproduce that
-configuration with the explicit options below.
+The worker image runs Codex with `--sandbox danger-full-access`, using the
+container as the isolation boundary. Worker commands inherit the container
+user's filesystem and network permissions. The live handoff passes with Docker's
+default seccomp and AppArmor profiles. On Docker Desktop, run acceptance with
+its worker-reachable MCP address.
 
 ```sh
-HARNESS_PHASE2_MCP_URL=http://host.docker.internal:8001/mcp \
-HARNESS_PHASE2_ALLOW_NAMESPACE_OPTIONS=1 make test-phase2
+HARNESS_PHASE2_MCP_URL=http://host.docker.internal:8001/mcp make test-phase2
 ```
 
-Individual rendering accepts repeated `--docker-security-opt` arguments. The
-chosen options are visible in the rendered job's `security_opt` field. The
-`systempaths=unconfined` option was rejected by the Docker API used by Nomad.
-[Captured live results](docs/phase2/SLICE11_EVIDENCE.md)
+Receipts persist the terminal allocation and exit before cleanup. A failed final
+export leaves `phase: "verify_pending"`. Repeating `run` retries that export from
+Harness. `cleanup_pending` retries the recorded teardown. These stages preserve
+the original worker session and submission.
+
+After an interruption before a terminal allocation was observed, repeating `run`
+revokes the run's grant, stops its owned MCP listener and cleans up its Nomad job,
+volumes and private runtime directory. The attempt records the interruption.
+Another execution uses a fresh attempt. Runtime ownership includes a process ID,
+kernel start time and run marker, and the MCP process lifetime is bound to its
+runner. Older receipts with a completed allocation also recover through the
+saved result. [Captured live and recovery results](docs/phase2/SLICE11_EVIDENCE.md)
 
 `make test-phase2-smoke` runs two scripted city writers from separate empty
 workspaces and an exit-7 failure case. These optional scheduler checks use the

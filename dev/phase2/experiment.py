@@ -6,13 +6,15 @@ import hashlib
 import json
 import os
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import sysconfig
 import time
-from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -188,8 +190,6 @@ exec harness-worker run --attempt-id "$HARNESS_WORKER_ATTEMPT_ID"
             "HARNESS_WORKER_MCP_URL": args.mcp_url
             or f"http://127.0.0.1:{args.mcp_port}/mcp",
         }
-    if args.docker_security_opt:
-        config["security_opt"] = args.docker_security_opt
     environment = Environment(undefined=StrictUndefined)
     template = environment.from_string((DIRECTORY / "job.json.j2").read_text())
     job = json.loads(
@@ -244,116 +244,245 @@ def allocations(client, receipt):
     return request(client, "GET", f"job/{receipt['job_id']}/allocations").json() or []
 
 
-@contextmanager
+def process_start_time(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except FileNotFoundError:
+        return None
+
+
+def stop_owned_server(server, owner):
+    try:
+        descriptor = os.pidfd_open(server["pid"])
+    except ProcessLookupError:
+        return
+    try:
+        if select.select([descriptor], [], [], 0)[0]:
+            return
+        if process_start_time(server["pid"]) != server["start_time"]:
+            return
+        if owner:
+            environment = (
+                Path(f"/proc/{server['pid']}/environ").read_bytes().split(b"\0")
+            )
+            if f"HARNESS_PHASE2_RUNTIME_OWNER={owner}".encode() not in environment:
+                raise RuntimeError(
+                    "The recorded MCP process has a different runtime owner."
+                )
+        signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+        if not select.select([descriptor], [], [], 10)[0]:
+            signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            if not select.select([descriptor], [], [], 5)[0]:
+                raise RuntimeError("The owned MCP process could not be stopped.")
+    except ProcessLookupError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def legacy_runtime(receipt, directory):
+    # Older interrupted receipts recorded the workspace and port. Match the exact
+    # owner CLI invocation before recording a process identity for cleanup.
+    servers = []
+    for process in Path("/proc").iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            arguments = (process / "cmdline").read_bytes().decode().split("\0")
+            command = ["work", "--workspace", receipt["workspace"], "serve-mcp"]
+            index = arguments.index("work")
+            if (
+                receipt["operator_cli"] in arguments[:2]
+                and arguments[index : index + 4] == command
+                and arguments[arguments.index("--port") + 1] == str(receipt["mcp_port"])
+            ):
+                pid = int(process.name)
+                servers.append({"pid": pid, "start_time": process_start_time(pid)})
+        except (
+            FileNotFoundError,
+            ProcessLookupError,
+            PermissionError,
+            ValueError,
+            IndexError,
+        ):
+            continue
+    return {
+        "owner": None,
+        "servers": servers,
+        "grant_pending": (directory / "runtime/credential").exists(),
+        "grant_id": None,
+        "cleaned": False,
+    }
+
+
+def cleanup_runtime(receipt, receipt_path):
+    if receipt["mode"] != "worker":
+        return
+    directory = receipt_path.parent
+    info = receipt.get("runtime")
+    if info is None:
+        if not (directory / "runtime").exists():
+            return
+        info = legacy_runtime(receipt, directory)
+        receipt["runtime"] = info
+        save_json(receipt_path, receipt)
+    if info.get("cleaned"):
+        return
+    if info.get("grant_id") or info.get("grant_pending"):
+        current = owner_cli(receipt, "work", "show", receipt["attempt_id"])["attempt"][
+            "grant_id"
+        ]
+        if current is not None and (
+            info.get("grant_id") is None or current == info["grant_id"]
+        ):
+            owner_cli(receipt, "work", "revoke-credential", receipt["attempt_id"])
+        info["grant_pending"] = False
+        info["grant_id"] = None
+        save_json(receipt_path, receipt)
+    for server in info["servers"]:
+        stop_owned_server(server, info["owner"])
+    runtime = directory / "runtime"
+    if runtime.exists():
+        shutil.rmtree(runtime)
+    info["cleaned"] = True
+    save_json(receipt_path, receipt)
+
+
+PARENT_GUARD = """import ctypes, os, signal, sys
+parent = int(sys.argv[1])
+if ctypes.CDLL(None).prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+    raise SystemExit("Cannot bind the MCP process lifetime to its runner")
+if os.getppid() != parent:
+    raise SystemExit(1)
+os.execv(sys.argv[2], sys.argv[2:])
+"""
+
+
 def worker_runtime(client, receipt, receipt_path, auth_file):
     directory = receipt_path.parent
     scratch = directory / "scratch"
     runtime = directory / "runtime"
+    info = {
+        "owner": uuid4().hex,
+        "servers": [],
+        "grant_pending": False,
+        "grant_id": None,
+        "cleaned": False,
+    }
+    receipt["runtime"] = info
+    save_json(receipt_path, receipt)
     scratch.mkdir(mode=0o700)
     runtime.mkdir(mode=0o700)
-    server = None
-    granted = False
-    try:
-        owner_cli(receipt, "work", "bind-scratch", receipt["attempt_id"], scratch)
-        owner_cli(
-            receipt,
-            "work",
-            "issue-credential",
-            receipt["attempt_id"],
-            "--output",
-            runtime / "credential",
+    owner_cli(receipt, "work", "bind-scratch", receipt["attempt_id"], scratch)
+    info["grant_pending"] = True
+    save_json(receipt_path, receipt)
+    grant = owner_cli(
+        receipt,
+        "work",
+        "issue-credential",
+        receipt["attempt_id"],
+        "--output",
+        runtime / "credential",
+    )
+    info.update(grant_id=grant["id"], grant_pending=False)
+    save_json(receipt_path, receipt)
+    shutil.copyfile(auth_file, runtime / "auth.json")
+    (runtime / "auth.json").chmod(0o600)
+    ready = [
+        node
+        for node in request(client, "GET", "nodes").json()
+        if node["Status"] == "ready"
+        and node.get("Drivers", {}).get("docker", {}).get("Healthy")
+    ]
+    if len(ready) != 1:
+        raise RuntimeError(
+            "The worker experiment requires one ready Docker-capable Nomad client."
         )
-        granted = True
-        shutil.copyfile(auth_file, runtime / "auth.json")
-        (runtime / "auth.json").chmod(0o600)
-        ready = [
-            node
-            for node in request(client, "GET", "nodes").json()
-            if node["Status"] == "ready"
-            and node.get("Drivers", {}).get("docker", {}).get("Healthy")
-        ]
-        if len(ready) != 1:
-            raise RuntimeError(
-                "The worker experiment requires one ready Docker-capable Nomad client."
-            )
-        for name in ("scratch", "runtime"):
-            volume = {
-                "Name": f"{receipt['job_id']}-{name}",
-                "Namespace": "default",
-                "NodeID": ready[0]["ID"],
-                "HostPath": str(directory / name),
-                "RequestedCapabilities": [
-                    {
-                        "AccessMode": "single-node-reader-only"
-                        if name == "runtime"
-                        else "single-node-writer",
-                        "AttachmentMode": "file-system",
-                    }
-                ],
-            }
-            registered = request(
-                client, "PUT", "volume/host/register", json={"Volume": volume}
-            ).json()["Volume"]
-            receipt["volume_ids"][name] = registered["ID"]
-            save_json(receipt_path, receipt)
-        with (directory / "evidence/worker-mcp.log").open("w") as log:
-            server = subprocess.Popen(
-                [
-                    receipt["operator_cli"],
-                    "work",
-                    "--workspace",
-                    receipt["workspace"],
-                    "serve-mcp",
-                    "--host",
-                    "0.0.0.0"
-                    if urlsplit(receipt["mcp_url"]).hostname
-                    not in ("127.0.0.1", "localhost")
-                    else "127.0.0.1",
-                    "--allowed-host",
-                    "127.0.0.1:*",
-                    "--allowed-host",
-                    f"{urlsplit(receipt['mcp_url']).hostname}:*",
-                    "--port",
-                    str(receipt["mcp_port"]),
-                ],
-                stdout=log,
-                stderr=log,
-            )
-            with httpx.Client(timeout=0.5, trust_env=False) as probe:
-                deadline = time.monotonic() + 15
-                while True:
-                    if server.poll() is not None:
-                        raise RuntimeError("Worker MCP stopped during startup.")
-                    try:
-                        if (
-                            probe.get(
-                                f"http://127.0.0.1:{receipt['mcp_port']}/mcp"
-                            ).status_code
-                            == 401
-                        ):
-                            break
-                    except httpx.TransportError:
-                        pass
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError("Worker MCP did not become ready.")
-                    time.sleep(0.1)
-            yield
-    finally:
-        try:
-            if granted:
-                owner_cli(receipt, "work", "revoke-credential", receipt["attempt_id"])
-        finally:
+    for name in ("scratch", "runtime"):
+        volume = {
+            "Name": f"{receipt['job_id']}-{name}",
+            "Namespace": "default",
+            "NodeID": ready[0]["ID"],
+            "HostPath": str(directory / name),
+            "RequestedCapabilities": [
+                {
+                    "AccessMode": "single-node-reader-only"
+                    if name == "runtime"
+                    else "single-node-writer",
+                    "AttachmentMode": "file-system",
+                }
+            ],
+        }
+        registered = request(
+            client, "PUT", "volume/host/register", json={"Volume": volume}
+        ).json()["Volume"]
+        receipt["volume_ids"][name] = registered["ID"]
+        save_json(receipt_path, receipt)
+    command = [
+        receipt["operator_cli"],
+        "work",
+        "--workspace",
+        receipt["workspace"],
+        "serve-mcp",
+        "--host",
+        "0.0.0.0"
+        if urlsplit(receipt["mcp_url"]).hostname not in ("127.0.0.1", "localhost")
+        else "127.0.0.1",
+        "--allowed-host",
+        "127.0.0.1:*",
+        "--allowed-host",
+        f"{urlsplit(receipt['mcp_url']).hostname}:*",
+        "--port",
+        str(receipt["mcp_port"]),
+    ]
+    with (directory / "evidence/worker-mcp.log").open("w") as log:
+        server = subprocess.Popen(
+            [sys.executable, "-c", PARENT_GUARD, str(os.getpid()), *command],
+            stdout=log,
+            stderr=log,
+            env={**os.environ, "HARNESS_PHASE2_RUNTIME_OWNER": info["owner"]},
+        )
+    info["servers"].append(
+        {"pid": server.pid, "start_time": process_start_time(server.pid)}
+    )
+    save_json(receipt_path, receipt)
+    with httpx.Client(timeout=0.5, trust_env=False) as probe:
+        deadline = time.monotonic() + 15
+        while True:
+            if server.poll() is not None:
+                raise RuntimeError("Worker MCP stopped during startup.")
             try:
-                if server is not None:
-                    server.terminate()
-                    try:
-                        server.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        server.kill()
-                        server.wait(timeout=5)
-            finally:
-                if runtime.exists():
-                    shutil.rmtree(runtime)
+                if (
+                    probe.get(f"http://127.0.0.1:{receipt['mcp_port']}/mcp").status_code
+                    == 401
+                ):
+                    return server
+            except httpx.TransportError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Worker MCP did not become ready.")
+            time.sleep(0.1)
+
+
+def export_artifact(
+    receipt, destination, expected_hash=None, expected_artifact_id=None
+):
+    with TemporaryDirectory(dir=destination.parent) as temporary:
+        output = Path(temporary) / "artifact"
+        artifact = owner_cli(
+            receipt, "work", "artifact", receipt["goal_id"], "--output", output
+        )
+        if expected_artifact_id is not None and artifact["id"] != expected_artifact_id:
+            raise RuntimeError(
+                "The goal's latest artifact differs from this attempt's saved artifact."
+            )
+        actual = hashlib.sha256(output.read_bytes()).hexdigest()
+        if actual != artifact["sha256"] or (
+            expected_hash is not None and actual != expected_hash
+        ):
+            raise RuntimeError("Harness retrieval changed the saved artifact bytes.")
+        output.replace(destination)
+    return artifact
 
 
 def verify_worker(receipt, evidence):
@@ -380,13 +509,11 @@ def verify_worker(receipt, evidence):
         artifact["work_item_id"],
     ) != (receipt["operator_id"], receipt["goal_revision"], receipt["work_item_id"]):
         raise RuntimeError("The saved worker artifact has unexpected attribution.")
-    owner_cli(
+    export_artifact(
         receipt,
-        "work",
-        "artifact",
-        receipt["goal_id"],
-        "--output",
         evidence / receipt["fixture"]["filename"],
+        artifact["sha256"],
+        artifact["id"],
     )
     return {
         "worker_sessions": sessions,
@@ -439,6 +566,106 @@ def cleanup_volumes(client, receipt):
         shutil.rmtree(directory / "scratch")
 
 
+def check_result(client, receipt, receipt_path):
+    evidence = receipt_path.parent / "evidence"
+    outcome = receipt["execution"]
+    allocation = json.loads((evidence / "allocation.json").read_text())
+    for stream in ("stdout", "stderr"):
+        logs = request(
+            client,
+            "GET",
+            f"client/fs/logs/{allocation['ID']}",
+            params={"task": "workload", "type": stream, "plain": "true"},
+        )
+        (evidence / f"{stream}.log").write_bytes(logs.content)
+    filename = receipt["fixture"]["filename"]
+    if receipt["mode"] == "worker":
+        events = [
+            json.loads(line)
+            for line in (evidence / "stdout.log").read_text().splitlines()
+            if line.startswith("{")
+        ]
+        outcome["worker_sessions"] = sum(
+            event.get("type") == "thread.started" for event in events
+        )
+        outcome["ai_operator_sessions"] = sum(
+            command[0] == "ask"
+            or (command[:2] == ["goal", "create"] and "--title" not in command)
+            for command in receipt["owner_commands"]
+        )
+        if outcome["ai_operator_sessions"] != 0:
+            raise RuntimeError("The experiment started an AI operator session.")
+        outcome.update(verify_worker(receipt, evidence))
+        content = (evidence / filename).read_bytes()
+        outcome["file_sha256"] = hashlib.sha256(content).hexdigest()
+    else:
+        source = f"{receipt['scratch']}/{filename}"
+        stat = client.get(f"client/fs/stat/{allocation['ID']}", params={"path": source})
+        missing = stat.status_code == 404 or (
+            stat.is_error and "no such file or directory" in stat.text
+        )
+        content = None
+        if not missing:
+            stat.raise_for_status()
+            file = request(
+                client,
+                "GET",
+                f"client/fs/cat/{allocation['ID']}",
+                params={"path": source},
+            )
+            content = file.content
+            (evidence / filename).write_bytes(content)
+            outcome["file_sha256"] = hashlib.sha256(content).hexdigest()
+    if (
+        outcome["exit_code"] != receipt["fixture"]["expected_exit_code"]
+        or outcome["task_restarts"] != 0
+    ):
+        raise RuntimeError(f"Unexpected task outcome {outcome}")
+    if outcome["exit_code"] == 0:
+        expected = ("\n".join(receipt["fixture"]["cities"]) + "\n").encode()
+        if content != expected:
+            raise RuntimeError(
+                "The recovered file differs from the fixture's exact city lines."
+            )
+    elif outcome["file_sha256"] is not None:
+        raise RuntimeError("The failure case unexpectedly produced a deliverable.")
+    goal = owner_cli(receipt, "goal", "show", receipt["goal_id"])
+    if (goal["revision"], goal["status"]) != (
+        receipt["goal_revision"],
+        "active",
+    ):
+        raise RuntimeError("The goal changed during the experiment.")
+    inspection = owner_cli(receipt, "work", "show", receipt["attempt_id"])
+    save_json(evidence / "harness-after.json", inspection)
+    receipt["result_checked"] = True
+    save_json(receipt_path, receipt)
+
+
+def verify_after_cleanup(receipt, receipt_path):
+    outcome = receipt["execution"]
+    receipt["phase"] = "verify_pending"
+    outcome["verified"] = False
+    save_json(receipt_path, receipt)
+    try:
+        if receipt["mode"] == "worker":
+            destination = (
+                receipt_path.parent
+                / "evidence"
+                / f"after-cleanup-{receipt['fixture']['filename']}"
+            )
+            export_artifact(
+                receipt, destination, outcome["file_sha256"], outcome["artifact_id"]
+            )
+        outcome.pop("verification_error", None)
+        outcome.pop("cleanup_error", None)
+        outcome["verified"] = True
+        receipt["phase"] = "finished"
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+        outcome["verification_error"] = str(error)
+    save_json(receipt_path, receipt)
+    return receipt
+
+
 def run(receipt, receipt_path, args):
     if args.timeout <= 0:
         raise ValueError("Timeout must be positive.")
@@ -446,11 +673,39 @@ def run(receipt, receipt_path, args):
         raise ValueError("Use the original Nomad destination for this receipt.")
     if receipt["phase"] == "finished":
         return receipt
-    if receipt["phase"] not in ("rendered", "running"):
+    # Reopen receipts written before terminal phases were introduced.
+    outcome = receipt.get("execution") or {}
+    if receipt["phase"] == "running" and (
+        outcome.get("exit_code") is not None
+        or outcome.get("state") in ("complete", "failed")
+    ):
+        receipt["phase"] = "observed"
+        if outcome.get("artifact_id") and outcome.get("cleanup", {}).get(
+            "scratch_removed"
+        ):
+            receipt["phase"] = "verify_pending"
+    if receipt["phase"] == "verify_pending":
+        return verify_after_cleanup(receipt, receipt_path)
+    if receipt["phase"] not in ("rendered", "running", "observed", "cleanup_pending"):
         raise ValueError("Render the job before running it.")
-    payload = Path(receipt["job_path"]).read_bytes()
-    if hashlib.sha256(payload).hexdigest() != receipt["job_sha256"]:
-        raise ValueError("The rendered job changed. Render again before submitting.")
+    fresh = receipt["phase"] == "rendered"
+    payload = None
+    if fresh:
+        payload = Path(receipt["job_path"]).read_bytes()
+        if hashlib.sha256(payload).hexdigest() != receipt["job_sha256"]:
+            raise ValueError(
+                "The rendered job changed. Render again before submitting."
+            )
+        outcome = {
+            "allocation_id": None,
+            "exit_code": None,
+            "file_sha256": None,
+            "verified": False,
+        }
+        receipt.update(
+            phase="running", nomad_address=args.nomad_addr, execution=outcome
+        )
+        save_json(receipt_path, receipt)
     evidence = receipt_path.parent / "evidence"
     evidence.mkdir(exist_ok=True)
     headers = (
@@ -459,149 +714,42 @@ def run(receipt, receipt_path, args):
         else {}
     )
     started = time.monotonic()
-    outcome = {
-        "allocation_id": None,
-        "exit_code": None,
-        "file_sha256": None,
-        "verified": False,
-    }
-    receipt.update(phase="running", nomad_address=args.nomad_addr, execution=outcome)
-    save_json(receipt_path, receipt)
-    with (
-        httpx.Client(
-            base_url=args.nomad_addr.rstrip("/") + "/v1/",
-            headers=headers,
-            timeout=5,
-            trust_env=False,
-        ) as client,
-        ExitStack() as stack,
-    ):
+    server = None
+    with httpx.Client(
+        base_url=args.nomad_addr.rstrip("/") + "/v1/",
+        headers=headers,
+        timeout=5,
+        trust_env=False,
+    ) as client:
         try:
-            if receipt["mode"] == "worker":
-                stack.enter_context(
-                    worker_runtime(client, receipt, receipt_path, args.auth_file)
-                )
-            if retained_job(client, receipt) is None:
-                try:
-                    request(
-                        client,
-                        "POST",
-                        "jobs",
-                        content=payload,
-                        headers={"Content-Type": "application/json"},
+            if fresh:
+                if receipt["mode"] == "worker":
+                    server = worker_runtime(
+                        client, receipt, receipt_path, args.auth_file
                     )
-                except httpx.TransportError, httpx.HTTPStatusError:
-                    if retained_job(client, receipt) is None:
-                        raise RuntimeError(
-                            "Submission outcome is unknown. Inspect the same job ID before retrying."
-                        ) from None
-            deadline = started + args.timeout
-            while True:
-                placed = allocations(client, receipt)
-                save_json(evidence / "allocations.json", placed)
-                if len(placed) > 1:
-                    raise RuntimeError("Expected exactly one allocation.")
-                if placed:
-                    allocation = request(
-                        client, "GET", f"allocation/{placed[0]['ID']}"
-                    ).json()
-                    outcome["allocation_id"] = allocation["ID"]
-                    outcome["state"] = allocation["ClientStatus"]
+                if retained_job(client, receipt) is None:
+                    receipt["submission_started"] = True
                     save_json(receipt_path, receipt)
-                    save_json(evidence / "allocation.json", allocation)
-                    if allocation["ClientStatus"] in ("complete", "failed"):
-                        break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        "Allocation did not finish before the bounded deadline."
-                    )
-                time.sleep(0.2)
-            task = (allocation.get("TaskStates") or {}).get("workload") or {}
-            outcome.update(
-                allocation_count=len(placed),
-                state=allocation["ClientStatus"],
-                task_restarts=task.get("Restarts"),
-                exit_code=next(
-                    (
-                        event.get("ExitCode")
-                        for event in reversed(task.get("Events") or [])
-                        if event["Type"] == "Terminated"
-                    ),
-                    None,
-                ),
-            )
-            for stream in ("stdout", "stderr"):
-                logs = request(
-                    client,
-                    "GET",
-                    f"client/fs/logs/{allocation['ID']}",
-                    params={"task": "workload", "type": stream, "plain": "true"},
+                    try:
+                        request(
+                            client,
+                            "POST",
+                            "jobs",
+                            content=payload,
+                            headers={"Content-Type": "application/json"},
+                        )
+                    except httpx.TransportError, httpx.HTTPStatusError:
+                        if retained_job(client, receipt) is None:
+                            raise RuntimeError(
+                                "Submission outcome is unknown. Inspect the same job ID before retrying."
+                            ) from None
+                wait_for_exit(client, receipt, receipt_path, started + args.timeout)
+            elif receipt["phase"] == "running":
+                outcome["error"] = (
+                    "The runner was interrupted. Recovery stops this attempt and cleans up its runtime. Use a fresh attempt to execute again."
                 )
-                (evidence / f"{stream}.log").write_bytes(logs.content)
-            filename = receipt["fixture"]["filename"]
-            if receipt["mode"] == "worker":
-                events = [
-                    json.loads(line)
-                    for line in (evidence / "stdout.log").read_text().splitlines()
-                    if line.startswith("{")
-                ]
-                outcome["worker_sessions"] = sum(
-                    event.get("type") == "thread.started" for event in events
-                )
-                outcome["ai_operator_sessions"] = sum(
-                    command[0] == "ask"
-                    or (command[:2] == ["goal", "create"] and "--title" not in command)
-                    for command in receipt["owner_commands"]
-                )
-                if outcome["ai_operator_sessions"] != 0:
-                    raise RuntimeError("The experiment started an AI operator session.")
-                outcome.update(verify_worker(receipt, evidence))
-                content = (evidence / filename).read_bytes()
-                outcome["file_sha256"] = hashlib.sha256(content).hexdigest()
-            else:
-                source = f"{receipt['scratch']}/{filename}"
-                stat = client.get(
-                    f"client/fs/stat/{allocation['ID']}", params={"path": source}
-                )
-                missing = stat.status_code == 404 or (
-                    stat.is_error and "no such file or directory" in stat.text
-                )
-                content = None
-                if not missing:
-                    stat.raise_for_status()
-                    file = request(
-                        client,
-                        "GET",
-                        f"client/fs/cat/{allocation['ID']}",
-                        params={"path": source},
-                    )
-                    content = file.content
-                    (evidence / filename).write_bytes(content)
-                    outcome["file_sha256"] = hashlib.sha256(content).hexdigest()
-            if (
-                outcome["exit_code"] != receipt["fixture"]["expected_exit_code"]
-                or outcome["task_restarts"] != 0
-            ):
-                raise RuntimeError(f"Unexpected task outcome {outcome}")
-            if outcome["exit_code"] == 0:
-                expected = ("\n".join(receipt["fixture"]["cities"]) + "\n").encode()
-                if content != expected:
-                    raise RuntimeError(
-                        "The recovered file differs from the fixture's exact city lines."
-                    )
-            elif outcome["file_sha256"] is not None:
-                raise RuntimeError(
-                    "The failure case unexpectedly produced a deliverable."
-                )
-            goal = owner_cli(receipt, "goal", "show", receipt["goal_id"])
-            if (goal["revision"], goal["status"]) != (
-                receipt["goal_revision"],
-                "active",
-            ):
-                raise RuntimeError("The goal changed during the experiment.")
-            inspection = owner_cli(receipt, "work", "show", receipt["attempt_id"])
-            save_json(evidence / "harness-after.json", inspection)
-            outcome["verified"] = True
+            if receipt["phase"] == "observed":
+                check_result(client, receipt, receipt_path)
         except (
             ValueError,
             OSError,
@@ -611,7 +759,21 @@ def run(receipt, receipt_path, args):
         ) as error:
             outcome["error"] = str(error)
         finally:
-            outcome["workload_seconds"] = round(time.monotonic() - started, 3)
+            if fresh:
+                outcome["workload_seconds"] = round(time.monotonic() - started, 3)
+            cleanup_errors = []
+            try:
+                cleanup_runtime(receipt, receipt_path)
+                if server is not None:
+                    server.wait(timeout=5)
+            except (
+                ValueError,
+                OSError,
+                RuntimeError,
+                subprocess.SubprocessError,
+                httpx.HTTPError,
+            ) as error:
+                cleanup_errors.append(str(error))
             try:
                 outcome["cleanup"] = cleanup(client, receipt)
             except (
@@ -621,41 +783,58 @@ def run(receipt, receipt_path, args):
                 subprocess.SubprocessError,
                 httpx.HTTPError,
             ) as error:
-                outcome["cleanup_error"] = str(error)
+                cleanup_errors.append(str(error))
+            if cleanup_errors:
+                outcome["cleanup_error"] = "\n".join(cleanup_errors)
                 outcome["verified"] = False
-            try:
-                stack.close()
-                if receipt["mode"] == "worker" and outcome["verified"]:
-                    recovered = (
-                        evidence / f"after-cleanup-{receipt['fixture']['filename']}"
-                    )
-                    owner_cli(
-                        receipt,
-                        "work",
-                        "artifact",
-                        receipt["goal_id"],
-                        "--output",
-                        recovered,
-                    )
-                    if (
-                        hashlib.sha256(recovered.read_bytes()).hexdigest()
-                        != outcome["file_sha256"]
-                    ):
-                        raise RuntimeError(
-                            "Harness retrieval after scratch cleanup changed the file."
-                        )
-            except (
-                ValueError,
-                OSError,
-                RuntimeError,
-                subprocess.SubprocessError,
-                httpx.HTTPError,
-            ) as error:
-                outcome["cleanup_error"] = str(error)
-                outcome["verified"] = False
-            receipt["phase"] = "running" if "cleanup_error" in outcome else "finished"
+                receipt["phase"] = "cleanup_pending"
+            else:
+                outcome.pop("cleanup_error", None)
+                receipt["phase"] = (
+                    "verify_pending" if receipt.get("result_checked") else "finished"
+                )
             save_json(receipt_path, receipt)
+    if receipt["phase"] == "verify_pending":
+        return verify_after_cleanup(receipt, receipt_path)
     return receipt
+
+
+def wait_for_exit(client, receipt, receipt_path, deadline):
+    evidence = receipt_path.parent / "evidence"
+    outcome = receipt["execution"]
+    while True:
+        placed = allocations(client, receipt)
+        save_json(evidence / "allocations.json", placed)
+        if len(placed) > 1:
+            raise RuntimeError("Expected exactly one allocation.")
+        if placed:
+            allocation = request(client, "GET", f"allocation/{placed[0]['ID']}").json()
+            outcome.update(
+                allocation_id=allocation["ID"],
+                state=allocation["ClientStatus"],
+                allocation_count=len(placed),
+            )
+            save_json(evidence / "allocation.json", allocation)
+            if allocation["ClientStatus"] in ("complete", "failed"):
+                task = (allocation.get("TaskStates") or {}).get("workload") or {}
+                outcome.update(
+                    task_restarts=task.get("Restarts"),
+                    exit_code=next(
+                        (
+                            event.get("ExitCode")
+                            for event in reversed(task.get("Events") or [])
+                            if event["Type"] == "Terminated"
+                        ),
+                        None,
+                    ),
+                )
+                receipt["phase"] = "observed"
+                save_json(receipt_path, receipt)
+                return
+            save_json(receipt_path, receipt)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Allocation did not finish before the bounded deadline.")
+        time.sleep(0.2)
 
 
 def main():
@@ -678,13 +857,6 @@ def main():
     render_parser.add_argument(
         "--mcp-url",
         help="Worker-reachable URL, including /mcp, for Docker Desktop or remote clients.",
-    )
-    render_parser.add_argument(
-        "--docker-security-opt",
-        action="append",
-        default=[],
-        choices=["seccomp=unconfined", "apparmor=unconfined"],
-        help="Explicit Docker security option for this experimental task.",
     )
     run_parser = commands.add_parser("run")
     run_parser.add_argument("--receipt", type=Path, required=True)

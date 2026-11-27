@@ -16,7 +16,7 @@ def test_entrypoint_uses_one_generic_codex_workspace_session():
     arguments = module["command"]("selected-attempt", environment)
     assert arguments[:4] == ["codex", "--ask-for-approval", "never", "exec"]
     assert "--json" in arguments and "--skip-git-repo-check" in arguments
-    assert arguments[arguments.index("--sandbox") + 1] == "workspace-write"
+    assert arguments[arguments.index("--sandbox") + 1] == "danger-full-access"
     assert arguments[arguments.index("-C") + 1] == "/workspace"
     assert 'mcp_servers.worker.bearer_token_env_var="HARNESS_WORKER_TOKEN"' in arguments
     assert "runtime-only-credential" not in " ".join(arguments)

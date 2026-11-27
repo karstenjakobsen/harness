@@ -7,10 +7,6 @@ mkdir -p .harness/phase2
 directory=$(mktemp -d "$PWD/.harness/phase2/slice11-XXXXXX")
 image=""
 seed_options=()
-render_options=()
-if [[ ${HARNESS_PHASE2_ALLOW_NAMESPACE_OPTIONS:-0} == 1 ]]; then
-  render_options+=(--docker-security-opt seccomp=unconfined --docker-security-opt apparmor=unconfined)
-fi
 if [[ $mode == worker ]]; then
   image=$(docker image inspect --format '{{.Id}}' "${WORKER_IMAGE:-harness-worker:slice10}")
 elif [[ $mode == smoke ]]; then
@@ -27,7 +23,7 @@ run_case() {
   .venv/bin/python dev/phase2/experiment.py seed --workspace "$workspace" "${seed_options[@]}" "$@"
   local receipt="$workspace/phase2/receipt.json"
   if [[ $mode == worker ]]; then
-    .venv/bin/python dev/phase2/experiment.py render --receipt "$receipt" --image "$image" "${render_options[@]}" --mcp-url "${HARNESS_PHASE2_MCP_URL:-http://127.0.0.1:8001/mcp}"
+    .venv/bin/python dev/phase2/experiment.py render --receipt "$receipt" --image "$image" --mcp-url "${HARNESS_PHASE2_MCP_URL:-http://127.0.0.1:8001/mcp}"
   else
     .venv/bin/python dev/phase2/experiment.py render --receipt "$receipt"
   fi
