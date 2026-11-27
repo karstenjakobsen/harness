@@ -4,9 +4,9 @@ Can we see what a worker did while it was running and inspect the same activity 
 
 ## One live acceptance run
 
-- [ ] Manually start one real Codex worker with zero AI operator sessions. From the host, follow its Nomad task stdout from the beginning. Save the emitted JSONL outside scratch under the attempt ID, with the job, allocation and task identifiers. Keep stderr separate and raw diagnostics private.
-- [ ] Display and persist a substantive event such as a command execution or MCP call. Then independently confirm the same task is still running. Retain the event and the timestamp of that observation. Show worker messages or visible reasoning summaries only when emitted.
-- [ ] At exit, record Nomad's observed outcome. Check any claimed submission against the worker MCP audit. Finish reading before allocation cleanup, then replay the captured activity by attempt ID. Record the manual commands, a sanitized excerpt and the live and replay observations in `SLICE13_EVIDENCE.md`. A failed worker can demonstrate capture and replay if the live-event check passed; report its delivery outcome accurately.
+- [x] Manually start one real Codex worker with zero AI operator sessions. From the host, follow its Nomad task stdout from the beginning. Save the emitted JSONL outside scratch under the attempt ID, with the job, allocation and task identifiers. Keep stderr separate and raw diagnostics private.
+- [x] Display and persist a substantive event such as a command execution or MCP call. Then independently confirm the same task is still running. Retain the event and the timestamp of that observation. Show worker messages or visible reasoning summaries only when emitted.
+- [x] At exit, record Nomad's observed outcome. Check any claimed submission against the worker MCP audit. Finish reading before allocation cleanup, then replay the captured activity by attempt ID. Record the manual commands, a sanitized excerpt and the live and replay observations in `SLICE13_EVIDENCE.md`. A failed worker can demonstrate capture and replay if the live-event check passed; report its delivery outcome accurately.
 
 ## When something fails
 

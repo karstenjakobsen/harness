@@ -180,6 +180,7 @@ we render Jinja and submit jobs directly to Nomad. [Phase 2 plan](docs/phase2/ph
 | `make test-phase2` | Builds the generic worker image, seeds an empty workspace, shows the rendered checkpoint and explicitly submits one real Codex worker to Nomad. Requires MCP brief reads and submission, one worker session, zero AI operator sessions and Harness file retrieval after exit and cleanup. |
 | `make test-phase2-smoke` | Runs optional deterministic city-writing and exit-7 scheduler smoke tests using the same renderer. Saves separate receipts and output files. |
 | `make test-phase2-standing` | Runs Slice 12 with one live worker delivering a script, a separate explicit Nomad service submission, startup and drift corrections, and a four-second observation after confirmed shutdown. |
+| `make test-phase2-watch` | Runs Slice 13 with one live city worker. Follows the task's stdout and stderr under `phase2/activity/ATTEMPT_ID/`, confirms Nomad still reports the task running after a displayed event, records the task outcome and submission audit before cleanup, then replays by attempt ID. |
 | `make nomad-down` | Attempts client and Compose cleanup independently. Removes the checkout’s Compose server, network and data volume and reports a failure if it cannot verify the systemd client cleanup. |
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
@@ -202,3 +203,11 @@ teardown from that phase and finalize the verified receipt. For an abandoned
 experiment, `cleanup` removes the recorded job, volumes and directories.
 Scheduler commands accept `--nomad-addr` and keep the original destination.
 [Manual sequence and acceptance](README.md#run-the-slice-12-standing-service-experiment)
+
+The development-only `dev/phase2/watch.py run --receipt PATH` executes a rendered
+worker receipt through `experiment.run` while capturing its task streams. It
+accepts the same `--nomad-addr`, `--auth-file` and `--timeout` options.
+`watch.py replay --workspace PATH --attempt-id ID` prints the saved activity
+using selected fields and reports the capture status, the live event's location,
+Nomad's task outcome and the submission check. It contacts neither Nomad nor MCP.
+[Watch and replay](README.md#watch-a-worker-attempt-and-replay-its-activity)

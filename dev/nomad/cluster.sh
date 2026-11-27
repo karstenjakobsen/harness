@@ -37,6 +37,8 @@ start_client() {
         ln -s -- "$source_unit" "$unit_link"
     fi
     [[ $unit_link -ef $source_unit ]] || fail "Another unit already owns $unit_link."
+    mkdir -p -- "$unit_link.d"
+    printf '[Service]\nEnvironment="HARNESS_NOMAD_DIR=%s"\n' "$root/dev/nomad" > "$unit_link.d/checkout.conf"
     systemctl --user daemon-reload
     systemctl --user start "$unit"
     local deadline=$((SECONDS + 60))
@@ -68,6 +70,8 @@ stop_client() {
     fi
     if [[ $loaded != not-found ]]; then systemctl --user stop "$unit" || return 1; fi
     unlink "$unit_link" || return 1
+    rm -f -- "$unit_link.d/checkout.conf"
+    rmdir -- "$unit_link.d" 2>/dev/null || true
     systemctl --user daemon-reload
 }
 

@@ -43,7 +43,8 @@ make nomad-down    # Stop the client and remove the Compose server and its data 
 ```
 
 `make nomad-up` links a checkout-specific unit into the systemd user manager
-for the current login session. While it is running, `dev/nomad/cluster.sh identity`
+for the current login session. A generated drop-in records the checkout's
+`dev/nomad` path, so the unit works with systemd 249 and later. While it is running, `dev/nomad/cluster.sh identity`
 prints the container ID for `docker logs` and the unit name for `journalctl --user -u`.
 After a server-only or partial startup, `make nomad-down` still attempts Compose
 cleanup if the systemd user session is unavailable. It returns a nonzero status
@@ -398,6 +399,37 @@ Worker recovery continues to use the existing `experiment.py run` receipt
 phases. Neither recovery command starts another worker for an already submitted
 attempt. All service commands accept `--nomad-addr` and require the original
 destination. [Slice 12 plan](docs/phase2/SLICE12.md) · [Checklist](docs/phase2/SLICE12_TODO.md) · [Captured live evidence](docs/phase2/SLICE12_EVIDENCE.md)
+
+## Watch a worker attempt and replay its activity
+
+`make test-phase2-watch` seeds and renders the Slice 11 city attempt, then runs
+it through `dev/phase2/watch.py run` instead of `experiment.py run`. The watcher
+uses the same runner, so submission, MCP, credential handling and cleanup are
+unchanged. It follows the `workload` task's stdout and stderr from the beginning
+once Nomad reports the allocation.
+
+```sh
+.venv/bin/python dev/phase2/watch.py run --receipt "$receipt"
+.venv/bin/python dev/phase2/watch.py replay --workspace "$workspace" --attempt-id ATTEMPT_ID
+```
+
+The capture is saved outside scratch in `phase2/activity/ATTEMPT_ID/`.
+`stdout.jsonl` holds the raw Codex JSONL, and `stderr.log` keeps diagnostics
+separately. Both are mode 0600. `capture.json` records the job, allocation and
+task identifiers. The live display shows selected fields for command executions,
+MCP calls, and any agent messages or reasoning summaries that were emitted. It
+redacts the attempt credential and Bearer or token patterns. The first substantive
+event is saved with its line number and digest. Then Nomad is queried separately,
+and the running-task observation is recorded with its timestamp.
+
+At exit, the runner calls the watcher before teardown. The watcher records Nomad's
+task outcome and drains both streams from their saved offsets. It also compares
+any claimed `submit_work_result` with the worker MCP audit from `operator work show`.
+A partial last line, stream interruption or missing outcome labels the capture
+`incomplete` and keeps every readable event. Watcher errors are saved as
+`observer_error` and never block cleanup. Replay reads only the saved files, so
+it works after the allocation has been collected. Whether to run a fresh attempt
+remains a manual decision. [Slice 13 plan](docs/phase2/SLICE13.md) · [Captured live evidence](docs/phase2/SLICE13_EVIDENCE.md)
 
 ## Sign in to Codex
 

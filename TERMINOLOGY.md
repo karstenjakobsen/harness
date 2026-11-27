@@ -164,3 +164,12 @@ The service receipt identifies each original disposable regular file by device
 and inode. Its `cleanup_pending` phase records that shutdown observation and
 artifact verification succeeded. The receipt reaches `finished` when teardown
 also succeeds.
+
+A **Slice 13 activity capture** is the host's copy of one attempt's Nomad task
+streams, stored under `phase2/activity/ATTEMPT_ID/`. It records what the reader
+observed and when. The stdout JSONL is the worker's own account and cannot
+replace the worker MCP audit. A claimed submission is checked against the audited
+call and saved artifact. A `complete` capture was drained before allocation
+cleanup and has a recorded task outcome. An `incomplete` capture keeps every
+readable event. Capture status, task outcome and submission are separate facts,
+and none of them changes the goal. [Slice 13](docs/phase2/SLICE13.md)

@@ -1,6 +1,8 @@
 """Seed, inspect a rendered job, then explicitly run the Slice 11 experiment."""
 
 import argparse
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -256,9 +258,35 @@ def process_start_time(pid):
         return None
 
 
+def pidfd_syscall(number, *arguments):
+    # Some Python builds omit os.pidfd_open and signal.pidfd_send_signal. The
+    # generic Linux syscall numbers 434 and 424 are shared across architectures.
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.syscall(ctypes.c_long(number), *map(ctypes.c_int, arguments))
+    if result < 0:
+        number = ctypes.get_errno()
+        if number == errno.ESRCH:
+            raise ProcessLookupError(number, os.strerror(number))
+        raise OSError(number, os.strerror(number))
+    return result
+
+
+def pidfd_open(pid):
+    if hasattr(os, "pidfd_open"):
+        return os.pidfd_open(pid)
+    return pidfd_syscall(434, pid, 0)
+
+
+def pidfd_send_signal(descriptor, number):
+    if hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(descriptor, number)
+    else:
+        pidfd_syscall(424, descriptor, number, 0, 0)
+
+
 def stop_owned_server(server, owner):
     try:
-        descriptor = os.pidfd_open(server["pid"])
+        descriptor = pidfd_open(server["pid"])
     except ProcessLookupError:
         return
     try:
@@ -274,9 +302,9 @@ def stop_owned_server(server, owner):
                 raise RuntimeError(
                     "The recorded MCP process has a different runtime owner."
                 )
-        signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+        pidfd_send_signal(descriptor, signal.SIGTERM)
         if not select.select([descriptor], [], [], 10)[0]:
-            signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            pidfd_send_signal(descriptor, signal.SIGKILL)
             if not select.select([descriptor], [], [], 5)[0]:
                 raise RuntimeError("The owned MCP process could not be stopped.")
     except ProcessLookupError:
@@ -671,7 +699,7 @@ def verify_after_cleanup(receipt, receipt_path):
     return receipt
 
 
-def run(receipt, receipt_path, args):
+def run(receipt, receipt_path, args, before_cleanup=None):
     if args.timeout <= 0:
         raise ValueError("Timeout must be positive.")
     if receipt.get("nomad_address") and receipt["nomad_address"] != args.nomad_addr:
@@ -767,6 +795,13 @@ def run(receipt, receipt_path, args):
             if fresh:
                 outcome["workload_seconds"] = round(time.monotonic() - started, 3)
             cleanup_errors = []
+            if before_cleanup is not None:
+                # An observer finishes reading the allocation before teardown.
+                # Its failure is reported separately and never blocks cleanup.
+                try:
+                    before_cleanup()
+                except Exception as error:  # noqa: BLE001
+                    outcome["observer_error"] = str(error)
             try:
                 cleanup_runtime(receipt, receipt_path)
                 if server is not None:
