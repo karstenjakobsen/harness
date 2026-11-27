@@ -179,6 +179,7 @@ we render Jinja and submit jobs directly to Nomad. [Phase 2 plan](docs/phase2/ph
 | `make test-nomad` | Brings up the development cluster and checks workload exit, concurrent start, repeated stop, literal arguments and refusal of a second placement. Cleans up its test jobs. |
 | `make test-phase2` | Builds the generic worker image, seeds an empty workspace, shows the rendered checkpoint and explicitly submits one real Codex worker to Nomad. Requires MCP brief reads and submission, one worker session, zero AI operator sessions and Harness file retrieval after exit and cleanup. |
 | `make test-phase2-smoke` | Runs optional deterministic city-writing and exit-7 scheduler smoke tests using the same renderer. Saves separate receipts and output files. |
+| `make test-phase2-standing` | Runs Slice 12 with one live worker delivering a script, a separate explicit Nomad service submission, startup and drift corrections, and a four-second observation after confirmed shutdown. |
 | `make nomad-down` | Attempts client and Compose cleanup independently. Removes the checkout’s Compose server, network and data volume and reports a failure if it cannot verify the systemd client cleanup. |
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |
@@ -187,3 +188,15 @@ we render Jinja and submit jobs directly to Nomad. [Phase 2 plan](docs/phase2/ph
 | `make test-live` | Runs the signed-in operator scenarios for plans, progress, delegation, revision history, skills and HTTP attribution. |
 | `make test-live-extended` | Invokes the same signed-in operator suite as `make test-live`. The historical Slice 10 Docker handoff results are archived. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |
+
+The development-only `dev/phase2/standing.py` commands accept `--receipt` pointing
+to the existing worker receipt. `checkpoint` uses the owner CLI to retrieve and
+verify the script, stages it read-only and renders a separate service job without
+submitting it. Checkpoint retries retain their selected image and discard failed
+staging. `submit` rechecks the script and job digests and sends the validated job
+bytes once. The file-mode fixture seeds the goal with `--duration standing`.
+`observe` requires startup correction before deliberately introducing drift.
+`stop` confirms shutdown, samples the reset target for four seconds and cleans
+up. `cleanup` recovers the recorded service's jobs, volumes and directories.
+Scheduler commands accept `--nomad-addr` and keep the original destination.
+[Manual sequence and acceptance](README.md#run-the-slice-12-standing-service-experiment)

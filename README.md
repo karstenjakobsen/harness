@@ -313,6 +313,84 @@ checkout Docker handoffs remain recorded as incomplete because the host blocked
 Bubblewrap namespaces. Their captured evidence and image digests are preserved
 in the archive. [Slice 10 evidence](docs/phase1/SLICE10_EVIDENCE.md) · [Phase 2 prerequisite](docs/phase2/PHASE2_DECOUPLING_TODO.md)
 
+## Run the Slice 12 standing service experiment
+
+Slice 12 reuses the worker image and installed CLI without changes to `packages/`.
+One live Codex worker delivers `maintain-mode.sh` through MCP and exits. The owner
+retrieves the artifact after credential revocation and scratch cleanup, inspects
+it, and explicitly submits a separate Nomad service running those exact bytes.
+No AI operator session is started. The goal is seeded with `--duration standing`
+and remains active at the original revision.
+
+Run the full live acceptance on Docker Desktop with
+
+```sh
+HARNESS_PHASE2_MCP_URL=http://host.docker.internal:8001/mcp make test-phase2-standing
+```
+
+For manual inspection between steps, use the following sequence from the
+repository root. On a Linux host sharing loopback with Docker, use
+`http://127.0.0.1:8001/mcp` for `--mcp-url`. The worker uses your existing Codex
+login, supplied privately through the Slice 11 runtime.
+
+```sh
+make worker-image
+mkdir -p .harness/phase2
+workspace=$(mktemp -d "$PWD/.harness/phase2/manual-slice12-XXXXXX")
+receipt="$workspace/phase2/receipt.json"
+worker_image=$(docker image inspect --format '{{.Id}}' harness-worker:slice10)
+.venv/bin/python dev/phase2/experiment.py seed --workspace "$workspace" \
+  --fixture dev/phase2/file-mode.json
+.venv/bin/python dev/phase2/experiment.py render --receipt "$receipt" \
+  --image "$worker_image" --mcp-url http://host.docker.internal:8001/mcp
+cat "$workspace/phase2/prepared.json" "$workspace/phase2/job.json"
+make nomad-up
+.venv/bin/python dev/phase2/experiment.py run --receipt "$receipt"
+
+# Retrieve, verify, stage read-only and render. This command submits nothing.
+.venv/bin/python dev/phase2/standing.py checkpoint --receipt "$receipt"
+cat "$workspace/phase2/service/attempt.json" "$workspace/phase2/service/export.json"
+cat "$workspace/phase2/service/delivery/maintain-mode.sh"
+cat "$workspace/phase2/service/job.json"
+
+# Submit only after inspecting the checkpoint.
+.venv/bin/python dev/phase2/standing.py submit --receipt "$receipt"
+.venv/bin/python dev/phase2/standing.py observe --receipt "$receipt"
+.venv/bin/python dev/phase2/standing.py stop --receipt "$receipt"
+```
+
+The checkpoint compares the exported artifact ID with the producing attempt's
+saved artifact and checks its goal revision and SHA-256. A newer artifact for the
+goal fails the comparison. The service receipt links that provenance to the
+separate service job ID and exact job digest. Submission rechecks both files and
+sends the exact job bytes whose digest it validated. A repeated checkpoint must
+select the original image. Failed checkpoint staging is removed before retry.
+The script is mounted read-only at `/delivery`, and disposable target and sibling
+files are mounted writable at `/data`. The service invokes
+`/bin/sh /delivery/maintain-mode.sh /data/target` in a pinned BusyBox image. An
+independent Docker inspection checks mount permissions and hashes the script
+visible in the allocation. The current experiment requires the Docker CLI to
+reach the same single Nomad client's Docker daemon.
+
+`observe` first waits up to ten seconds to see startup correction from `0644` to
+`0600`. It then deliberately sets `0644` again and requires a second correction
+within three seconds. The worker brief specifies polling once per second. Both
+observations preserve contents and the sibling's `0644` mode. `stop` confirms
+Nomad shutdown and no running replacement, resets `0644`, and samples for at
+least four seconds. The receipt retains timestamped samples and monotonic elapsed
+times for all three stages. The drift clock starts immediately before the
+deliberate mode change, after the initial receipt write. It then exports the
+script again and removes the
+service job, volume registrations and staged directories.
+
+Use `.venv/bin/python dev/phase2/standing.py cleanup --receipt "$receipt"` to
+recover an interrupted service. Repeating `submit` never registers the service
+again. An interrupted observation requires cleanup and a fresh experiment.
+Worker recovery continues to use the existing `experiment.py run` receipt
+phases. Neither recovery command starts another worker for an already submitted
+attempt. All service commands accept `--nomad-addr` and require the original
+destination. [Slice 12 plan](docs/phase2/SLICE12.md) · [Checklist](docs/phase2/SLICE12_TODO.md) · [Captured live evidence](docs/phase2/SLICE12_EVIDENCE.md)
+
 ## Sign in to Codex
 
 To connect Harness to your ChatGPT account, enable device code login in your

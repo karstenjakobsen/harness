@@ -84,6 +84,11 @@ def seed(args):
         parent["id"],
         "--title",
         fixture["goal_title"],
+        *(
+            ["--duration", fixture["goal_duration"]]
+            if "goal_duration" in fixture
+            else []
+        ),
     )
     item = owner_cli(
         receipt,
@@ -621,13 +626,13 @@ def check_result(client, receipt, receipt_path):
         or outcome["task_restarts"] != 0
     ):
         raise RuntimeError(f"Unexpected task outcome {outcome}")
-    if outcome["exit_code"] == 0:
+    if outcome["exit_code"] == 0 and "cities" in receipt["fixture"]:
         expected = ("\n".join(receipt["fixture"]["cities"]) + "\n").encode()
         if content != expected:
             raise RuntimeError(
                 "The recovered file differs from the fixture's exact city lines."
             )
-    elif outcome["file_sha256"] is not None:
+    elif outcome["exit_code"] != 0 and outcome["file_sha256"] is not None:
         raise RuntimeError("The failure case unexpectedly produced a deliverable.")
     goal = owner_cli(receipt, "goal", "show", receipt["goal_id"])
     if (goal["revision"], goal["status"]) != (

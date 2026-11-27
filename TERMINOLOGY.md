@@ -143,3 +143,19 @@ the final Harness export, and `cleanup_pending` retries teardown. An interrupted
 active run is stopped and its exact runtime is cleaned up. Executing the workload
 again uses a fresh attempt. Runtime process identity and grant ownership let
 recovery target that run's listener, credential and private files.
+
+A **Slice 12 service receipt** links one submitted script artifact, its digest,
+producing attempt and goal revision to a separate consuming Nomad service job.
+The development checkpoint retrieves and verifies the artifact after worker
+cleanup, stages it read-only and renders the service job. Explicit submission
+starts its independent lifetime. Startup, deliberate drift and shutdown are
+separate external observations with recorded samples and elapsed times. They
+leave the standing goal active. The service uses a shell image and disposable
+data without Codex or worker MCP authority. This experiment adds no Harness
+deployment model. [Slice 12](docs/phase2/SLICE12.md)
+
+The standing file-mode goal records `duration: standing` through the owner CLI.
+Its experiment checks that field and the original active revision before
+deployment and after observation. The drift deadline starts at the deliberate
+mode reset, after persisting the observation intent. Submission sends the exact
+job bytes validated against the checkpoint digest.
