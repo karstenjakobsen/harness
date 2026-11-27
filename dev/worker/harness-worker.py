@@ -16,7 +16,7 @@ INSTRUCTION = (
 
 def command(attempt_id, environment):
     if environment.get("HARNESS_WORKER_ATTEMPT_ID") != attempt_id:
-        raise ValueError("The attempt ID does not match the launcher assignment.")
+        raise ValueError("The attempt ID does not match the runtime assignment.")
     if not environment.get("HARNESS_WORKER_TOKEN"):
         raise ValueError("A worker session credential is required.")
     endpoint = environment.get("HARNESS_WORKER_MCP_URL", "")
@@ -30,7 +30,7 @@ def command(attempt_id, environment):
         "exec",
         "--json",
         "--sandbox",
-        "workspace-write",
+        "danger-full-access",
         "--skip-git-repo-check",
         "--ephemeral",
         "--ignore-user-config",

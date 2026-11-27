@@ -1,0 +1,7 @@
+{
+  "parent_title": "Keep a designated disposable file private",
+  "goal_title": "Maintain the supplied target file at mode 0600",
+  "goal_duration": "standing",
+  "brief": "Deliver exactly one artifact named maintain-mode.sh. Write a POSIX /bin/sh script that accepts exactly one argument, the path of an existing regular target file. While running, check that file once per second and maintain its mode at 0600, correcting drift within three seconds. Change only that file's mode. Preserve its contents and every sibling file's contents and mode; never use recursive chmod. The target starts at 0644. An external observer will first wait for startup correction to 0600, then deliberately reset it to 0644 and require a second correction within three seconds. After the service stops, the observer will reset it again and require 0644 to persist for four seconds. Your script will run unchanged as /bin/sh /delivery/maintain-mode.sh /data/target in a separate pinned BusyBox shell container. /delivery is read-only, /data is disposable writable data. The service has no Codex, Harness credential or MCP dependency. Read the assigned worker-handoff skill, write and check your script in /workspace, submit maintain-mode.sh through worker MCP, and exit. Do not deploy a service yourself.",
+  "filename": "maintain-mode.sh"
+}

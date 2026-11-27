@@ -1,0 +1,35 @@
+{
+  "Job": {
+    "ID": {{ job_id | tojson }},
+    "Name": {{ job_id | tojson }},
+    "Type": "service",
+    "Datacenters": ["*"],
+    "Meta": {{ metadata | tojson }},
+    "TaskGroups": [{
+      "Name": "service",
+      "Count": 1,
+      "RestartPolicy": {"Attempts": 0, "Mode": "fail"},
+      "ReschedulePolicy": {"Attempts": 0, "Unlimited": false},
+      "Disconnect": {"Replace": false, "LostAfter": 3600000000000, "Reconcile": "keep_original"},
+      "Volumes": {{ volumes | tojson }},
+      "Tasks": [{
+        "Name": "service",
+        "Driver": "docker",
+        "User": {{ user | tojson }},
+        "Config": {
+          "image": {{ image | tojson }},
+          "entrypoint": ["/bin/sh"],
+          "args": ["/delivery/maintain-mode.sh", "/data/target"]
+        },
+        "VolumeMounts": [
+          {"Volume": "delivery", "Destination": "/delivery", "ReadOnly": true},
+          {"Volume": "data", "Destination": "/data", "ReadOnly": false}
+        ],
+        "Resources": {"CPU": 100, "MemoryMB": 64},
+        "KillTimeout": 1000000000
+      }]
+    }]
+  },
+  "EnforceIndex": true,
+  "JobModifyIndex": 0
+}

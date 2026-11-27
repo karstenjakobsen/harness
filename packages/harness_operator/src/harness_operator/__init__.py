@@ -30,7 +30,6 @@ from .commands.run import run
 from .commands.unregister import unregister
 from .commands.user import user
 from .commands.work import work
-from .worker import WorkerLaunchError
 
 
 @click.group(
@@ -70,7 +69,6 @@ def main() -> int:
         WorkNotFoundError,
         WorkAuthorizationError,
         WorkValidationError,
-        WorkerLaunchError,
     ) as error:
         click.echo(f"operator: {error}", err=True)
         return 1

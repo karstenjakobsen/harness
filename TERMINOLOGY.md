@@ -19,7 +19,7 @@
 | `SkillAPI` | The public model for importing the workspace owner’s catalog, listing current skills, reading exact revisions and finding the run calls that read them. |
 | `GoalAPI` | The public Python interface for goals and revisions, observations, progress assessments, completion decisions and grants. It also records operator runs and MCP tool calls and serves goal activity and run history. |
 | `WorkAPI` | The public model for immutable work items, worker attempts and grants, scoped skill reads, saved artifacts and worker MCP audit calls. It checks the exact attempt authority and goal revision on worker operations. |
-| Worker | One Codex session executing one attempt in a Docker container. It uses ordinary file and shell tools in `/workspace` and worker MCP to read its assignment and submit a file. A worker session is separate from an `operator ask` session. |
+| Worker | One Codex session executing one attempt in an externally launched workload. It uses ordinary file and shell tools in `/workspace` and worker MCP to read its assignment and submit a file. A worker session is separate from an `operator ask` session. |
 
 ## Identity and attribution
 
@@ -33,10 +33,10 @@
 | Advisory `operator ask` and MCP | The assistant reads saved goals through the admin-scoped MCP goal tools. History tools require a recorded run and can read across operators in the same workspace. |
 | `operator ask --completion-grant GRANT_ID` | The assistant can also complete the specific subgoal covered by the active grant. Harness derives the registered operator from the grant. |
 | `operator ask --definition-grant GRANT_ID` | The assistant can create top-level goals, create draft children under one parent, or revise one goal. The run’s bound grant determines the registered operator, permitted action and scope. |
-| `operator work` owner commands | The local workspace owner selects the goal revision, registered operator, brief, skill revisions and optional source checkout. The trusted launcher binds an attempt to its workspace, Docker container and credential. |
+| `operator work` owner commands | The local workspace owner selects the goal revision, registered operator, brief, skill revisions and optional source checkout. The trusted owner prepares an attempt, binds its scratch directory and issues or revokes its credential separately. `operator work --workspace PATH` selects the workspace for these operations and for serving worker MCP. |
 | Worker MCP | A Bearer credential establishes one attempt and its exact grant. Tools accept no caller-selected attempt, operator or goal ID. Saved artifacts retain the attempt, work item, goal revision, registered operator and grant; every worker operation, including a retry, rechecks that authority. |
 
-In a delegated session, Harness binds the assistant to a registered operator and a specific grant at startup. A replacement grant requires a fresh session. The **decision maker** is the actor who exercises the delegated authority. The **evidence submitter** is the actor who supplied a cited record. If the owner confirms “My membership is active” and an operator uses that confirmation to complete the subgoal, the evidence keeps the owner’s user ID and the decision records the registered operator’s ID. These IDs refer to different tables and can have the same numeric value. [Delegated completion plan](docs/SLICE3_TODO.md#delegated-completion)
+In a delegated session, Harness binds the assistant to a registered operator and a specific grant at startup. A replacement grant requires a fresh session. The **decision maker** is the actor who exercises the delegated authority. The **evidence submitter** is the actor who supplied a cited record. If the owner confirms “My membership is active” and an operator uses that confirmation to complete the subgoal, the evidence keeps the owner’s user ID and the decision records the registered operator’s ID. These IDs refer to different tables and can have the same numeric value. [Delegated completion plan](docs/phase1/SLICE3_TODO.md#delegated-completion)
 
 The current HTTP endpoints do not establish who initiated a request. A resource ID identifies its target, `owner_user_id` identifies its owner, and `ADMIN_USER_ID` identifies the workspace account. For evidence writes, store the established submitter’s integer user ID or null for unknown attribution. Draft message roles (`user` and `operator`) describe the speaker’s role. Record the requester of a check and the observer that produced the result separately when known. Leave unknown identities explicit. An owner pasting an app link supplies a reference. Attributing an observation to the app requires a report from the app itself.
 
@@ -95,9 +95,9 @@ Historical progress applies the selected revision’s criteria to the evidence a
 | Term | Meaning in Harness |
 | --- | --- |
 | Work item | An immutable assignment with a generated integer ID: one goal ID and revision, registered operator, brief, exact skill revisions and workspace input. A changed brief creates a new work item. |
-| Work attempt | One execution of a work item, identified by a caller-selected string ID within its workspace database. Repeating a launch with that ID recovers the same attempt and container. An intentional retry uses a fresh attempt ID under the same work item. |
+| Work attempt | A prepared execution of a work item, identified by a caller-selected string ID within its workspace database. Preparation persists the ID before any execution. Repeating preparation for that work item returns the same attempt. An intentional execution retry uses a fresh attempt ID under the same work item. |
 | Attempt grant | Authority bound to one attempt and its credential. It permits the four worker MCP operations while the registered operator, open goal and bound revision remain valid. A withdrawn or replaced grant does not authorize an old credential. |
-| Workspace input | Either an empty directory or an isolated checkout of a local source repository at the recorded base SHA. The trusted launcher prepares a fresh scratch directory and keeps the original checkout separate. |
+| Workspace input | Either an empty directory or an isolated checkout of a local source repository at the recorded base SHA. The person launching the workload prepares its scratch directory or isolated checkout and keeps the original checkout separate. The trusted owner binds that directory to the attempt for submissions. |
 | Work artifact | An independent copy of the submitted file's bytes in the workspace database, with a generated ID, relative path, SHA-256, size and worker attribution. Its metadata retains the checkout base SHA when one was assigned. |
 | Worker call | An audited worker MCP operation with its attempt, grant, arguments, timestamps and `returned`, `denied` or `failed` outcome. A successful submission links the saved artifact. |
 
@@ -107,6 +107,13 @@ are limited to the exact revisions assigned to that work item. The trusted host
 reads a regular file inside that attempt's mounted workspace and commits its
 independent copy before acknowledging a submission.
 
+Scratch bindings reserve disjoint resolved directories within the workspace
+database. Binding checks equal, ancestor and descendant paths in the write
+transaction, including on retry. Symlink aliases resolve to the same directory.
+`WorkAPI.get_attempt_details` reads the attempt, work item, worker calls and
+artifact metadata from one SQLite read snapshot, so inspection remains coherent
+when a submission commits concurrently.
+
 The first successful save is authoritative. An authorized retry with the same
 relative path returns the original artifact ID without rereading scratch, even
 after cleanup or changes to the scratch file. A different path conflicts and
@@ -114,6 +121,46 @@ leaves the saved artifact intact. A source fix, ordinary patch and test report
 use this same file handoff; the model does not infer test success from their
 contents.
 
+Preparation, execution outcome and artifact submission are separate facts. An externally run attempt may have no recorded container, image or exit code. The attempt ID is a lookup key. Its credential, saved in a private runtime file by the owner CLI, establishes worker authority. Revocation or replacement invalidates the old credential on every request.
+
 Container exit code and artifact submission are separate recorded outcomes.
 Neither completes or revises the goal. The operator reviews the retained result
 and makes any completion decision separately. [Worker commands](CATALOG.md#worker-assignments)
+
+A **Phase 2 experiment receipt** records CLI-created goal, revision, work item and
+attempt identifiers alongside the exact rendered job digest and observed Nomad
+allocation outcome. Assignment criteria live under `fixture`, and scheduler and
+worker observations live under `execution`. Required Slice 11 acceptance records
+one real Codex worker session, zero AI operator sessions and the artifact saved
+through authenticated worker MCP. The owner retrieves that artifact through
+Harness after worker exit and scratch cleanup. Optional scripted smoke tests
+record their scheduler results in their own receipts. [Slice 11 experiment](docs/phase2/SLICE11.md)
+
+The container worker uses Codex `danger-full-access`, with isolation supplied by
+the container user, mounts and Docker's security profiles. A terminal experiment
+receipt retains its allocation and exit before teardown. `verify_pending` retries
+the final Harness export, and `cleanup_pending` retries teardown. An interrupted
+active run is stopped and its exact runtime is cleaned up. Executing the workload
+again uses a fresh attempt. Runtime process identity and grant ownership let
+recovery target that run's listener, credential and private files.
+
+A **Slice 12 service receipt** links one submitted script artifact, its digest,
+producing attempt and goal revision to a separate consuming Nomad service job.
+The development checkpoint retrieves and verifies the artifact after worker
+cleanup, stages it read-only and renders the service job. Explicit submission
+starts its independent lifetime. Startup, deliberate drift and shutdown are
+separate external observations with recorded samples and elapsed times. They
+leave the standing goal active. The service uses a shell image and disposable
+data without Codex or worker MCP authority. This experiment adds no Harness
+deployment model. [Slice 12](docs/phase2/SLICE12.md)
+
+The standing file-mode goal records `duration: standing` through the owner CLI.
+Its experiment checks that field and the original active revision before
+deployment and after observation. The drift deadline starts at the deliberate
+mode reset, after persisting the observation intent. Submission sends the exact
+job bytes validated against the checkpoint digest.
+
+The service receipt identifies each original disposable regular file by device
+and inode. Its `cleanup_pending` phase records that shutdown observation and
+artifact verification succeeded. The receipt reaches `finished` when teardown
+also succeeds.
