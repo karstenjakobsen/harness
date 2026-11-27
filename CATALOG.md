@@ -124,45 +124,41 @@ operator goal create --title "Track food" --duration-days 7
 
 ## Worker assignments
 
-These owner commands use `WorkAPI` in the current workspace and print JSON.
+These owner commands use `WorkAPI` and print JSON, except `serve-mcp`, which
+runs until interrupted. All accept `operator work --workspace PATH COMMAND`.
+The default workspace is the current directory. Related preparation, scratch,
+credential, server and artifact operations must select the same workspace.
 Create a goal and named operator first. Work creation imports the committed
-skill catalog and records the exact assigned revisions. The worker uses its
-attempt credential to access worker MCP; it runs one Codex session and leaves
-goal review to the operator.
+skill catalog and records exact revisions.
 
 | Command | What it does |
 | --- | --- |
-| `operator work create --goal-id ID --revision N --operator-id ID --brief TEXT [--skill ID@REVISION]... [--source PATH --base-sha SHA]` | Saves an immutable work item. Omit source options for an empty workspace, or supply both a local Git repository and its exact base commit SHA. Returns the generated work item ID. |
-| `operator work start WORK_ITEM_ID --attempt-id ID --image SHA256 [--timeout SECONDS]` | Starts or recovers one attempt using an immutable Docker image ID, waits for exit and removes scratch and the runtime Codex login copy. The timeout defaults to 600 seconds. `HARNESS_WORKER_IMAGE` can supply the image option. |
-| `operator work show ATTEMPT_ID` | Returns `attempt`, `work_item`, worker MCP `calls`, saved `artifact` metadata and `trace_path`. Container exit code is separate from artifact submission. The saved Codex trace survives scratch cleanup. |
-| `operator work artifact GOAL_ID --output NEW_PATH` | Copies the latest saved artifact for the goal into a new owner file and returns its metadata. Rejects an existing output path. Works in a fresh owner process after worker scratch cleanup. |
+| `operator work create --goal-id ID --revision N --operator-id ID --brief TEXT [--skill ID@REVISION]... [--source PATH --base-sha SHA]` | Saves an immutable work item. Supply both source options to record a local Git repository and its exact base commit SHA. Returns the work item ID. |
+| `operator work prepare WORK_ITEM_ID --attempt-id ID` | Persists an attempt and returns its `id` and `work_item_id`, plus saved attempt metadata. An identical retry returns the same attempt. Reusing the ID for another work item conflicts. Works offline. |
+| `operator work bind-scratch ATTEMPT_ID PATH` | Binds an existing directory to the attempt for MCP file submissions. A repeated binding to that path returns the attempt. Another path conflicts. |
+| `operator work issue-credential ATTEMPT_ID --output NEW_PATH` | Writes a fresh credential to a new mode-0600 file and returns grant metadata. Preserves existing files. Replaces any active grant with the new grant. |
+| `operator work revoke-credential ATTEMPT_ID` | Revokes the active grant. Existing connections and saved-result retries recheck authority. |
+| `operator work serve-mcp [--host ADDRESS] [--port PORT] [--allowed-host HOST]...` | Serves authenticated worker MCP at `/mcp`. Defaults to `127.0.0.1:8001`. Use Ctrl-C or SIGTERM to stop. |
+| `operator work show ATTEMPT_ID` | Reads persisted `attempt`, `work_item`, worker MCP `calls` and saved `artifact` metadata. Runtime fields may be null. `trace_path` is null. |
+| `operator work artifact GOAL_ID --output NEW_PATH` | Copies the latest saved artifact for the goal into a new file and returns metadata. Preserves existing output files. Works after scratch cleanup and credential revocation. |
 
-`make worker-image` builds `harness-worker:slice10` from the digest-pinned
-`ghcr.io/icoretech/codex-docker:0.166.0` base. Select the built image's immutable
-ID with `docker image inspect --format '{{.Id}}' harness-worker:slice10` and pass
-that `sha256:...` value to `--image`. Both acceptance cases use this same built
-image. Sign in through `operator register` before running a worker; the launcher
-copies only the development `auth.json` into its temporary Codex home.
+Keep the credential outside scratch and seed receipts. The owner binds scratch,
+issues the private credential file, serves MCP and revokes the credential using
+the documented shell sequence. Slice 11 can reuse these installed CLI commands.
+[Manual handoff sequence](README.md#prepare-an-attempt-and-hand-off-a-file)
 
-The container entrypoint is `harness-worker run --attempt-id ID`. The trusted
-launcher supplies the worker MCP URL and attempt credential at runtime, mounts
-fresh scratch writable at `/workspace` for a non-root user, and sets Docker's
-restart policy to `no`. The current launcher uses Docker's host network and a
-loopback MCP endpoint with a local Docker engine.
+Worker MCP exposes `get_work_brief()`, `list_skills()`,
+`read_skill(id, revision)` and `submit_work_result(relative_path)`. Each request
+uses its Bearer credential to establish the attempt and exact grant. Skills are
+scoped to assigned revisions. The first successful submission saves independent
+bytes with the attempt, goal revision, operator and grant. An authorized retry
+of that path returns the original artifact after scratch changes or cleanup.
+Another path conflicts. Goal completion remains a separate decision.
 
-Repeating a launch with the same attempt ID resolves to its original attempt
-and starts at most one container, including after a lost response or cleanup.
-Conflicting reuse is rejected. Use a fresh attempt ID to retry the same work
-item, or create another work item when changing the brief.
-Runtime files are isolated by the selected workspace database. Recovery of a
-running or exited container does not require the original development login file.
-
-Worker MCP provides only `get_work_brief()`, `list_skills()`,
-`read_skill(id, revision)` and `submit_work_result(relative_path)`. The first
-successful submission saves an independent file copy linked to its attempt,
-goal revision, registered operator and grant. An authorized same-path retry
-returns that original artifact without rereading scratch; another path
-conflicts. Ordinary files, patches and test reports share this contract.
+`make worker-image` preserves the generic `harness-worker:slice10` image and its
+`harness-worker run --attempt-id ID` entrypoint. The person launching the workload
+provides scratch, endpoint, credential and model access at runtime. During Phase 2,
+we render Jinja and submit jobs directly to Nomad. [Phase 2 plan](docs/phase2/phase2.md)
 
 ## Development commands
 
@@ -178,6 +174,6 @@ conflicts. Ordinary files, patches and test reports share this contract.
 | `make format` | Formats files with Ruff. |
 | `make test` | Runs the offline test suite. |
 | `make worker-image` | Builds the thin worker image as `harness-worker:slice10`. Set `WORKER_IMAGE` to choose another build tag. |
-| `make test-live` | Builds the worker image and runs only the city handoff: one signed-in worker session, zero operator sessions, exact five-city file retrieval by goal ID after scratch cleanup, with attribution and the goal still open at its original revision. |
-| `make test-live-extended` | Uses the same worker image for the checkout handoff, proving a saved ordinary patch turns a specific failing test green without changing that test or the original checkout. Also runs the existing signed-in operator scenarios for plans, progress, delegation, revision history, skills and HTTP attribution. |
+| `make test-live` | Runs the signed-in operator scenarios for plans, progress, delegation, revision history, skills and HTTP attribution. |
+| `make test-live-extended` | Invokes the same signed-in operator suite as `make test-live`. The historical Slice 10 Docker handoff results are archived. |
 | `uv run --package harness-mcp harness_mcp` | Starts the standalone MCP server over stdio. |

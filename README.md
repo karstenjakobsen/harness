@@ -9,8 +9,9 @@ sign-in and skips your personal Codex configuration.
 
 ## Setup
 
-Install `uv`, GNU Make, and a Codex CLI that supports `codex exec` with
-`--ephemeral` and `--ignore-user-config`.
+Install `uv` and GNU Make. For `operator ask` and message-based goal creation,
+install a Codex CLI that supports `codex exec` with `--ephemeral` and
+`--ignore-user-config`.
 
 ```sh
 make setup
@@ -75,104 +76,149 @@ the original `allocation_id` when identifiable and exposes additional IDs in
 `replacement_allocation_ids`. Inspect and stop remain available for older jobs.
 A start retry against a job registered before the prestart check raises
 `WorkloadConflictError`. Capture outcomes before Nomad collects their records.
-A future Nomad worker integration must bind grants to the authenticated original
-allocation before accepting evidence or authorizing an external action. The
-Docker-first worker below does not use Nomad. [Execution contract and acceptance](docs/SLICE9_TODO.md)
+During Phase 2, Harness prepares attempts and serves worker MCP. We launch
+workloads ourselves by rendering Jinja and submitting the job directly to Nomad.
+The existing backend remains available for the Slice 9 development proof.
+[Execution contract and acceptance](docs/phase1/SLICE9_TODO.md) · [Active Phase 2 plan](docs/phase2/phase2.md)
 
-## One-shot Docker workers
+## Prepare an attempt and hand off a file
 
-A worker runs one Codex session, reads its assignment over authenticated worker
-MCP, uses ordinary editing and shell tools in `/workspace`, submits the requested
-file, and exits. The same image and entrypoint handle an empty workspace or a
-checkout. Only the immutable brief, assigned skill revisions and initial files vary.
+Preparation persists an attempt ID and work item binding. The same ID and work
+item return the original attempt. Another work item under that ID conflicts.
+Preparation works offline with Python, the installed CLI and Git for skill
+catalog import. The manual MCP handoff below uses zero model sessions.
 
-```sh
-make setup
-make worker-image
-export HARNESS_WORKER_IMAGE="$(docker image inspect --format '{{.Id}}' harness-worker:slice10)"
-```
-
-The thin image builds on
-`ghcr.io/icoretech/codex-docker:0.166.0@sha256:c0568397f66fb8cc22c541fbafe26948da5000d24770b0ac2e918517dfc02615`.
-It adds Python and the `harness-worker run --attempt-id ID` entrypoint. Workers run
-by immutable Docker image content ID, not a mutable tag. The base registry digest
-and worker content ID are recorded separately in the acceptance evidence.
-
-Activate this checkout's `.venv` and run the following owner commands in a **fresh
-workspace directory**, using the returned IDs. The development schema is
-unversioned; existing populated pre-Slice-10 databases require a new directory.
+Run this Bash sequence from the repository root after `make setup`. It uses a
+new workspace, parses the returned IDs and keeps the credential outside scratch.
+Choose an available loopback port for `serve-mcp`.
 
 ```sh
-operator register Builder
-operator goal create --title "Prepare the city file"
-operator work create --goal-id 1 --revision 1 --operator-id 1 \
-  --skill worker-handoff@1 \
-  --brief "Write København, Aarhus, Odense, Aalborg and Esbjerg, one per line in that order, to cities.txt. Submit cities.txt."
-operator work start 1 --attempt-id cities-1 --image "$HARNESS_WORKER_IMAGE"
-operator work show cities-1
-operator work artifact 1 --output cities.txt
+source .venv/bin/activate
+operator_cli="$(command -v operator)"
+workspace="$(mktemp -d)"
+attempt_id=manual-1
+json_field() { python -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+
+cd "$workspace"
+operator_id="$("$operator_cli" register Builder | json_field id)"
+"$operator_cli" goal create --title "Prepare a real file" > goal.json
+goal_id="$(json_field id < goal.json)"
+revision="$(json_field revision < goal.json)"
+work_id="$("$operator_cli" work --workspace "$workspace" create \
+  --goal-id "$goal_id" --revision "$revision" --operator-id "$operator_id" \
+  --skill worker-handoff@1 --brief "Write a real result.txt." | json_field id)"
+"$operator_cli" work --workspace "$workspace" prepare "$work_id" --attempt-id "$attempt_id"
+"$operator_cli" work --workspace "$workspace" prepare "$work_id" --attempt-id "$attempt_id"
+"$operator_cli" work --workspace "$workspace" show "$attempt_id"
+
+mkdir "$workspace/scratch"
+"$operator_cli" work --workspace "$workspace" bind-scratch "$attempt_id" "$workspace/scratch"
+"$operator_cli" work --workspace "$workspace" issue-credential "$attempt_id" \
+  --output "$workspace/worker.credential"
+# Issuance creates a new mode-0600 file and prints only grant metadata.
+"$operator_cli" work --workspace "$workspace" serve-mcp --port 8001 > worker-mcp.log 2>&1 &
+mcp_pid=$!
+cleanup() {
+  trap - EXIT
+  "$operator_cli" work --workspace "$workspace" revoke-credential "$attempt_id"
+  kill "$mcp_pid"
+  wait "$mcp_pid" || [ "$?" -eq 143 ]
+}
+trap cleanup EXIT
 ```
 
-`work create` imports the committed skill catalog and records an exact goal
-revision. For checkout work, add `--source /absolute/local/repository --base-sha
-FULL_COMMIT_SHA`. The trusted launcher makes an isolated clone without shared Git
-objects or an origin remote; the worker never mounts the original checkout.
+With that server running, this protocol client reads the assignment, writes a
+real file and submits it. It uses the MCP and HTTP clients installed by
+`make setup`. The client waits for the server to become ready. The credential
+stays in the private file and HTTP header.
 
-The launcher starts a loopback-only Streamable HTTP service for that same Harness
-workspace and supplies an attempt-bound bearer credential. The worker sees only
+```sh
+python - "$workspace" <<'PYCLIENT'
+import asyncio
+import sys
+from pathlib import Path
+
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+async def handoff():
+    endpoint = "http://127.0.0.1:8001/mcp"
+    async with httpx.AsyncClient(trust_env=False, timeout=0.5) as probe:
+        for _ in range(150):
+            try:
+                if (await probe.get(endpoint)).status_code == 401:
+                    break
+            except httpx.TransportError:
+                pass
+            await asyncio.sleep(0.1)
+        else:
+            raise RuntimeError("Worker MCP did not become ready")
+    workspace = Path(sys.argv[1])
+    credential = (workspace / "worker.credential").read_text()
+    async with httpx.AsyncClient(
+        headers={"Authorization": f"Bearer {credential}"}, trust_env=False,
+    ) as http:
+        async with (
+            streamable_http_client(endpoint, http_client=http) as (reader, writer, _),
+            ClientSession(reader, writer) as session,
+        ):
+            await session.initialize()
+            brief = await session.call_tool("get_work_brief", {})
+            assert not brief.isError
+            print(brief.structuredContent)
+            (workspace / "scratch/result.txt").write_text("A real file.\n")
+            saved = await session.call_tool("submit_work_result", {"relative_path": "result.txt"})
+            assert not saved.isError
+            print(saved.structuredContent)
+
+asyncio.run(handoff())
+PYCLIENT
+
+rm -- "$workspace/scratch/result.txt"
+rmdir "$workspace/scratch"
+"$operator_cli" work --workspace "$workspace" artifact "$goal_id" --output "$workspace/recovered.txt"
+cat "$workspace/recovered.txt"
+"$operator_cli" work --workspace "$workspace" show "$attempt_id"
+cleanup
+trap - EXIT
+```
+
+Revocation takes effect on every request, including an existing MCP connection
+and artifact submission retries. Issuing a replacement into a new private file
+invalidates the previous credential. An existing output file is preserved.
+After an interrupted issuance, use the saved file or issue a replacement to a
+new file. The owner can retrieve saved artifacts after revocation and scratch
+cleanup. `show` reads persisted work, attempt, call and artifact data. Runtime
+fields can be null and `trace_path` is null.
+
+`work create --source /absolute/local/repository --base-sha FULL_COMMIT_SHA`
+records checkout input. The person launching the workload prepares its isolated
+checkout, mounts scratch at `/workspace` and provides model access when needed.
+`serve-mcp --host ADDRESS --allowed-host HOST` supports an explicitly reachable
+endpoint. Every worker request requires its attempt credential. Worker tools are
 `get_work_brief`, `list_skills`, `read_skill` and `submit_work_result(relative_path)`.
-The public `WorkAPI` rechecks the credential, registered operator, exact grant,
-assigned skills and current goal revision. A withdrawn grant stays invalid for
-existing sessions even after another grant is issued. Operators and advisory MCP
-sessions do not gain worker submission authority from an assignment alone.
+The public model rechecks the exact grant, operator, goal revision and assigned
+skills. Artifact bytes, metadata and attribution are saved together. The first
+successful save stays authoritative on an authorized same-path retry after
+scratch changes or cleanup. Another path conflicts. Files are limited to 16 MiB,
+and submission validates regular files and path containment.
 
-The trusted host reads the submitted regular file through its recorded workspace
-mount. Artifact bytes, metadata, attribution and the attempt link are saved in one
-SQLite transaction outside scratch. **The first successful save is authoritative.**
-An authorized same-attempt, same-path retry returns the original artifact ID even
-after scratch cleanup or changes to the source file. A different path conflicts.
-Files are limited to 16 MiB; absolute paths, traversal and symlink paths are denied.
+The generic image remains buildable with `make worker-image`. It uses the pinned
+`ghcr.io/icoretech/codex-docker:0.166.0@sha256:c0568397f66fb8cc22c541fbafe26948da5000d24770b0ac2e918517dfc02615`
+base and `harness-worker run --attempt-id ID`. External execution supplies
+`HARNESS_WORKER_ATTEMPT_ID`, `HARNESS_WORKER_MCP_URL`, `HARNESS_WORKER_TOKEN`,
+the writable workspace and the worker's model access. The attempt ID identifies
+the assignment, and the credential establishes authority. Goal review remains a
+separate decision after submission.
 
-Launch retries with the same attempt ID, work item and image recover the original
-container or outcome. A deterministic Docker name, persisted launch metadata and
-host lock prevent a lost response from creating a second process. An unavailable
-original container is not replaced. An intentional retry uses a new attempt ID;
-changing the brief creates a new work item. Submitted artifacts and process exit
-codes are recorded separately. Neither submission nor exit code zero completes
-the goal; completion remains a separate audited operator decision.
-
-This development launcher requires Linux Docker host networking so the container
-can reach the loopback MCP service. It mounts only the attempt scratch and a
-private copy of the current Codex `auth.json`; it does not mount personal Codex
-configuration or the Harness database. It selects the host's non-root UID, uses
-Docker's `no` restart policy, and removes scratch and the copied login after exit.
-Owner-only launch credentials and JSONL traces remain under
-`.harness/worker-attempts/`; stopped containers remain available for reconciliation.
-Run a foreground launch again with the same ID to inspect a lost outcome.
-Runtime state is isolated by the selected database's canonical path. Recovering
-a running or exited container does not require the original login file and does
-not overwrite the session's private login copy.
-Use a fresh POC workspace for acceptance after this runtime layout change;
-attempt directories created before database isolation cannot be resumed by the
-revised launcher. Saved artifact bytes remain in their original database.
-
-The pinned CLI uses Bubblewrap for `workspace-write`, so the Docker host must
-permit its nested user and mount namespaces. The launcher retains Docker's
-default security profiles. A host that blocks those namespaces cannot complete
-the worker acceptance tests without a separately authorized Docker policy change.
-
-```sh
-make test-live           # One signed-in city worker; zero operator sessions.
-make test-live-extended  # Checkout proof plus the existing signed-in scenarios.
-docs/SLICE10_EVIDENCE.sh # Required checks and both live targets.
-```
-
-The checkout proof first runs the acceptance test at its recorded base SHA and
-requires failure. The worker changes the implementation and submits an ordinary
-patch file through the same file tool. After scratch cleanup, acceptance applies
-the saved patch to a clean base checkout and reruns the same unchanged test.
-Patches changing acceptance tests are rejected. Both worker cases use the same
-built image content ID. [Slice 10 acceptance](docs/SLICE10_TODO.md)
+`make test` includes the subprocess CLI and real HTTP handoff acceptance with
+Docker, Nomad and Codex unavailable. `make test-live` runs the signed-in operator
+scenarios for plans, progress, delegation, history, skills and HTTP attribution.
+`make test-live-extended` invokes that same signed-in suite. The Slice 10 city and
+checkout Docker handoffs remain recorded as incomplete because the host blocked
+Bubblewrap namespaces. Their captured evidence and image digests are preserved
+in the archive. [Slice 10 evidence](docs/phase1/SLICE10_EVIDENCE.md) · [Phase 2 prerequisite](docs/phase2/PHASE2_DECOUPLING_TODO.md)
 
 ## Sign in to Codex
 

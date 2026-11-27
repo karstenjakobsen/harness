@@ -4,11 +4,11 @@ From a Linux development host, a developer can run `make test-nomad` to start a 
 
 ## Start the server and agent from the Makefile
 
-The [Compose service](../dev/nomad/compose.yaml) owns the server image, ports, storage and leader health check. The [systemd user unit](../dev/nomad/harness-nomad-client@.service) runs the matching client binary on the host. Make starts both and waits for Docker driver readiness.
+The [Compose service](../../dev/nomad/compose.yaml) owns the server image, ports, storage and leader health check. The [systemd user unit](../../dev/nomad/harness-nomad-client@.service) runs the matching client binary on the host. Make starts both and waits for Docker driver readiness.
 
 - [x] Add `make nomad-server` to start a single Nomad server in Docker and wait for leader election. Add `make nomad-agent` to start a Nomad client agent on the host. The client joins that server and uses the host Docker daemon to run workload containers. Check in both configurations, use a matching Nomad release for server and client, and assign local listen addresses and ports that let both run on one machine. [Nomad server configuration](https://developer.hashicorp.com/nomad/docs/configuration/server) · [Nomad client configuration](https://developer.hashicorp.com/nomad/docs/configuration/client)
 - [x] Add `make nomad-up` to run those targets in order. Return success once the server reports the expected client ready with a healthy Docker driver. A second invocation reuses the same server and agent. Use a bounded readiness check and show the failed prerequisite or the relevant log path on failure.
-- [x] Add `make nomad-down` to stop the project’s host agent and server container. Track their identities so teardown also works after a partial startup and a second teardown is safe. Document the host Nomad binary, Docker access, required host privileges, local API address and startup/test/teardown commands in the README. Add the targets to [CATALOG.md](../CATALOG.md).
+- [x] Add `make nomad-down` to stop the project’s host agent and server container. Track their identities so teardown also works after a partial startup and a second teardown is safe. Document the host Nomad binary, Docker access, required host privileges, local API address and startup/test/teardown commands in the README. Add the targets to [CATALOG.md](../../CATALOG.md).
 
 ## Execution contract
 
@@ -27,7 +27,7 @@ Retries resolve to the original job while Nomad retains its registration. Inspec
 
 ## Acceptance
 
-- [x] **Offline.** Exercise the adapter against a small Nomad HTTP fixture. Cover an accepted registration whose response is lost, conflicting reuse of a run ID, inspection before allocation, and an unreachable API. Add a dedicated pytest marker for real Nomad tests and exclude it from the existing offline selection in the [Makefile](../Makefile).
+- [x] **Offline.** Exercise the adapter against a small Nomad HTTP fixture. Cover an accepted registration whose response is lost, conflicting reuse of a run ID, inspection before allocation, and an unreachable API. Add a dedicated pytest marker for real Nomad tests and exclude it from the existing offline selection in the [Makefile](../../Makefile).
 - [x] **Real Nomad.** Make `test-nomad` depend on `nomad-up`. From a stopped setup, run the cases below through the Python interface. Use a unique run ID per case, bound polling time, and clean up only the jobs created by the test, including after failure. Running the target again against the same cluster must pass.
 
 | Case | Required observations |
@@ -40,7 +40,7 @@ Retries resolve to the original job while Nomad retains its registration. Inspec
 | Client heartbeat loss | On the disposable evidence cluster, suspend the client’s heartbeats during a running workload. Observe `unknown` and no exit code. Resume the client and verify the same allocation returns to `running` with zero restarts. |
 
 - [x] Start only the Compose server without a systemd user session. Verify teardown removes the server and volume and reports the unverified client cleanup.
-- [x] Run `make check`, `make test` and `make test-nomad` and report each result separately. Create and run `docs/SLICE9_EVIDENCE.sh` and capture its output in `docs/SLICE9_EVIDENCE.md`. Before cleanup, record server and client readiness, the pinned image, per-case job and allocation IDs, the observed marker and exit codes. For the concurrent case, capture both returned handles, the allocation count, task restart count and final `stopped` state. Verify `make nomad-down` against the setup the evidence script started. [Engineering guidelines](../AGENTS.md#tests-and-verification)
+- [x] Run `make check`, `make test` and `make test-nomad` and report each result separately. Create and run `docs/phase1/SLICE9_EVIDENCE.sh` and capture its output in `docs/phase1/SLICE9_EVIDENCE.md`. Before cleanup, record server and client readiness, the pinned image, per-case job and allocation IDs, the observed marker and exit codes. For the concurrent case, capture both returned handles, the allocation count, task restart count and final `stopped` state. Verify `make nomad-down` against the setup the evidence script started. [Engineering guidelines](../../AGENTS.md#tests-and-verification)
 
 ## Verification
 

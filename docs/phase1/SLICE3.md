@@ -52,7 +52,7 @@ For the next slice, I’d add a small HTTP test fixture that reads a temporary f
 
 ### Proposed operations
 
-Consider `GoalAPI.record_observation(...)` for recording evidence against a stable goal and `GoalAPI.get_goal_progress(goal_id, revision=None)` for assessing it. Both names and signatures are provisional. A submission retains its source, the date or time the report concerns, and when Harness received it. Derive the submitter from established caller context and preserve the requester and observer separately when known. [Identity and attribution](../TERMINOLOGY.md#identity-and-attribution)
+Consider `GoalAPI.record_observation(...)` for recording evidence against a stable goal and `GoalAPI.get_goal_progress(goal_id, revision=None)` for assessing it. Both names and signatures are provisional. A submission retains its source, the date or time the report concerns, and when Harness received it. Derive the submitter from established caller context and preserve the requester and observer separately when known. [Identity and attribution](../../TERMINOLOGY.md#identity-and-attribution)
 
 ### Historical progress
 

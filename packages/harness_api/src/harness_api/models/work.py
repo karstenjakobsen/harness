@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import secrets
 import sqlite3
 import stat
 from collections.abc import Generator, Sequence
@@ -507,6 +508,29 @@ class WorkAPI(WorkspaceDatabase):
                 (row_id, digest, now),
             ).fetchone()
             return self._grant(row, attempt_id)
+
+    def issue_attempt_credential(
+        self, attempt_id: str, output: Path | str
+    ) -> AttemptGrant:
+        """Save a fresh credential privately before activating its grant.
+
+        Existing files are preserved. A failed grant removes the newly created
+        file and leaves the previous grant intact. After a lost response, the
+        owner can use the file or issue a replacement into another new file.
+        """
+        path = Path(output)
+        credential = secrets.token_urlsafe(32)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(credential)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return self.grant_attempt(attempt_id, credential)
+        except BaseException:
+            path.unlink()
+            raise
 
     @staticmethod
     def _grant(row: sqlite3.Row, attempt_id: str) -> AttemptGrant:

@@ -22,13 +22,10 @@ test:
 worker-image:
 	docker build --provenance=false --tag $(WORKER_IMAGE) --file dev/worker/Dockerfile .
 
-test-live: worker-image
-	HARNESS_WORKER_IMAGE="$$(docker image inspect --format '{{.Id}}' $(WORKER_IMAGE))" \
-		$(UV) run --locked --all-packages pytest -s -m "live and worker_city"
+test-live:
+	$(UV) run --locked --all-packages pytest -s -m live
 
-test-live-extended: worker-image
-	HARNESS_WORKER_IMAGE="$$(docker image inspect --format '{{.Id}}' $(WORKER_IMAGE))" \
-		$(UV) run --locked --all-packages pytest -s -m "live and not worker_city"
+test-live-extended: test-live
 
 nomad-server:
 	dev/nomad/cluster.sh server

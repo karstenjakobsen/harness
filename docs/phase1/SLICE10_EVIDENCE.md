@@ -66,7 +66,7 @@ approval. They have not been applied.
 
 ## Captured script output
 
-Command: `bash docs/SLICE10_EVIDENCE.sh` (exit 1).
+Command: `bash docs/phase1/SLICE10_EVIDENCE.sh` (exit 1).
 
 ```text
 Source commit: ec8b998df2c3f702f6c0ed58789fa3618002ab7c feat: run one-shot Docker workers with durable file handoffs

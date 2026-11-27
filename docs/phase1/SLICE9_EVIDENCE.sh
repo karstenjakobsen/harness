@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 # This scenario verifies cold startup and owns the cluster it tears down.
 dev/nomad/cluster.sh assert-down
 trap 'make nomad-down' EXIT

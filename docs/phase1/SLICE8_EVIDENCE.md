@@ -1,6 +1,6 @@
 # Slice 8 acceptance evidence
 
-Run `docs/SLICE8_EVIDENCE.sh` from the repository root with the workspace dependencies installed and Codex signed in. The script uses temporary workspaces. [Evidence script](SLICE8_EVIDENCE.sh) · [Acceptance criteria](SLICE8_TODO.md#acceptance)
+Run `docs/phase1/SLICE8_EVIDENCE.sh` from the repository root with the workspace dependencies installed and Codex signed in. The script uses temporary workspaces. [Evidence script](SLICE8_EVIDENCE.sh) · [Acceptance criteria](SLICE8_TODO.md#acceptance)
 
 The advisory session proposed a plan and saved zero children. Operator 1 used grant 1 to save five direct draft children under goal 1. Each child’s first revision links to its committing call in run 2. The parent stayed active at revision 1.
 

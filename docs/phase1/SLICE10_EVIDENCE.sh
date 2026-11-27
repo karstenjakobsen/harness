@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
+
+# The original worker acceptance requires the archived Slice 10 CLI.
+if ! uv run --locked --package harness-operator operator work start --help >/dev/null 2>&1; then
+  echo "Slice 10 worker dispatch is retired. Reproduce this historical recipe at the recorded Slice 10 baseline." >&2
+  exit 1
+fi
 
 status=0
 verify() {

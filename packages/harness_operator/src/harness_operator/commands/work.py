@@ -4,15 +4,23 @@ from pathlib import Path
 
 import click
 
-from harness_api import GoalAPI, WorkAPI, read_skill_catalog
+from harness_api import DATABASE_PATH, GoalAPI, WorkAPI, read_skill_catalog
+from harness_mcp.worker import serve_worker_mcp
 
 from ..terminal import POSITIVE_INTEGER, print_record
-from ..worker import DockerWorkerLauncher
 
 
 @click.group()
-def work():
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=".",
+    show_default=True,
+)
+@click.pass_context
+def work(ctx, workspace):
     """Prepare worker assignments and inspect their submitted files."""
+    ctx.obj = WorkAPI(workspace / DATABASE_PATH)
 
 
 @work.command("create")
@@ -23,7 +31,8 @@ def work():
 @click.option("--skill", "skills", multiple=True, metavar="ID@REVISION")
 @click.option("--source", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--base-sha")
-def create_work(goal_id, revision, operator_id, brief, skills, source, base_sha):
+@click.pass_obj
+def create_work(api, goal_id, revision, operator_id, brief, skills, source, base_sha):
     """Save an immutable brief tied to an exact goal revision."""
     selected = []
     for skill in skills:
@@ -31,10 +40,10 @@ def create_work(goal_id, revision, operator_id, brief, skills, source, base_sha)
         if not separator or not identifier or not number.isdecimal():
             raise click.BadParameter("Use ID@REVISION.", param_hint="--skill")
         selected.append({"id": identifier, "revision": int(number)})
-    goals = GoalAPI()
+    goals = GoalAPI(api.database_path)
     goals.skills.import_catalog(read_skill_catalog())
     print_record(
-        WorkAPI().create_work_item(
+        api.create_work_item(
             goal_id,
             revision,
             operator_id,
@@ -46,25 +55,76 @@ def create_work(goal_id, revision, operator_id, brief, skills, source, base_sha)
     )
 
 
-@work.command("start")
+@work.command("prepare")
 @click.argument("work_item_id", type=POSITIVE_INTEGER)
 @click.option("--attempt-id", required=True)
-@click.option("--image", envvar="HARNESS_WORKER_IMAGE", required=True)
-@click.option("--timeout", type=click.IntRange(min=1), default=600, show_default=True)
-def start_work(work_item_id, attempt_id, image, timeout):
-    """Start or recover one Docker attempt, wait for exit, and clean scratch."""
-    print_record(
-        DockerWorkerLauncher(WorkAPI()).start(
-            work_item_id, attempt_id, image, timeout=timeout
-        )
+@click.pass_obj
+def prepare_work(api, work_item_id, attempt_id):
+    """Persist an attempt for later execution."""
+    print_record(api.create_attempt(attempt_id, work_item_id))
+
+
+@work.command("bind-scratch")
+@click.argument("attempt_id")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.pass_obj
+def bind_scratch(api, attempt_id, path):
+    """Bind an existing scratch directory for file submissions."""
+    print_record(api.set_scratch(attempt_id, path.resolve()))
+
+
+@work.command("issue-credential")
+@click.argument("attempt_id")
+@click.option(
+    "--output", type=click.Path(dir_okay=False, path_type=Path), required=True
+)
+@click.pass_obj
+def issue_credential(api, attempt_id, output):
+    """Issue an attempt credential into a new private file."""
+    print_record(api.issue_attempt_credential(attempt_id, output))
+
+
+@work.command("revoke-credential")
+@click.argument("attempt_id")
+@click.pass_obj
+def revoke_credential(api, attempt_id):
+    """Revoke the attempt's current credential."""
+    print_record(api.revoke_attempt_grant(attempt_id))
+
+
+@work.command("serve-mcp")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option(
+    "--port", type=click.IntRange(min=1, max=65535), default=8001, show_default=True
+)
+@click.option(
+    "--allowed-host", multiple=True, help="Allowed HTTP Host for remote access."
+)
+@click.pass_obj
+def serve_mcp(api, host, port, allowed_host):
+    """Serve worker MCP for the selected workspace until interrupted."""
+    serve_worker_mcp(
+        api, host=host, port=port, allowed_hosts=list(allowed_host) or None
     )
 
 
 @work.command("show")
 @click.argument("attempt_id")
-def show_work(attempt_id):
+@click.pass_obj
+def show_work(api, attempt_id):
     """Read the saved attempt, handoff metadata and worker MCP audit."""
-    print_record(DockerWorkerLauncher(WorkAPI()).show(attempt_id))
+    attempt = api.get_attempt(attempt_id)
+    print_record(
+        {
+            "attempt": attempt,
+            "work_item": api.get_work_item(attempt["work_item_id"]),
+            "calls": api.list_worker_calls(attempt_id),
+            "artifact": api.get_artifact(attempt["artifact_id"])
+            if attempt["artifact_id"] is not None
+            else None,
+            "trace_path": None,
+        }
+    )
 
 
 @work.command("artifact")
@@ -72,9 +132,9 @@ def show_work(attempt_id):
 @click.option(
     "--output", type=click.Path(dir_okay=False, path_type=Path), required=True
 )
-def get_work_artifact(goal_id, output):
+@click.pass_obj
+def get_work_artifact(api, goal_id, output):
     """Retrieve the newest saved deliverable for a goal into an owner file."""
-    api = WorkAPI()
     artifacts = api.list_artifacts(goal_id)
     if not artifacts:
         raise click.ClickException("This goal has no saved worker artifact.")

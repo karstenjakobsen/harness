@@ -1,6 +1,8 @@
 # Harness engineering guidelines
 
 - Read the [terminology and attribution rules](TERMINOLOGY.md) and the [command catalog](CATALOG.md). And update accordingly if you make changes to source. 
+- Follow the active [Phase 2 plan](docs/phase2/phase2.md) and complete its [prerequisite checklist](docs/phase2/PHASE2_DECOUPLING_TODO.md) before the [Slice 11 experiment](docs/phase2/SLICE11.md). Earlier slice documents and evidence are archived in `docs/phase1/`.
+- During Phase 2, Harness prepares attempts and serves worker MCP. We launch workloads ourselves by rendering Jinja and submitting the job directly to Nomad.
 
 ## API and adapter boundaries
 
@@ -34,9 +36,9 @@ The local POC uses one unversioned SQLite [schema.sql](packages/harness_api/src/
 - Test domain rules once in the model. Use focused adapter tests for argument mapping, response shapes, error handling, and destination selection. Add an end-to-end test when the risk lies in how components connect.
 - For operator acceptance tests, populate an isolated workspace through the CLI. Check the tool call and structured result when retrieval matters. Check the facts in the final answer while allowing natural variations in wording.
 - For a new delegated action, test the authority boundary directly. Cover a valid grant, an out-of-scope target, an assignment without a grant, and a grant withdrawn after session start. Regrant the action and verify the old session is still denied. Verify denied writes and failed transactions leave history intact. At MCP, check both tool discovery and direct invocation from an advisory session.
-- Test discretion with the same open-ended request before and after stronger evidence arrives. Inspect the live trace and saved state for both outcomes. The first turn may seek clarification while the goal stays open. The second can exercise the delegated action. [Slice 3 acceptance](docs/SLICE3_TODO.md#acceptance)
+- Test discretion with the same open-ended request before and after stronger evidence arrives. Inspect the live trace and saved state for both outcomes. The first turn may seek clarification while the goal stays open. The second can exercise the delegated action. [Slice 3 acceptance](docs/phase1/SLICE3_TODO.md#acceptance)
 - Run `make check` and `make test` for code changes. Run the signed-in `make test-live` when the slice affects live operator behavior. Report live results separately and identify any check that could not run.
-- After completing each `docs/SLICE<N>_TODO.md`, create and run `docs/SLICE<N>_EVIDENCE.sh` to verify the slice’s acceptance criteria. Capture the run’s output in `docs/SLICE<N>_EVIDENCE.md`, using the same slice number for all three files. [Slice 7 script](docs/SLICE7_EVIDENCE.sh) · [Captured output](docs/SLICE7_EVIDENCE.md)
+- After completing each `SLICE<N>_TODO.md`, create and run `SLICE<N>_EVIDENCE.sh` in the same phase directory to verify the slice’s acceptance criteria. Capture the run’s output in `SLICE<N>_EVIDENCE.md` alongside it, using the same slice number for all three files. [Slice 7 script](docs/phase1/SLICE7_EVIDENCE.sh) · [Captured output](docs/phase1/SLICE7_EVIDENCE.md)
 
 ## Scope and handoff
 

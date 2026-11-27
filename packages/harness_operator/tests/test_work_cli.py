@@ -50,6 +50,8 @@ def saved_handoff(monkeypatch, tmp_path, capsys):
     (scratch / "result.txt").write_bytes(content)
     api.set_scratch("cli-handoff", scratch)
     artifact = api.submit_work_result("cli-handoff", "fixture-credential", "result.txt")
+    api.record_launch("cli-handoff", "historical-container", "sha256:" + "a" * 64)
+    api.record_exit("cli-handoff", 0)
     shutil.rmtree(scratch)
     api.mark_scratch_cleaned("cli-handoff")
     return invoke, goal, item, artifact, content
@@ -63,6 +65,8 @@ def test_work_commands_use_current_workspace_and_preserve_existing_output(
     assert record["work_item"] == item
     assert record["artifact"] == artifact
     assert record["attempt"]["scratch_cleaned_at"] is not None
+    assert record["attempt"]["container_id"] == "historical-container"
+    assert record["attempt"]["exit_code"] == 0
     output = tmp_path / "owner-result.txt"
     assert invoke("work", "artifact", goal["id"], "--output", output) == artifact
     assert output.read_bytes() == content

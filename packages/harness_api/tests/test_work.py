@@ -70,6 +70,38 @@ def test_first_successful_submission_survives_mutation_cleanup_and_reopen(worksp
     assert goals.get_goal(item["goal_id"])["revision"] == 1
 
 
+def test_issue_credential_uses_private_file_and_preserves_existing_file(
+    workspace, tmp_path
+):
+    path, _, work, _, attempt, _ = workspace
+    output = tmp_path / "credential"
+    grant = work.issue_attempt_credential(attempt["id"], output)
+    credential = output.read_text()
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert credential and credential not in str(grant)
+    assert WorkAPI(path).resolve_attempt(credential)["id"] == attempt["id"]
+    with pytest.raises(FileExistsError):
+        work.issue_attempt_credential(attempt["id"], output)
+    assert output.read_text() == credential
+    assert work.authorize_attempt(attempt["id"], credential)["id"] == attempt["id"]
+
+
+def test_failed_credential_grant_removes_file_and_preserves_prior_authority(
+    workspace, tmp_path
+):
+    path, _, work, _, attempt, _ = workspace
+    output = tmp_path / "credential"
+    with closing(sqlite3.connect(path, autocommit=True)) as db:
+        db.execute(
+            "CREATE TRIGGER fail_grant BEFORE INSERT ON work_attempt_grants BEGIN SELECT RAISE(ABORT, 'failed grant'); END"
+        )
+        with pytest.raises(WorkStorageError):
+            work.issue_attempt_credential(attempt["id"], output)
+    assert not output.exists()
+    assert work.resolve_attempt("first-credential")["id"] == attempt["id"]
+    assert work.list_worker_calls(attempt["id"]) == []
+
+
 def test_every_worker_call_rechecks_grant_and_revision_even_saved_retries(workspace):
     _, goals, work, item, attempt, scratch = workspace
     (scratch / "result").write_text("original")
@@ -164,6 +196,7 @@ def test_exact_assigned_skill_revisions_and_brief_are_immutable(workspace):
 def test_launch_identity_retry_and_changed_brief_preserve_prior_attempt(workspace):
     _, _, work, item, attempt, scratch = workspace
     assert work.create_attempt(attempt["id"], item["id"])["id"] == attempt["id"]
+    assert work.list_attempts(item["id"]) == [work.get_attempt(attempt["id"])]
     changed = work.create_work_item(
         item["goal_id"], 1, item["operator_id"], "Changed brief"
     )
