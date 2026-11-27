@@ -1,24 +1,17 @@
-# Slice 13 — Watch a worker attempt while it runs
+# Slice 13 — Watch one worker attempt and replay its activity
 
-Can we watch a live Codex worker act, then inspect the same activity after its allocation is gone? Reuse the Slice 11 city assignment and generic worker image. The image already starts Codex with `exec --json`. Slice 11 reads stdout after termination. This experiment follows that output during execution and saves an owner-readable transcript outside the allocation.
+Can we see what a worker did while it was running and inspect the same activity after its allocation is gone? Use the existing [Slice 11 experiment](SLICE11.md), city assignment, worker image and worker MCP. Keep the reader in `dev/phase2/` and the evidence in `docs/phase2/`. This slice needs zero changes to `packages/` or the worker prompt.
 
-## Scope
+## One live acceptance run
 
-Experiment code and tests live under `dev/phase2/` and documentation under `docs/phase2/`. Use the existing CLI, worker image, brief and MCP tools. Keep `packages/` unchanged. We operate the reader manually. A future operator activity tool can use the results when we design its contract.
+- [ ] Manually start one real Codex worker with zero AI operator sessions. From the host, follow its Nomad task stdout from the beginning. Save the emitted JSONL outside scratch under the attempt ID, with the job, allocation and task identifiers. Keep stderr separate and raw diagnostics private.
+- [ ] Display and persist a substantive event such as a command execution or MCP call. Then independently confirm the same task is still running. Retain the event and the timestamp of that observation. Show worker messages or visible reasoning summaries only when emitted.
+- [ ] At exit, record Nomad's observed outcome. Check any claimed submission against the worker MCP audit. Finish reading before allocation cleanup, then replay the captured activity by attempt ID. Record the manual commands, a sanitized excerpt and the live and replay observations in `SLICE13_EVIDENCE.md`. A failed worker can demonstrate capture and replay if the live-event check passed; report its delivery outcome accurately.
 
-Capture observable execution events automatically. The worker needs no instruction to narrate, publish logs or submit a summary. A visible assistant message is available only if emitted. Private model reasoning is unavailable. Treat this as a diagnostic transcript: the MCP server audit remains the source for authenticated reads and committed submissions.
+## When something fails
 
-## Experiment
+A failed job remains a finished attempt with its own outcome, available activity and any submitted artifact. If the reader loses part of the stream, keep the readable portion and label the capture incomplete. The reader only observes. During Phase 2 we decide manually whether another execution is worthwhile. Later the operator can inspect the evidence, retry the same work with a fresh attempt ID, request a revised brief or report the blocker. A retry preserves the original attempt and its transcript.
 
-- [ ] Start one real worker through the Phase 2 experiment with zero AI operator sessions. As soon as the allocation ID is known, have a reader outside the container follow the Nomad allocation's worker-task stdout from the beginning. Keep stderr separately labeled as diagnostic output.
-- [ ] Associate the capture with the attempt, job, allocation and task. Incrementally assemble complete JSONL records across transport chunks, including split UTF-8 characters. Save events outside scratch as they arrive and show them as readable text. Preserve event order, visible message text, and turn or item IDs when supplied. Label host receipt times separately from producer timestamps.
-- [ ] Inspect which event types the pinned worker actually emits. Show observed turn boundaries, commands and outcomes, MCP activity and visible messages where present. Preserve unknown event types as such. Do not invent missing text, outcomes or links between log events and audit calls.
-- [ ] Use private local files for retained diagnostics and exclude credential values from the rendered transcript and published evidence. Record malformed or truncated output and an interrupted stream as incomplete. Capture failure must never submit another job.
-- [ ] After task exit, drain the stream before allocation cleanup. For this short run, compare the ordered captured stdout records with a fresh read of retained allocation stdout before teardown. After cleanup, replay the saved transcript using the attempt ID alone.
+## Test budget
 
-## Acceptance
-
-- [ ] During the live run, persist and display at least one complete Codex event, then independently observe the same Nomad task still running. Record both observations. A transcript first produced after exit cannot pass this check.
-- [ ] Verify one worker session, zero AI operator sessions, and a successful city artifact submission in the existing MCP audit. Show the actual events available to the reader and identify any actions visible only in MCP or Nomad. The test can pass with a silent worker that emits structured tool events.
-- [ ] Offline, feed representative fragmented records and a truncated final line through the reader. Check ordering, readable output, explicit incomplete status and credential redaction using a synthetic sentinel.
-- [ ] Record the manual commands, a short sanitized live excerpt, the pre-exit observation, post-cleanup replay and comparison result in `docs/phase2/SLICE13_EVIDENCE.md`. Report offline and live checks separately. Use the findings to decide which fields a future `get_worker_activity(attempt_id)` should expose.
+Use the real run as the acceptance test. Run the existing repository checks. Add at most one small reader test if new parsing or display code introduces a specific risk, such as a truncated last line hiding earlier complete events. Skip simulated Nomad lifecycles, forced worker failures, retry policies and a crash-recovery matrix. Keep credentials out of displayed or published evidence; use selected fields for the readable excerpt.
