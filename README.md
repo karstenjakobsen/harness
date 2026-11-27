@@ -81,6 +81,86 @@ workloads ourselves by rendering Jinja and submitting the job directly to Nomad.
 The existing backend remains available for the Slice 9 development proof.
 [Execution contract and acceptance](docs/phase1/SLICE9_TODO.md) · [Active Phase 2 plan](docs/phase2/phase2.md)
 
+## Run the Slice 11 worker experiment
+
+`make test-phase2` runs required acceptance with one real Codex worker session
+and zero AI operator sessions. The worker reads its brief through MCP, writes
+`cities.txt` in `/workspace`, submits it through MCP and exits. The owner then
+retrieves the saved file through Harness after exit and after scratch cleanup.
+Use the installed CLI, Docker, the local Nomad setup and an existing Codex login.
+
+The three steps can be run separately from the repository root. Choose a new,
+empty workspace for each attempt. Seed and render work with Nomad stopped.
+
+```sh
+make setup
+make worker-image
+workspace="$PWD/.harness/phase2/my-worker-run"
+.venv/bin/python dev/phase2/experiment.py seed --workspace "$workspace"
+receipt="$workspace/phase2/receipt.json"
+image="$(docker image inspect --format '{{.Id}}' harness-worker:slice10)"
+.venv/bin/python dev/phase2/experiment.py render --receipt "$receipt" --image "$image"
+
+# Inspect this checkpoint before submitting anything.
+cat "$workspace/phase2/prepared.json"
+cat "$workspace/phase2/job.json"
+
+make nomad-up
+.venv/bin/python dev/phase2/experiment.py run --receipt "$receipt"
+```
+
+`prepared.json` records the persisted attempt with an empty execution outcome.
+`job.json` is the exact request sent to Nomad, including its unique job ID,
+immutable image, one task, disabled restart and reschedule policies, runtime
+bootstrap and mount declarations. Its SHA-256 is saved in the receipt. An edited
+job must be rendered again before submission. Changing the brief uses a new work
+item and attempt in a fresh workspace.
+
+At run time the development script binds the attempt's scratch through the owner
+CLI, issues a mode-0600 credential file and starts the standalone worker MCP
+server. It registers the scratch and private runtime directories as per-attempt
+Nomad host volumes, then submits the rendered job directly to Nomad. The worker
+receives its credential and a private copy of the selected Codex `auth.json`
+through the runtime mount. Credentials stay outside the rendered job and receipt.
+Use `run --auth-file PATH` for a different login file and `render --mcp-port PORT`
+for a different loopback endpoint. For Docker Desktop, supply
+`render --mcp-url http://host.docker.internal:8001/mcp`. That selects an
+authenticated MCP listener reachable from its containers. The local worker uses
+Docker host networking.
+
+The receipt's `fixture` contains the assignment and expected city lines.
+`execution` contains observed allocation, exit, trace, audit and artifact results.
+A prepared or pending attempt has no successful execution result. Saved evidence
+includes the allocation record, stdout JSONL worker trace, stderr, worker MCP log,
+Harness inspection and retrieved file. The script revokes the credential, stops
+MCP and removes its job, volumes and runtime directories after execution. Scheduler
+observations stay in the experiment receipt. The goal remains active at its
+original revision. [Slice 11 acceptance](docs/phase2/SLICE11.md)
+
+On the Docker Desktop host used for the captured run, Bubblewrap required the
+owner-approved per-task `seccomp=unconfined` and `apparmor=unconfined` options.
+The same generic image then completed its real worker handoff. Reproduce that
+configuration with the explicit options below.
+
+```sh
+HARNESS_PHASE2_MCP_URL=http://host.docker.internal:8001/mcp \
+HARNESS_PHASE2_ALLOW_NAMESPACE_OPTIONS=1 make test-phase2
+```
+
+Individual rendering accepts repeated `--docker-security-opt` arguments. The
+chosen options are visible in the rendered job's `security_opt` field. The
+`systempaths=unconfined` option was rejected by the Docker API used by Nomad.
+[Captured live results](docs/phase2/SLICE11_EVIDENCE.md)
+
+`make test-phase2-smoke` runs two scripted city writers from separate empty
+workspaces and an exit-7 failure case. These optional scheduler checks use the
+fixture's `smoke_argv` with zero model sessions. Worker receipts retain only
+the assignment criteria. Required worker acceptance uses
+the generic `harness-worker` entrypoint. A successful live receipt records
+`worker_sessions: 1` from the real Codex trace, `ai_operator_sessions: 0` from
+the recorded CLI command sequence, a saved `artifact_id`, the actual
+allocation exit code and the digest of the bytes retrieved through Harness.
+
 ## Prepare an attempt and hand off a file
 
 Preparation persists an attempt ID and work item binding. The same ID and work

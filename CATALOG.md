@@ -169,6 +169,8 @@ we render Jinja and submit jobs directly to Nomad. [Phase 2 plan](docs/phase2/ph
 | `make nomad-server` | Starts the checkout’s Nomad 2.1.1 Compose service and waits for its leader health check. |
 | `make nomad-agent` / `make nomad-up` | Starts or reuses the Compose server and systemd user client, then waits for the host client to report a healthy Docker driver. |
 | `make test-nomad` | Brings up the development cluster and checks workload exit, concurrent start, repeated stop, literal arguments and refusal of a second placement. Cleans up its test jobs. |
+| `make test-phase2` | Builds the generic worker image, seeds an empty workspace, shows the rendered checkpoint and explicitly submits one real Codex worker to Nomad. Requires MCP brief reads and submission, one worker session, zero AI operator sessions and Harness file retrieval after exit and cleanup. |
+| `make test-phase2-smoke` | Runs optional deterministic city-writing and exit-7 scheduler smoke tests using the same renderer. Saves separate receipts and output files. |
 | `make nomad-down` | Attempts client and Compose cleanup independently. Removes the checkout’s Compose server, network and data volume and reports a failure if it cannot verify the systemd client cleanup. |
 | `make check` | Runs Ruff lint and formatting checks. |
 | `make format` | Formats files with Ruff. |

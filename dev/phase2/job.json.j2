@@ -1,0 +1,28 @@
+{
+  "Job": {
+    "ID": {{ job_id | tojson }},
+    "Name": {{ job_id | tojson }},
+    "Type": "batch",
+    "Datacenters": ["*"],
+    "Meta": {{ metadata | tojson }},
+    "TaskGroups": [{
+      "Name": "workload",
+      "Count": 1,
+      "RestartPolicy": {"Attempts": 0, "Mode": "fail"},
+      "ReschedulePolicy": {"Attempts": 0, "Unlimited": false},
+      "Disconnect": {"Replace": false, "LostAfter": 3600000000000, "Reconcile": "keep_original"},
+      "Volumes": {{ volumes | tojson }},
+      "Tasks": [{
+        "Name": "workload",
+        "Driver": "docker",
+        "User": {{ user | tojson }},
+        "Env": {{ task_environment | tojson }},
+        "Config": {{ config | tojson }},
+        "VolumeMounts": {{ mounts | tojson }},
+        "Resources": {"CPU": 100, "MemoryMB": 512}
+      }]
+    }]
+  },
+  "EnforceIndex": true,
+  "JobModifyIndex": 0
+}

@@ -126,3 +126,12 @@ Preparation, execution outcome and artifact submission are separate facts. An ex
 Container exit code and artifact submission are separate recorded outcomes.
 Neither completes or revises the goal. The operator reviews the retained result
 and makes any completion decision separately. [Worker commands](CATALOG.md#worker-assignments)
+
+A **Phase 2 experiment receipt** records CLI-created goal, revision, work item and
+attempt identifiers alongside the exact rendered job digest and observed Nomad
+allocation outcome. Assignment criteria live under `fixture`, and scheduler and
+worker observations live under `execution`. Required Slice 11 acceptance records
+one real Codex worker session, zero AI operator sessions and the artifact saved
+through authenticated worker MCP. The owner retrieves that artifact through
+Harness after worker exit and scratch cleanup. Optional scripted smoke tests
+record their scheduler results in their own receipts. [Slice 11 experiment](docs/phase2/SLICE11.md)

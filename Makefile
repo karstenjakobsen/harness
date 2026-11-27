@@ -1,7 +1,7 @@
 UV ?= uv
 WORKER_IMAGE ?= harness-worker:slice10
 
-.PHONY: setup api check format test test-live test-live-extended worker-image nomad-server nomad-agent nomad-up nomad-down test-nomad
+.PHONY: setup api check format test test-live test-live-extended worker-image nomad-server nomad-agent nomad-up nomad-down test-nomad test-phase2 test-phase2-smoke
 
 setup:
 	$(UV) sync --locked --all-packages
@@ -26,6 +26,12 @@ test-live:
 	$(UV) run --locked --all-packages pytest -s -m live
 
 test-live-extended: test-live
+
+test-phase2: worker-image
+	bash dev/phase2/test.sh worker
+
+test-phase2-smoke:
+	bash dev/phase2/test.sh smoke
 
 nomad-server:
 	dev/nomad/cluster.sh server
