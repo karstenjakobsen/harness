@@ -95,6 +95,14 @@ class WorkerCall(TypedDict):
     error: str | None
 
 
+class WorkAttemptDetails(TypedDict):
+    attempt: WorkAttempt
+    work_item: WorkItem
+    calls: list[WorkerCall]
+    artifact: WorkArtifact | None
+    trace_path: None
+
+
 class WorkValidationError(ValueError):
     """A work operation received invalid input."""
 
@@ -866,45 +874,72 @@ class WorkAPI(WorkspaceDatabase):
                 )
             ]
 
+    def get_attempt_details(self, attempt_id: str) -> WorkAttemptDetails:
+        """Read an attempt and its handoff audit from one database snapshot."""
+        with self._connection("ro") as db:
+            db.execute("BEGIN")
+            attempt = self._attempt(db, attempt_id)
+            return WorkAttemptDetails(
+                attempt=attempt,
+                work_item=self._item(db, attempt["work_item_id"]),
+                calls=self._worker_calls(db, attempt_id),
+                artifact=(
+                    self._artifact(db, attempt["artifact_id"])
+                    if attempt["artifact_id"] is not None
+                    else None
+                ),
+                trace_path=None,
+            )
+
     def list_worker_calls(self, attempt_id: str) -> list[WorkerCall]:
         with self._connection("ro") as db:
             db.execute("BEGIN")
             self._attempt(db, attempt_id)
-            calls = []
-            for row in db.execute(
-                "SELECT * FROM worker_calls WHERE attempt_id = ? ORDER BY id",
-                (self._attempt_row_id(db, attempt_id),),
-            ):
-                call = dict(row)
-                call["attempt_id"] = attempt_id
-                call["arguments"] = json.loads(call["arguments"])
-                calls.append(cast(WorkerCall, call))
-            return calls
+            return self._worker_calls(db, attempt_id)
+
+    def _worker_calls(
+        self, db: sqlite3.Connection, attempt_id: str
+    ) -> list[WorkerCall]:
+        calls = []
+        for row in db.execute(
+            "SELECT * FROM worker_calls WHERE attempt_id = ? ORDER BY id",
+            (self._attempt_row_id(db, attempt_id),),
+        ):
+            call = dict(row)
+            call["attempt_id"] = attempt_id
+            call["arguments"] = json.loads(call["arguments"])
+            calls.append(cast(WorkerCall, call))
+        return calls
 
     def set_scratch(self, attempt_id: str, path: Path | str) -> WorkAttempt:
         if not isinstance(path, (str, Path)) or not str(path).strip():
             raise WorkValidationError("A scratch directory path is required.")
-        absolute = os.path.abspath(path)
+        absolute = Path(path).resolve()
         with self._write() as db:
             attempt = self._attempt(db, attempt_id)
-            if attempt["scratch_path"] is not None:
-                if attempt["scratch_path"] != absolute:
-                    raise WorkConflictError(
-                        "Attempt already has a different scratch directory."
-                    )
-                return attempt
             if (
-                db.execute(
-                    "SELECT 1 FROM work_attempts WHERE scratch_path = ?", (absolute,)
-                ).fetchone()
-                is not None
+                attempt["scratch_path"] is not None
+                and Path(attempt["scratch_path"]).resolve() != absolute
             ):
                 raise WorkConflictError(
-                    "Scratch directories cannot be shared by attempts."
+                    "Attempt already has a different scratch directory."
                 )
+            for row in db.execute(
+                "SELECT scratch_path FROM work_attempts WHERE scratch_path IS NOT NULL AND attempt_key != ?",
+                (attempt_id,),
+            ):
+                registered = Path(row["scratch_path"]).resolve()
+                if absolute.is_relative_to(registered) or registered.is_relative_to(
+                    absolute
+                ):
+                    raise WorkConflictError(
+                        "Scratch directories cannot be shared or overlap across attempts."
+                    )
+            if attempt["scratch_path"] is not None:
+                return attempt
             db.execute(
                 "UPDATE work_attempts SET scratch_path = ? WHERE attempt_key = ?",
-                (absolute, attempt_id),
+                (str(absolute), attempt_id),
             )
             return self._attempt(db, attempt_id)
 

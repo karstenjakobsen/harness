@@ -30,6 +30,7 @@ Reuse the existing work model and its retry semantics. [WorkAPI](../../packages/
 ## Read persisted attempts and results
 
 - [x] Change `operator work show ATTEMPT_ID` to read the attempt, work item, worker calls and saved artifact metadata through the public Harness API.
+- [x] Read the full inspection through `WorkAPI.get_attempt_details` in one SQLite read transaction. Exercise submissions committing during and between inspection reads.
 - [x] Support prepared attempts with no launch, calls or artifact, and externally run attempts whose runtime fields are absent.
 - [x] Preserve reads of saved attempts, calls and artifacts after reopening the workspace in a fresh process, including records with saved runtime metadata.
 - [x] Preserve `operator work artifact GOAL_ID --output NEW_PATH` and retrieval of saved bytes after scratch cleanup.
@@ -40,6 +41,7 @@ Reuse the existing work model and its retry semantics. [WorkAPI](../../packages/
 - [x] Expose the existing worker MCP app through an independently invocable server entry point using an explicit Harness workspace destination.
 - [x] Preserve the generic worker image and `harness-worker run --attempt-id ID` entrypoint for externally initiated execution.
 - [x] Add trusted-owner CLI commands to bind per-attempt scratch through `WorkAPI.set_scratch` and issue and revoke the existing attempt credential through `WorkAPI.grant_attempt` and `WorkAPI.revoke_attempt_grant`, separately from preparation. Credential issuance writes directly to a private runtime file.
+- [x] Reject equal, ancestor and descendant scratch bindings across attempts in the binding transaction, including resolved symlink aliases. Test both binding orders and concurrent binding attempts.
 - [x] Document one copyable shell command sequence that binds scratch, issues the credential to a private file, starts worker MCP against the seeded workspace and revokes the credential afterward. Specify the workspace destination consistently across all commands, the credential file permissions and the server shutdown step. Make this sequence reusable by Slice 11 through installed CLI entry points, with zero AI operator sessions and zero imports of Harness internals.
 - [x] Store credentials in a private runtime file. Verify seed JSON, command output, logs and audit records exclude credential values.
 - [x] Derive the worker's attempt and exact grant from its authenticated session. Treat the attempt ID as a lookup key and require the credential for worker access.

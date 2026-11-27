@@ -1,6 +1,8 @@
 import json
 import shutil
+import sqlite3
 import sys
+from contextlib import closing
 
 import pytest
 
@@ -103,3 +105,65 @@ def test_artifact_read_failure_does_not_create_empty_owner_file(
         error="database is unavailable",
     )
     assert not output.exists()
+
+
+@pytest.mark.parametrize("commit_during_read", [False, True])
+def test_show_uses_one_snapshot_while_a_submission_commits(
+    saved_handoff, monkeypatch, tmp_path, commit_during_read
+):
+    invoke, _, item, _, _ = saved_handoff
+    writer = WorkAPI()
+    attempt_id = "concurrent-inspection"
+    writer.create_attempt(attempt_id, item["id"])
+    scratch = tmp_path / "inspection-scratch"
+    scratch.mkdir()
+    (scratch / "result.txt").write_text("Concurrent result")
+    writer.set_scratch(attempt_id, scratch)
+    writer.grant_attempt(attempt_id, "inspection-credential")
+    with closing(sqlite3.connect(writer.database_path, autocommit=True)) as db:
+        db.execute("PRAGMA journal_mode = WAL")
+
+    committed = []
+
+    def submit():
+        if not committed:
+            committed.append(
+                writer.submit_work_result(
+                    attempt_id, "inspection-credential", "result.txt"
+                )
+            )
+
+    class InspectionConnection(sqlite3.Connection):
+        def close(self):
+            super().close()
+            if not commit_during_read:
+                submit()
+
+    def before_query(statement):
+        if statement.startswith("SELECT * FROM worker_calls"):
+            submit()
+
+    connect = sqlite3.connect
+
+    def observed_connection(database, **kwargs):
+        if "mode=ro" in str(database):
+            kwargs["factory"] = InspectionConnection
+        connection = connect(database, **kwargs)
+        if commit_during_read and "mode=ro" in str(database):
+            connection.set_trace_callback(before_query)
+        return connection
+
+    # Commit through the public model immediately after the first read connection
+    # closes or while it reads calls. Independent reads would mix the old attempt
+    # with the new audit. WAL allows the writer to commit during a read snapshot.
+    monkeypatch.setattr(sqlite3, "connect", observed_connection)
+    before = invoke("work", "show", attempt_id)
+    assert committed
+    assert before["artifact"] is None
+    assert before["attempt"]["artifact_id"] is None
+    assert before["calls"] == []
+    after = invoke("work", "show", attempt_id)
+    assert after == writer.get_attempt_details(attempt_id)
+    assert after["artifact"] == committed[0]
+    assert after["attempt"]["artifact_id"] == committed[0]["id"]
+    assert after["calls"][0]["artifact_id"] == committed[0]["id"]

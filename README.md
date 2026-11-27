@@ -192,6 +192,11 @@ new file. The owner can retrieve saved artifacts after revocation and scratch
 cleanup. `show` reads persisted work, attempt, call and artifact data. Runtime
 fields can be null and `trace_path` is null.
 
+Scratch directories must be disjoint across attempts. Binding resolves symlink
+aliases and rejects equal, ancestor or descendant directories inside the write
+transaction. `show` uses `WorkAPI.get_attempt_details` to read the complete
+inspection result from one SQLite snapshot during concurrent submissions.
+
 `work create --source /absolute/local/repository --base-sha FULL_COMMIT_SHA`
 records checkout input. The person launching the workload prepares its isolated
 checkout, mounts scratch at `/workspace` and provides model access when needed.

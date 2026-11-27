@@ -107,6 +107,13 @@ are limited to the exact revisions assigned to that work item. The trusted host
 reads a regular file inside that attempt's mounted workspace and commits its
 independent copy before acknowledging a submission.
 
+Scratch bindings reserve disjoint resolved directories within the workspace
+database. Binding checks equal, ancestor and descendant paths in the write
+transaction, including on retry. Symlink aliases resolve to the same directory.
+`WorkAPI.get_attempt_details` reads the attempt, work item, worker calls and
+artifact metadata from one SQLite read snapshot, so inspection remains coherent
+when a submission commits concurrently.
+
 The first successful save is authoritative. An authorized retry with the same
 relative path returns the original artifact ID without rereading scratch, even
 after cleanup or changes to the scratch file. A different path conflicts and

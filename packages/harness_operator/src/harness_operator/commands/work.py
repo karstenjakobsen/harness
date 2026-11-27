@@ -113,18 +113,7 @@ def serve_mcp(api, host, port, allowed_host):
 @click.pass_obj
 def show_work(api, attempt_id):
     """Read the saved attempt, handoff metadata and worker MCP audit."""
-    attempt = api.get_attempt(attempt_id)
-    print_record(
-        {
-            "attempt": attempt,
-            "work_item": api.get_work_item(attempt["work_item_id"]),
-            "calls": api.list_worker_calls(attempt_id),
-            "artifact": api.get_artifact(attempt["artifact_id"])
-            if attempt["artifact_id"] is not None
-            else None,
-            "trace_path": None,
-        }
-    )
+    print_record(api.get_attempt_details(attempt_id))
 
 
 @work.command("artifact")

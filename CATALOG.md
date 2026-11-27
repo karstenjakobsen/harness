@@ -135,11 +135,11 @@ skill catalog and records exact revisions.
 | --- | --- |
 | `operator work create --goal-id ID --revision N --operator-id ID --brief TEXT [--skill ID@REVISION]... [--source PATH --base-sha SHA]` | Saves an immutable work item. Supply both source options to record a local Git repository and its exact base commit SHA. Returns the work item ID. |
 | `operator work prepare WORK_ITEM_ID --attempt-id ID` | Persists an attempt and returns its `id` and `work_item_id`, plus saved attempt metadata. An identical retry returns the same attempt. Reusing the ID for another work item conflicts. Works offline. |
-| `operator work bind-scratch ATTEMPT_ID PATH` | Binds an existing directory to the attempt for MCP file submissions. A repeated binding to that path returns the attempt. Another path conflicts. |
+| `operator work bind-scratch ATTEMPT_ID PATH` | Binds an existing directory to the attempt for MCP file submissions. Resolved directories must be disjoint across attempts. Equal, ancestor and descendant paths conflict. A repeated binding to the same resolved path returns the attempt after checking for overlaps. Another path conflicts. |
 | `operator work issue-credential ATTEMPT_ID --output NEW_PATH` | Writes a fresh credential to a new mode-0600 file and returns grant metadata. Preserves existing files. Replaces any active grant with the new grant. |
 | `operator work revoke-credential ATTEMPT_ID` | Revokes the active grant. Existing connections and saved-result retries recheck authority. |
 | `operator work serve-mcp [--host ADDRESS] [--port PORT] [--allowed-host HOST]...` | Serves authenticated worker MCP at `/mcp`. Defaults to `127.0.0.1:8001`. Use Ctrl-C or SIGTERM to stop. |
-| `operator work show ATTEMPT_ID` | Reads persisted `attempt`, `work_item`, worker MCP `calls` and saved `artifact` metadata. Runtime fields may be null. `trace_path` is null. |
+| `operator work show ATTEMPT_ID` | Calls `WorkAPI.get_attempt_details` to read persisted `attempt`, `work_item`, worker MCP `calls` and saved `artifact` metadata in one SQLite read snapshot. Runtime fields may be null. `trace_path` is null. |
 | `operator work artifact GOAL_ID --output NEW_PATH` | Copies the latest saved artifact for the goal into a new file and returns metadata. Preserves existing output files. Works after scratch cleanup and credential revocation. |
 
 Keep the credential outside scratch and seed receipts. The owner binds scratch,

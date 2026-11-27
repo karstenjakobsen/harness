@@ -63,6 +63,39 @@ format and local-link checks also passed.
 1 passed in 39.47s
 ```
 
+## Manual handoff review fixes — 2026-11-27
+
+Regression tests first reproduced overlapping parent and child scratch bindings
+in both orders, acceptance of a symlink alias, and a CLI inspection combining an
+old attempt with a newly committed submission call.
+
+`WorkAPI.set_scratch` now compares resolved directories in its write transaction
+and rejects equal, ancestor and descendant paths across attempts. Binding retries
+also check for overlaps. Tests cover sibling directories, preservation after a
+rejected binding and concurrent attempts to reserve overlapping directories.
+
+`WorkAPI.get_attempt_details` returns typed attempt, work item, call and artifact
+metadata from one SQLite read snapshot. Click calls this operation directly.
+The inspection regression uses real SQLite connections in WAL mode and a real
+public submission operation. It commits a submission while calls are being read
+and immediately after the first read connection closes. Each response retains
+one coherent snapshot, and a subsequent inspection sees the saved artifact and
+its successful submission call together.
+
+`make check` and `make test` passed. The offline suite includes the real HTTP
+manual handoff acceptance. The signed-in results above are from the prerequisite
+implementation on 2026-11-26.
+
+```text
+uv run --locked ruff check .
+All checks passed!
+uv run --locked ruff format --check .
+109 files already formatted
+
+uv run --locked --all-packages pytest -m "not live and not nomad"
+===================== 239 passed, 14 deselected in 45.18s ======================
+```
+
 ## Captured prerequisite script output
 
 ```text

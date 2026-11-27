@@ -378,6 +378,63 @@ def test_attempts_cannot_share_registered_scratch_directories(workspace):
         work.set_scratch("another", scratch)
 
 
+@pytest.mark.parametrize("child_first", [False, True])
+def test_scratch_bindings_reject_ancestors_and_descendants(
+    workspace, tmp_path, child_first
+):
+    _, _, work, item, _, _ = workspace
+    parent = tmp_path / "separate"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    first, second = (child, parent) if child_first else (parent, child)
+    work.create_attempt("first-binding", item["id"])
+    work.create_attempt("second-binding", item["id"])
+    bound = work.set_scratch("first-binding", first)
+    before = work.list_attempts(item["id"])
+    with pytest.raises(WorkConflictError, match="overlap"):
+        work.set_scratch("second-binding", second)
+    assert work.list_attempts(item["id"]) == before
+    assert work.set_scratch("first-binding", first) == bound
+    sibling = tmp_path / "separate-sibling"
+    sibling.mkdir()
+    assert work.set_scratch("second-binding", sibling)["scratch_path"] == str(sibling)
+
+
+def test_scratch_binding_resolves_symlink_aliases(workspace, tmp_path):
+    _, _, work, item, _, scratch = workspace
+    alias = tmp_path / "alias"
+    alias.symlink_to(scratch, target_is_directory=True)
+    work.create_attempt("aliased", item["id"])
+    with pytest.raises(WorkConflictError, match="shared|overlap"):
+        work.set_scratch("aliased", alias)
+    assert work.get_attempt("aliased")["scratch_path"] is None
+
+
+def test_concurrent_overlapping_scratch_bindings_save_only_one(workspace, tmp_path):
+    _, _, work, item, _, _ = workspace
+    parent = tmp_path / "concurrent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    work.create_attempt("parent-binding", item["id"])
+    work.create_attempt("child-binding", item["id"])
+
+    def bind(attempt_id, directory):
+        try:
+            return work.set_scratch(attempt_id, directory)
+        except WorkConflictError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(bind, "parent-binding", parent),
+            pool.submit(bind, "child-binding", child),
+        ]
+        results = [future.result() for future in futures]
+    assert sum(result is not None for result in results) == 1
+    attempts = [work.get_attempt(key) for key in ("parent-binding", "child-binding")]
+    assert sum(attempt["scratch_path"] is not None for attempt in attempts) == 1
+
+
 def test_worker_result_and_process_outcome_are_independent(workspace):
     path, goals, work, item, attempt, scratch = workspace
     (scratch / "result").write_bytes(b"recoverable partial work")
