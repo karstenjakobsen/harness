@@ -4,8 +4,8 @@ USER root
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
-COPY dev/worker/harness-worker.py /usr/local/bin/harness-worker
-RUN chmod 0755 /usr/local/bin/harness-worker
+COPY dev/worker/worker_runtime.py /usr/local/bin/worker_runtime.py
+COPY --chmod=0755 dev/worker/codex_worker.py /usr/local/bin/harness-worker
 USER codex
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/harness-worker"]

@@ -10,18 +10,22 @@ esac
 
 codex_key_args=()
 kiro_key_args=()
-if [[ -n ${SLICE14_KIRO_KEY_FILE:-} ]]; then
-    [[ -s $SLICE14_KIRO_KEY_FILE ]] || { echo 'Kiro key file is missing or empty.' >&2; exit 1; }
-    kiro_key_args=(--api-key-file "$SLICE14_KIRO_KEY_FILE")
-else
-    : "${KIRO_API_KEY:?Set KIRO_API_KEY or SLICE14_KIRO_KEY_FILE for the Kiro probe and delivery.}"
+kiro_key_file=${SLICE14_KIRO_KEY_FILE:-}
+if [[ -z $kiro_key_file && -z ${KIRO_API_KEY:-} ]]; then
+    kiro_key_file=.harness/credentials/kiro.key
+fi
+if [[ -n $kiro_key_file ]]; then
+    [[ -s $kiro_key_file && -r $kiro_key_file ]] || { echo "Kiro key file is unreadable, missing or empty: $kiro_key_file" >&2; exit 1; }
+    kiro_key_args=(--api-key-file "$kiro_key_file")
 fi
 if [[ $1 == --live ]]; then
-    if [[ -n ${SLICE14_CODEX_KEY_FILE:-} ]]; then
-        [[ -s $SLICE14_CODEX_KEY_FILE ]] || { echo 'Codex key file is missing or empty.' >&2; exit 1; }
-        codex_key_args=(--api-key-file "$SLICE14_CODEX_KEY_FILE")
-    else
-        : "${CODEX_API_KEY:?Set CODEX_API_KEY or SLICE14_CODEX_KEY_FILE for the Codex delivery.}"
+    codex_key_file=${SLICE14_CODEX_KEY_FILE:-}
+    if [[ -z $codex_key_file && -z ${CODEX_API_KEY:-} ]]; then
+        codex_key_file=.harness/credentials/codex.key
+    fi
+    if [[ -n $codex_key_file ]]; then
+        [[ -s $codex_key_file && -r $codex_key_file ]] || { echo "Codex key file is unreadable, missing or empty: $codex_key_file" >&2; exit 1; }
+        codex_key_args=(--api-key-file "$codex_key_file")
     fi
 fi
 
@@ -30,12 +34,20 @@ mkdir -p dev/.harness/phase2
 workspace=$(mktemp -d "$PWD/dev/.harness/phase2/slice14-XXXXXX")
 probe="$workspace/phase2/receipt.json"
 nomad_addr=${HARNESS_NOMAD_ADDR:-http://127.0.0.1:14646}
+mcp_url=${HARNESS_PHASE2_MCP_URL:-}
+if [[ -z $mcp_url ]]; then
+    if [[ $(docker info --format '{{.OperatingSystem}}') == 'Docker Desktop' ]]; then
+        mcp_url=http://host.docker.internal:8001/mcp
+    else
+        mcp_url=http://127.0.0.1:8001/mcp
+    fi
+fi
 experiment=(.venv/bin/python dev/phase2/experiment.py)
 trap 'echo "Slice 14 receipts and native event streams saved under $workspace"' EXIT
 
 docker build --provenance=false --tag harness-worker:kiro-slice14 --file dev/worker/Dockerfile.Kiro .
 kiro_image=$(docker image inspect --format '{{.Id}}' harness-worker:kiro-slice14)
-kiro_model=${SLICE14_KIRO_MODEL:-claude-sonnet-4.6}
+kiro_model=${SLICE14_KIRO_MODEL:-claude-opus-4.8}
 kiro_effort=${SLICE14_KIRO_EFFORT:-low}
 codex_model=${SLICE14_CODEX_MODEL:-gpt-5.6-luna}
 codex_effort=${SLICE14_CODEX_EFFORT:-low}
@@ -51,7 +63,7 @@ render_and_run() {
     fi
     "${experiment[@]}" render --receipt "$receipt" --image "$image" \
         --worker "$engine" --model "$model" --effort "$effort" --auth api-key \
-        --mcp-url "${HARNESS_PHASE2_MCP_URL:-http://127.0.0.1:8001/mcp}" "${render_args[@]}" >/dev/null
+        --mcp-url "$mcp_url" "${render_args[@]}" >/dev/null
     cat -- "$(dirname -- "$receipt")/job.json"
     "${experiment[@]}" run --receipt "$receipt" --nomad-addr "$nomad_addr" "$@" >/dev/null || result=$?
     .venv/bin/python - "$receipt" <<'PY'
@@ -71,7 +83,7 @@ summary["execution"] = {
     key: execution.get(key)
     for key in (
         "allocation_id", "exit_code", "verified", "brief_read", "cli_version",
-        "worker_sessions", "ai_operator_sessions", "activity_capture",
+        "worker_sessions", "ai_operator_sessions", "activity_capture", "effective_settings",
         "artifact_id", "file_sha256", "grant_id",
     )
 }

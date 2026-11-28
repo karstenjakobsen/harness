@@ -64,8 +64,9 @@ def redact(text, secrets=()):
 
 def summary(event, secrets=()):
     """Select credential-free fields for display; return None for other events."""
-    if event.get("method") == "session/update":
-        update = (event.get("params") or {}).get("update") or {}
+    data = experiment.kiro_event_data(event)
+    if data:
+        update = data.get("update") or {}
         update_type = update.get("sessionUpdate")
         if update_type not in ("tool_call", "tool_call_update"):
             return None

@@ -45,8 +45,8 @@ def test_truncated_last_line_keeps_earlier_events_and_labels_capture(tmp_path):
 
 def test_kiro_tool_event_keeps_status_and_redacts_the_title():
     event = {
-        "method": "session/update",
-        "params": {
+        "type": "sessionUpdate",
+        "data": {
             "sessionId": "kiro-session",
             "update": {
                 "sessionUpdate": "tool_call",

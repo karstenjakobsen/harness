@@ -1,6 +1,7 @@
 FROM docker.io/sbx/kiro-image@sha256:5f6b354c985a032743ee995b58dad0dae5971b20bc73c4dd6402d39d8426fa18
 
-COPY --chmod=0755 dev/worker/harness-worker.py /usr/local/bin/harness-worker
+COPY dev/worker/worker_runtime.py /usr/local/bin/worker_runtime.py
+COPY --chmod=0755 dev/worker/kiro_worker.py /usr/local/bin/harness-worker
 ENV HARNESS_WORKER_ENGINE=kiro
 USER agent
 WORKDIR /workspace

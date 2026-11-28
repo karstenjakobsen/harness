@@ -19,7 +19,7 @@
 | `SkillAPI` | The public model for importing the workspace owner’s catalog, listing current skills, reading exact revisions and finding the run calls that read them. |
 | `GoalAPI` | The public Python interface for goals and revisions, observations, progress assessments, completion decisions and grants. It also records operator runs and MCP tool calls and serves goal activity and run history. |
 | `WorkAPI` | The public model for immutable work items, worker attempts and grants, scoped skill reads, saved artifacts and worker MCP audit calls. It checks the exact attempt authority and goal revision on worker operations. |
-| Worker | One Codex session executing one attempt in an externally launched workload. It uses ordinary file and shell tools in `/workspace` and worker MCP to read its assignment and submit a file. A worker session is separate from an `operator ask` session. |
+| Worker | One Codex or Kiro session executing one attempt in an externally launched workload. It uses workspace tools in `/workspace` and worker MCP to read its assignment and submit a file. A worker session is separate from an `operator ask` session. |
 
 ## Identity and attribution
 
@@ -136,7 +136,7 @@ through authenticated worker MCP. The owner retrieves that artifact through
 Harness after worker exit and scratch cleanup. Optional scripted smoke tests
 record their scheduler results in their own receipts. [Slice 11 experiment](docs/phase2/SLICE11.md)
 
-The container worker uses Codex `danger-full-access`, with isolation supplied by
+The Codex container worker uses `danger-full-access`, with isolation supplied by
 the container user, mounts and Docker's security profiles. A terminal experiment
 receipt retains its allocation and exit before teardown. `verify_pending` retries
 the final Harness export, and `cleanup_pending` retries teardown. An interrupted

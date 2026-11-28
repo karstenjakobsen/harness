@@ -145,9 +145,14 @@ def test_worker_launch_configurations(
     assert not any(
         value in json.dumps(job) + json.dumps(rendered) for value in keys.values()
     )
-    worker = runpy.run_path(
-        str(experiment.DIRECTORY.parent / "worker/harness-worker.py")
-    )
+    worker_directory = experiment.DIRECTORY.parent / "worker"
+    monkeypatch.syspath_prepend(str(worker_directory))
+    worker = runpy.run_path(str(worker_directory / f"{engine}_worker.py"))
+    other_engine = "kiro" if engine == "codex" else "codex"
+    with pytest.raises(ValueError, match=f"This worker image runs {engine}"):
+        worker["cli_environment"](
+            environment | keys | {"HARNESS_WORKER_ENGINE": other_engine}
+        )
     if auth == "api-key":
         key_name = experiment.PROVIDER_KEYS[engine]
         assert staged.name == "provider-key" and staged.read_text() == keys[key_name]
@@ -210,7 +215,10 @@ def test_kiro_rejects_codex_saved_login(prepared):
 def test_worker_events_keep_complete_kiro_events_from_partial_capture():
     stdout = (
         b'{"type":"harness.worker_cli","version":"kiro-cli 3.7.0"}\n'
-        b'{"method":"session/update","params":{"sessionId":"one"}}\n'
+        b'{"type":"sessionUpdate","data":{"sessionId":"one","update":'
+        b'{"sessionUpdate":"config_option_update","configOptions":'
+        b'[{"id":"model","currentValue":"claude-opus-4.8"},'
+        b'{"id":"effortLevel","currentValue":"low"}]}}}\n'
         b'{"method":"session/update","params":{"sessionId":"one"}}\n'
         b'{"method":"session/update"'
     )
@@ -218,6 +226,7 @@ def test_worker_events_keep_complete_kiro_events_from_partial_capture():
         1,
         "kiro-cli 3.7.0",
         True,
+        {"model": "claude-opus-4.8", "effort": "low"},
     )
 
 

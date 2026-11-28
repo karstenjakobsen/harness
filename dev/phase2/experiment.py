@@ -724,6 +724,16 @@ def verify_worker(receipt, evidence):
     }
 
 
+def kiro_event_data(event):
+    if event.get("type") == "sessionUpdate":
+        data = event.get("data")
+    elif event.get("method") == "session/update":
+        data = event.get("params")
+    else:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def worker_events(stdout, launch):
     events = []
     partial = bool(stdout and not stdout.endswith(b"\n"))
@@ -741,18 +751,35 @@ def worker_events(stdout, launch):
         if event.get("type") == "harness.worker_cli"
         and isinstance(event.get("version"), str)
     ]
+    settings = {}
     if launch.get("worker") == "kiro":
-        sessions = {
-            event["params"]["sessionId"]
-            for event in events
-            if event.get("method") == "session/update"
-            and isinstance(event.get("params"), dict)
-            and isinstance(event["params"].get("sessionId"), str)
-        }
+        sessions = set()
+        for event in events:
+            data = kiro_event_data(event)
+            session_id = data.get("sessionId")
+            if isinstance(session_id, str):
+                sessions.add(session_id)
+            update = data.get("update")
+            if (
+                not isinstance(update, dict)
+                or update.get("sessionUpdate") != "config_option_update"
+            ):
+                continue
+            options = update.get("configOptions")
+            if not isinstance(options, list):
+                continue
+            for option in options:
+                if isinstance(option, dict) and isinstance(
+                    option.get("currentValue"), str
+                ):
+                    if option.get("id") == "model":
+                        settings["model"] = option["currentValue"]
+                    elif option.get("id") == "effortLevel":
+                        settings["effort"] = option["currentValue"]
         count = len(sessions) or None
     else:
         count = sum(event.get("type") == "thread.started" for event in events)
-    return count, versions[-1] if versions else None, partial
+    return count, versions[-1] if versions else None, partial, settings
 
 
 def cleanup(client, receipt):
@@ -826,7 +853,7 @@ def check_result(client, receipt, receipt_path):
     filename = receipt["fixture"]["filename"]
     if receipt["mode"] == "worker":
         stdout = evidence / "stdout.log"
-        count, version, partial = worker_events(
+        count, version, partial, settings = worker_events(
             stdout.read_bytes() if capture["stdout"] == "complete" else b"", launch
         )
         outcome["worker_sessions"] = count
@@ -835,6 +862,8 @@ def check_result(client, receipt, receipt_path):
                 capture["stdout"] = "incomplete"
             outcome["activity_capture"] = capture
             outcome["cli_version"] = version
+            if settings:
+                outcome["effective_settings"] = settings
         elif count != 1:
             raise RuntimeError(f"Expected one real worker session, observed {count}.")
         outcome["ai_operator_sessions"] = sum(
@@ -849,6 +878,16 @@ def check_result(client, receipt, receipt_path):
         if not launch.get("brief_only"):
             content = (evidence / filename).read_bytes()
             outcome["file_sha256"] = hashlib.sha256(content).hexdigest()
+        if launch.get("worker") == "kiro":
+            stderr = evidence / "stderr.log"
+            effort_rejected = (
+                capture["stderr"] == "complete"
+                and b"failed to set effort" in stderr.read_bytes()
+            )
+            if effort_rejected or any(
+                launch[f"requested_{name}"] != value for name, value in settings.items()
+            ):
+                raise RuntimeError("Kiro did not apply the requested model and effort.")
     else:
         source = f"{receipt['scratch']}/{filename}"
         stat = client.get(f"client/fs/stat/{allocation['ID']}", params={"path": source})
