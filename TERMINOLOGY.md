@@ -97,6 +97,7 @@ Historical progress applies the selected revision’s criteria to the evidence a
 | Work item | An immutable assignment with a generated integer ID: one goal ID and revision, registered operator, brief, exact skill revisions and workspace input. A changed brief creates a new work item. |
 | Work attempt | A prepared execution of a work item, identified by a caller-selected string ID within its workspace database. Preparation persists the ID before any execution. Repeating preparation for that work item returns the same attempt. An intentional execution retry uses a fresh attempt ID under the same work item. |
 | Attempt grant | Authority bound to one attempt and its credential. It permits the four worker MCP operations while the registered operator, open goal and bound revision remain valid. A withdrawn or replaced grant does not authorize an old credential. |
+| Work delegation grant | The trusted owner's permission for one registered operator to save work items for one exact goal. It is distinct from an assignment, definition grant, completion grant and attempt grant. A recorded run binds the exact grant; withdrawal or unregistration invalidates that run's delegation authority. |
 | Workspace input | Either an empty directory or an isolated checkout of a local source repository at the recorded base SHA. The person launching the workload prepares its scratch directory or isolated checkout and keeps the original checkout separate. The trusted owner binds that directory to the attempt for submissions. |
 | Work artifact | An independent copy of the submitted file's bytes in the workspace database, with a generated ID, relative path, SHA-256, size and worker attribution. Its metadata retains the checkout base SHA when one was assigned. |
 | Worker call | An audited worker MCP operation with its attempt, grant, arguments, timestamps and `returned`, `denied` or `failed` outcome. A successful submission links the saved artifact. |
@@ -122,6 +123,27 @@ use this same file handoff; the model does not infer test success from their
 contents.
 
 Preparation, execution outcome and artifact submission are separate facts. An externally run attempt may have no recorded container, image or exit code. The attempt ID is a lookup key. Its credential, saved in a private runtime file by the owner CLI, establishes worker authority. Revocation or replacement invalidates the old credential on every request.
+
+`WorkAPI.delegate_work` saves an assignment under the grant bound to its recorded
+operator call. Delegated work items add `delegation_grant_id` and
+`committing_call`; owner-created items leave those fields absent. The item,
+retry identity and committing-call link commit together. Each call can save one
+result. A replay uses a new call and records retrieval while preserving the
+original committing call. Run history distinguishes `committed_work_item_id`
+from `retrieved_work_item_id`, including when reply delivery is unfinished.
+
+A delegation retry key belongs to its exact grant. The same key and normalized
+assignment inputs recover the original item only while the operator, grant,
+open goal and current revision remain valid. A changed revision rejects even an
+identical replay; the saved item and original call remain discoverable through
+history. Delegation creates zero attempts and changes no goal state.
+
+For delegation, `WorkspaceInput` contains `source_path` and `base_sha`, both null
+for an empty workspace or an absolute path and full commit SHA for a requested
+repository. Paths are normalized lexically without reading the repository or
+resolving symlinks. Accepting this requested input authorizes no repository
+access. Access authorization belongs to a future launch operation. Slice 16
+adds only public Python model operations; CLI and MCP contracts stay unchanged.
 
 Container exit code and artifact submission are separate recorded outcomes.
 Neither completes or revises the goal. The operator reviews the retained result

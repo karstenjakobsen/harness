@@ -124,6 +124,12 @@ operator goal create --title "Track food" --duration-days 7
 
 ## Worker assignments
 
+Slice 16 adds `WorkAPI.delegate_work` through the public Python model only.
+The trusted owner grants delegation for one goal with `grant_delegation`;
+`GoalAPI.start_run(delegation_grant_id=...)` binds that exact authority. There is
+no delegation CLI command or operator MCP tool yet. Existing commands below
+retain their contracts. [Model delegation](README.md#delegate-a-work-item-through-python)
+
 These owner commands use `WorkAPI` and print JSON, except `serve-mcp`, which
 runs until interrupted. All accept `operator work --workspace PATH COMMAND`.
 The default workspace is the current directory. Related preparation, scratch,

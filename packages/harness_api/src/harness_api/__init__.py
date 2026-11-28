@@ -18,6 +18,7 @@ from .models.activity import (
     OperatorRun,
     RunNotFoundError,
     SkillReference,
+    WorkDelegationRun,
 )
 from .models.evidence import Evidence
 from .models.goals import (
@@ -67,9 +68,11 @@ from .models.work import (
     WorkerCall,
     WorkItem,
     WorkNotFoundError,
+    WorkspaceInput,
     WorkStorageError,
     WorkValidationError,
 )
+from .models.work_delegation import WorkDelegationGrant
 from .nomad import NomadBackend, StartOutcomeUnknown, WorkloadConflictError
 from .skill_source import read_skill_catalog
 
@@ -134,6 +137,8 @@ __all__ = [
     "WorkAuthorizationError",
     "WorkBrief",
     "WorkConflictError",
+    "WorkDelegationGrant",
+    "WorkDelegationRun",
     "WorkItem",
     "WorkNotFoundError",
     "WorkStorageError",
@@ -142,6 +147,7 @@ __all__ = [
     "WorkloadConflictError",
     "WorkloadSpec",
     "WorkloadStatus",
+    "WorkspaceInput",
     "WorkspaceStorageError",
     "read_skill_catalog",
 ]

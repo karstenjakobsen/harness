@@ -3,7 +3,7 @@
 import json
 import sqlite3
 from collections import defaultdict
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from . import GoalStatus
 
@@ -19,6 +19,7 @@ type HarnessTool = Literal[
     "create_goal",
     "create_subgoal",
     "revise_goal",
+    "delegate_work",
 ]
 type DefinitionAction = Literal["create_goal", "create_subgoal", "revise_goal"]
 type RunOutcome = Literal["unfinished", "succeeded", "failed"]
@@ -75,6 +76,8 @@ class CallReadReference(CallReference):
     retrieved_event_id: int | None
     committed_revision: RevisionReference | None
     retrieved_revision: RevisionReference | None
+    committed_work_item_id: NotRequired[int | None]
+    retrieved_work_item_id: NotRequired[int | None]
 
 
 class RunReadReference(TypedDict):
@@ -150,6 +153,10 @@ class OperatorRun(TypedDict):
     calls: list[RunCall]
 
 
+class WorkDelegationRun(OperatorRun):
+    delegation_grant_id: int
+
+
 def run_read_reference(run: OperatorRun) -> RunReadReference:
     return RunReadReference(
         run_id=run["id"],
@@ -163,10 +170,19 @@ def run_read_reference(run: OperatorRun) -> RunReadReference:
                 retrieved_event_id=call["retrieved_event_id"],
                 committed_revision=call["committed_revision"],
                 retrieved_revision=call["retrieved_revision"],
+                **work_result_reference(call),
             )
             for call in run["calls"]
         ],
     )
+
+
+def work_result_reference(call: CallReadReference) -> dict:
+    return {
+        key: call[key]
+        for key in ("committed_work_item_id", "retrieved_work_item_id")
+        if key in call
+    }
 
 
 class RunNotFoundError(LookupError):
@@ -177,12 +193,13 @@ class RunNotFoundError(LookupError):
 def run_row(connection: sqlite3.Connection, run_id: int, owner_id: int) -> sqlite3.Row:
     row = connection.execute(
         """
-        SELECT run.*, coalesce(grant.operator_id, definition.operator_id) AS operator_id,
-               grant.goal_id AS granted_goal_id, definition.action AS definition_action,
+        SELECT run.*, coalesce(grant.operator_id, definition.operator_id, delegation.operator_id) AS operator_id,
+               coalesce(grant.goal_id, delegation.goal_id) AS granted_goal_id, definition.action AS definition_action,
                definition.goal_id AS definition_goal_id
         FROM operator_runs AS run
         LEFT JOIN goal_assignments AS grant ON grant.id = run.completion_grant_id
         LEFT JOIN goal_definition_grants AS definition ON definition.id = run.definition_grant_id
+        LEFT JOIN work_delegation_grants AS delegation ON delegation.id = run.delegation_grant_id
         WHERE run.id = ? AND run.owner_user_id = ?
         """,
         (run_id, owner_id),
@@ -192,7 +209,9 @@ def run_row(connection: sqlite3.Connection, run_id: int, owner_id: int) -> sqlit
     return row
 
 
-def run_record(row: sqlite3.Row, calls: list[RunCall]) -> OperatorRun:
+def run_record(
+    row: sqlite3.Row, calls: list[RunCall]
+) -> OperatorRun | WorkDelegationRun:
     definition_grant = None
     if row["definition_grant_id"] is not None:
         definition_grant = DefinitionGrant(
@@ -201,7 +220,7 @@ def run_record(row: sqlite3.Row, calls: list[RunCall]) -> OperatorRun:
             action=row["definition_action"],
             goal_id=row["definition_goal_id"],
         )
-    return OperatorRun(
+    record = OperatorRun(
         id=row["id"],
         owner_user_id=row["owner_user_id"],
         mode="advisory" if row["operator_id"] is None else "delegated",
@@ -214,6 +233,11 @@ def run_record(row: sqlite3.Row, calls: list[RunCall]) -> OperatorRun:
         outcome=row["outcome"],
         calls=calls,
     )
+    if row["delegation_grant_id"] is not None:
+        return WorkDelegationRun(
+            **record, delegation_grant_id=row["delegation_grant_id"]
+        )
+    return record
 
 
 def revision_reference(row: sqlite3.Row) -> RevisionReference | None:
@@ -282,10 +306,22 @@ def run_calls(
             retrieved_revision=revision_reference(row)
             if row["revision_kind"] == "retrieved"
             else None,
+            **(
+                {
+                    "committed_work_item_id": row["work_item_id"]
+                    if row["work_item_kind"] == "committed"
+                    else None,
+                    "retrieved_work_item_id": row["work_item_id"]
+                    if row["work_item_kind"] == "retrieved"
+                    else None,
+                }
+                if row["tool"] == "delegate_work"
+                else {}
+            ),
             returned_goals=results[row["sequence"]]
             if row["outcome"] == "returned"
             and row["returned_history"] is None
-            and row["tool"] not in ("list_skills", "read_skill")
+            and row["tool"] not in ("list_skills", "read_skill", "delegate_work")
             else None,
             returned_history=json.loads(row["returned_history"])
             if row["returned_history"] is not None
@@ -294,8 +330,9 @@ def run_calls(
         for row in connection.execute(
             """
             SELECT call.*, link.goal_id AS revision_goal_id, link.revision AS saved_revision,
-                   link.kind AS revision_kind
+                   link.kind AS revision_kind, work.work_item_id, work.kind AS work_item_kind
             FROM run_calls AS call LEFT JOIN run_call_revisions AS link USING (run_id, sequence)
+            LEFT JOIN run_call_work_items AS work USING (run_id, sequence)
             WHERE call.run_id = ? AND call.sequence IS NOT ? ORDER BY call.sequence
             """,
             (run_id, exclude_sequence),

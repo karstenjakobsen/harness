@@ -170,6 +170,47 @@ the generic `harness-worker` entrypoint. A successful live receipt records
 the recorded CLI command sequence, a saved `artifact_id`, the actual
 allocation exit code and the digest of the bytes retrieved through Harness.
 
+## Delegate a work item through Python
+
+Slice 16 adds `WorkAPI.delegate_work(goal_id, expected_revision, brief,
+workspace_input, retry_key, *, call)`. The trusted owner uses
+`WorkAPI.grant_delegation(goal_id, operator_id)` and binds a recorded run through
+`GoalAPI.start_run(delegation_grant_id=grant["id"])`. Record its `delegate_work`
+call with `GoalAPI.start_tool_call`, supplying the target goal and revision.
+Pass that trusted `CallReference` to the work operation; the operator and grant
+come from the recorded run. Select the same database path for both models.
+
+`WorkspaceInput(source_path=None, base_sha=None)` requests an empty workspace.
+A repository request requires an absolute source path and full commit SHA.
+Saving it reads no repository and authorizes no access; launch must establish
+that authorization separately. Delegation saves an immutable assignment and
+creates zero attempts. There is no delegation CLI command or MCP tool in this
+slice.
+
+The returned item adds `delegation_grant_id` and `committing_call`. Inspect it
+with `WorkAPI.get_work_item` or `list_work_items`, and follow the call through
+`GoalAPI.get_run`. Each call can commit at most one work item. To recover a lost
+reply, record a new call and reuse the same retry key and assignment inputs.
+History preserves the original committing call and identifies the retrieving
+call. Authority and the current revision are checked again on every replay.
+If the revision changed, replay is rejected; inspect history to find the saved
+item. Withdraw the grant with `WorkAPI.withdraw_delegation`; a replacement
+grant requires a new run.
+
+Record a returned reply separately with `GoalAPI.finish_tool_call(call,
+"returned", returned_work_item_id=item["id"])`. The work item's commit link
+survives even if that step is interrupted. Python run reads use
+`WorkDelegationRun` for delegation-bound runs; existing transport run schemas
+retain their current contracts.
+
+`GoalAPI.get_run_write_action` reports `delegate_work` while the run's exact
+grant remains active, and returns `None` after authority ends or the run finishes.
+
+This changes the unversioned SQLite schema. Use a fresh workspace for Slice 16;
+populated databases are reopened without migration. The
+[acceptance script](docs/phase3/SLICE16_EVIDENCE.sh) runs the focused tests and a
+delegate-and-reopen example without a worker, scheduler or AI session.
+
 ## Prepare an attempt and hand off a file
 
 Preparation persists an attempt ID and work item binding. The same ID and work

@@ -33,6 +33,7 @@ from .activity import (
     RevisionReadReference,
     RevisionReference,
     SkillReference,
+    WorkDelegationRun,
     related_calls,
     revision_reference,
     run_calls,
@@ -53,6 +54,7 @@ from .evidence import (
     is_future_dated,
 )
 from .skills import SkillAPI, is_skill_id
+from .work_delegation import active_delegation_grant
 
 EVENT_COLUMNS = """
 event.id AS event_id, event.actor_user_id, event.recorded_at, statement.payload, event.statement_evidence_id,
@@ -662,24 +664,47 @@ class GoalAPI(WorkspaceDatabase):
         completion_grant_id: int | None = None,
         *,
         definition_grant_id: int | None = None,
-    ) -> OperatorRun:
+        delegation_grant_id: int | None = None,
+    ) -> OperatorRun | WorkDelegationRun:
         """Bind a run to the exact grant checked at launch, or start an advisory run."""
-        if completion_grant_id is not None and definition_grant_id is not None:
+        if (
+            sum(
+                value is not None
+                for value in (
+                    completion_grant_id,
+                    definition_grant_id,
+                    delegation_grant_id,
+                )
+            )
+            > 1
+        ):
             raise GoalValidationError("A run can bind only one grant.")
         with self._write() as connection:
             if completion_grant_id is not None:
                 self._get_completion_grant(connection, completion_grant_id)
             if definition_grant_id is not None:
                 self._get_definition_grant(connection, definition_grant_id)
+            if delegation_grant_id is not None:
+                _validate_positive_integer(delegation_grant_id, "Delegation grant ID")
+                if (
+                    active_delegation_grant(
+                        connection, delegation_grant_id, ADMIN_USER_ID
+                    )
+                    is None
+                ):
+                    raise GoalValidationError(
+                        "The delegation grant is inactive or unavailable."
+                    )
             run_id = connection.execute(
                 """
-                INSERT INTO operator_runs (owner_user_id, completion_grant_id, definition_grant_id, started_at)
-                VALUES (?, ?, ?, ?) RETURNING id
+                INSERT INTO operator_runs (owner_user_id, completion_grant_id, definition_grant_id, delegation_grant_id, started_at)
+                VALUES (?, ?, ?, ?, ?) RETURNING id
                 """,
                 (
                     ADMIN_USER_ID,
                     completion_grant_id,
                     definition_grant_id,
+                    delegation_grant_id,
                     utc_timestamp(),
                 ),
             ).fetchone()[0]
@@ -702,7 +727,7 @@ class GoalAPI(WorkspaceDatabase):
 
     def get_run_write_action(
         self, run_id: int
-    ) -> DefinitionAction | Literal["complete_goal"] | None:
+    ) -> DefinitionAction | Literal["complete_goal", "delegate_work"] | None:
         """Return the action the run's exact grant currently authorizes."""
         _validate_positive_integer(run_id, "Run ID")
         with self._connection("ro") as connection:
@@ -718,12 +743,22 @@ class GoalAPI(WorkspaceDatabase):
                 if run["completion_grant_id"] is not None:
                     self._get_completion_grant(connection, run["completion_grant_id"])
                     return "complete_goal"
+                if (
+                    run["delegation_grant_id"] is not None
+                    and active_delegation_grant(
+                        connection, run["delegation_grant_id"], ADMIN_USER_ID
+                    )
+                    is not None
+                ):
+                    return "delegate_work"
             except GoalValidationError:
                 # Historical runs retain the grant ID after its authority ends.
                 return None
             return None
 
-    def get_run(self, run_id: int, *, call: CallReference | None = None) -> OperatorRun:
+    def get_run(
+        self, run_id: int, *, call: CallReference | None = None
+    ) -> OperatorRun | WorkDelegationRun:
         _validate_positive_integer(run_id, "Run ID")
         exclude_sequence = (
             call["sequence"] if call is not None and call["run_id"] == run_id else None
@@ -823,10 +858,16 @@ class GoalAPI(WorkspaceDatabase):
         returned_goals: list[GoalResultReference] | None = None,
         history_result: GoalActivity | OperatorRun | None = None,
         returned_skills: list[SkillReference] | None = None,
+        returned_work_item_id: int | None = None,
     ) -> None:
         result_count = sum(
             value is not None
-            for value in (returned_goals, history_result, returned_skills)
+            for value in (
+                returned_goals,
+                history_result,
+                returned_skills,
+                returned_work_item_id,
+            )
         )
         if outcome not in ("returned", "denied", "failed") or result_count != int(
             outcome == "returned"
@@ -840,13 +881,23 @@ class GoalAPI(WorkspaceDatabase):
                     "revision_kind",
                     "committed_event_id",
                     "retrieved_event_id",
+                    "work_item_id",
                 )
             ):
                 raise GoalValidationError(
                     "A call with a saved result cannot be recorded as denied."
                 )
             history_reference = None
-            if returned_skills is not None:
+            if returned_work_item_id is not None:
+                _validate_positive_integer(returned_work_item_id, "Work item ID")
+                if (
+                    attempt["tool"] != "delegate_work"
+                    or attempt["work_item_id"] != returned_work_item_id
+                ):
+                    raise GoalValidationError(
+                        "The result must reference the call's saved work item."
+                    )
+            elif returned_skills is not None:
                 self._save_skill_references(connection, attempt, returned_skills)
             elif history_result is not None:
                 history_reference = self._history_read_reference(
@@ -970,6 +1021,7 @@ class GoalAPI(WorkspaceDatabase):
         goals: list[GoalResultReference],
     ) -> None:
         if attempt["tool"] in (
+            "delegate_work",
             "list_skills",
             "read_skill",
             "get_goal_activity",
@@ -1029,12 +1081,15 @@ class GoalAPI(WorkspaceDatabase):
         _validate_positive_integer(call["sequence"], "Call sequence")
         row = connection.execute(
             """
-            SELECT call.*, run.completion_grant_id, run.definition_grant_id,
+            SELECT call.*, run.completion_grant_id, run.definition_grant_id, run.delegation_grant_id,
                    run.outcome AS run_outcome, link.kind AS revision_kind,
-                   link.goal_id AS revision_goal_id, link.revision AS saved_revision
+                   link.goal_id AS revision_goal_id, link.revision AS saved_revision,
+                   work.work_item_id, work.kind AS work_item_kind
             FROM run_calls AS call JOIN operator_runs AS run ON run.id = call.run_id
             LEFT JOIN run_call_revisions AS link
                 ON link.run_id = call.run_id AND link.sequence = call.sequence
+            LEFT JOIN run_call_work_items AS work
+                ON work.run_id = call.run_id AND work.sequence = call.sequence
             WHERE run.owner_user_id = :owner AND call.run_id = :run_id
                 AND call.sequence = :sequence AND call.outcome = 'unfinished'
             """,

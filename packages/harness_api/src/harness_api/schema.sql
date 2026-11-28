@@ -135,17 +135,28 @@ CREATE TABLE goal_creation_retries (
     PRIMARY KEY (grant_id, retry_key)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE work_delegation_grants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+    operator_id INTEGER NOT NULL REFERENCES operators(id),
+    goal_id INTEGER NOT NULL REFERENCES goals(id),
+    granted_at TEXT NOT NULL,
+    withdrawn_at TEXT
+) STRICT;
+
 CREATE TABLE operator_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
     owner_user_id INTEGER NOT NULL REFERENCES users(id),
     completion_grant_id INTEGER REFERENCES goal_assignments(id),
     definition_grant_id INTEGER REFERENCES goal_definition_grants(id)
         CHECK (definition_grant_id IS NULL OR completion_grant_id IS NULL),
+    delegation_grant_id INTEGER REFERENCES work_delegation_grants(id),
     started_at TEXT NOT NULL,
     finished_at TEXT,
     outcome TEXT NOT NULL DEFAULT 'unfinished'
         CHECK (outcome IN ('unfinished', 'succeeded', 'failed')),
-    CHECK ((outcome = 'unfinished') = (finished_at IS NULL))
+    CHECK ((outcome = 'unfinished') = (finished_at IS NULL)),
+    CHECK ((completion_grant_id IS NOT NULL) + (definition_grant_id IS NOT NULL)
+        + (delegation_grant_id IS NOT NULL) <= 1)
 ) STRICT;
 
 CREATE TABLE run_calls (
@@ -153,7 +164,7 @@ CREATE TABLE run_calls (
     sequence INTEGER NOT NULL CHECK (sequence > 0),
     tool TEXT NOT NULL CHECK (tool IN (
         'list_goals', 'get_goal_tree', 'get_goal_progress', 'complete_goal', 'create_goal', 'create_subgoal', 'revise_goal',
-        'get_goal_activity', 'get_run', 'list_skills', 'read_skill'
+        'get_goal_activity', 'get_run', 'list_skills', 'read_skill', 'delegate_work'
     )),
     -- Requested IDs can be invalid or belong to a different owner.
     target_goal_id INTEGER CHECK (target_goal_id > 0),
@@ -268,6 +279,39 @@ CREATE TABLE work_items (
 ) STRICT;
 
 CREATE INDEX work_items_by_goal ON work_items(goal_id, id);
+
+CREATE TABLE work_delegations (
+    work_item_id INTEGER PRIMARY KEY REFERENCES work_items(id),
+    grant_id INTEGER NOT NULL REFERENCES work_delegation_grants(id),
+    retry_key TEXT NOT NULL CHECK (length(trim(retry_key)) > 0),
+    fingerprint TEXT NOT NULL,
+    UNIQUE (grant_id, retry_key)
+) STRICT;
+
+-- One call has one immutable result, including when its reply is lost.
+CREATE TABLE run_call_work_items (
+    run_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    work_item_id INTEGER NOT NULL REFERENCES work_delegations(work_item_id),
+    kind TEXT NOT NULL CHECK (kind IN ('committed', 'retrieved')),
+    PRIMARY KEY (run_id, sequence),
+    FOREIGN KEY (run_id, sequence) REFERENCES run_calls(run_id, sequence)
+) STRICT, WITHOUT ROWID;
+
+CREATE UNIQUE INDEX work_item_committing_call ON run_call_work_items(work_item_id)
+    WHERE kind = 'committed';
+
+CREATE TRIGGER immutable_work_call BEFORE UPDATE ON run_call_work_items
+BEGIN SELECT RAISE(ABORT, 'Work call results are immutable'); END;
+
+CREATE TRIGGER retain_work_call BEFORE DELETE ON run_call_work_items
+BEGIN SELECT RAISE(ABORT, 'Work call results are retained'); END;
+
+CREATE TRIGGER immutable_work_delegation BEFORE UPDATE ON work_delegations
+BEGIN SELECT RAISE(ABORT, 'Work delegations are immutable'); END;
+
+CREATE TRIGGER retain_work_delegation BEFORE DELETE ON work_delegations
+BEGIN SELECT RAISE(ABORT, 'Work delegations are retained'); END;
 
 CREATE TABLE work_item_skills (
     work_item_id INTEGER NOT NULL REFERENCES work_items(id),

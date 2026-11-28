@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 from ..database import (
     ADMIN_USER_ID,
@@ -19,11 +19,22 @@ from ..database import (
     WorkspaceStorageError,
     utc_timestamp,
 )
-from .activity import SkillReference
+from .activity import (
+    CallReference,
+    SkillReference,
+)
 from .goals import Goal, GoalAPI
 from .skills import SkillRevision, SkillSummary, is_skill_id
+from .work_delegation import WorkDelegationGrant, active_delegation_grant
 
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+
+
+class WorkspaceInput(TypedDict):
+    """Requested input only; accepting it authorizes no repository access."""
+
+    source_path: str | None
+    base_sha: str | None
 
 
 class WorkItem(TypedDict):
@@ -37,6 +48,8 @@ class WorkItem(TypedDict):
     source_path: str | None
     base_sha: str | None
     created_at: str
+    delegation_grant_id: NotRequired[int]
+    committing_call: NotRequired[CallReference]
 
 
 class WorkAttempt(TypedDict):
@@ -116,7 +129,7 @@ class WorkConflictError(RuntimeError):
 
 
 class WorkAuthorizationError(RuntimeError):
-    """The exact worker credential does not currently authorize this operation."""
+    """The exact grant or credential does not authorize this operation."""
 
 
 class WorkStorageError(WorkspaceStorageError):
@@ -133,6 +146,25 @@ def _text(value: str, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise WorkValidationError(f"{label} must contain text.")
     return value.strip()
+
+
+def _workspace_input(
+    source_path: Path | str | None, base_sha: str | None
+) -> WorkspaceInput:
+    if source_path is None and base_sha is not None:
+        raise WorkValidationError("A base SHA requires a source path.")
+    if source_path is not None:
+        if not isinstance(source_path, (str, Path)) or not str(source_path).strip():
+            raise WorkValidationError("A source path is required.")
+        if (
+            not isinstance(base_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}", base_sha) is None
+        ):
+            raise WorkValidationError(
+                "A source checkout requires a full Git commit SHA."
+            )
+        source_path = os.path.abspath(source_path)
+    return WorkspaceInput(source_path=source_path, base_sha=base_sha)
 
 
 def _attempt_id(value: str) -> str:
@@ -268,7 +300,8 @@ class WorkAPI(WorkspaceDatabase):
         row = db.execute(
             """SELECT item.* FROM work_items AS item JOIN goals AS goal ON goal.id = item.goal_id
                WHERE item.id = ? AND item.owner_user_id = ? AND goal.owner_user_id = ?
-                 AND goal.deleted_at IS NULL""",
+                 AND (goal.deleted_at IS NULL OR EXISTS (
+                     SELECT 1 FROM work_delegations WHERE work_item_id = item.id))""",
             (_positive(work_item_id, "Work item ID"), ADMIN_USER_ID, ADMIN_USER_ID),
         ).fetchone()
         if row is None:
@@ -283,6 +316,18 @@ class WorkAPI(WorkspaceDatabase):
                 (work_item_id,),
             )
         ]
+        delegation = db.execute(
+            """SELECT delegation.grant_id, call.run_id, call.sequence
+               FROM work_delegations AS delegation JOIN run_call_work_items AS call
+                 ON call.work_item_id = delegation.work_item_id AND call.kind = 'committed'
+               WHERE delegation.work_item_id = ?""",
+            (work_item_id,),
+        ).fetchone()
+        if delegation is not None:
+            item["delegation_grant_id"] = delegation["grant_id"]
+            item["committing_call"] = CallReference(
+                run_id=delegation["run_id"], sequence=delegation["sequence"]
+            )
         return cast(WorkItem, item)
 
     def _attempt(self, db: sqlite3.Connection, attempt_id: str) -> WorkAttempt:
@@ -347,99 +392,282 @@ class WorkAPI(WorkspaceDatabase):
         source_path: Path | str | None = None,
         base_sha: str | None = None,
     ) -> WorkItem:
+        with self._write() as db:
+            return self._create_work_item(
+                db,
+                goal_id,
+                expected_revision,
+                operator_id,
+                brief,
+                skills=skills,
+                source_path=source_path,
+                base_sha=base_sha,
+            )
+
+    @staticmethod
+    def _validate_work_target(
+        db: sqlite3.Connection, goal_id: int, expected_revision: int, operator_id: int
+    ) -> None:
+        goal = db.execute(
+            """SELECT goal.status, max(revision.revision) AS revision
+               FROM goals AS goal JOIN goal_revisions AS revision ON revision.goal_id = goal.id
+               WHERE goal.id = ? AND goal.owner_user_id = ? AND goal.deleted_at IS NULL
+               GROUP BY goal.id""",
+            (goal_id, ADMIN_USER_ID),
+        ).fetchone()
+        if goal is None:
+            raise WorkNotFoundError("Goal was not found.")
+        if goal["revision"] != expected_revision:
+            raise WorkConflictError("The work item requires the current goal revision.")
+        if goal["status"] not in ("draft", "active", "paused"):
+            raise WorkConflictError("The goal must be open for work.")
+        operator = db.execute(
+            "SELECT 1 FROM operators WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL",
+            (operator_id, ADMIN_USER_ID),
+        ).fetchone()
+        if operator is None:
+            raise WorkValidationError(
+                "A registered operator owned by this workspace is required."
+            )
+
+    def _create_work_item(
+        self,
+        db: sqlite3.Connection,
+        goal_id: int,
+        expected_revision: int,
+        operator_id: int,
+        brief: str,
+        *,
+        skills: Sequence[SkillReference] = (),
+        source_path: Path | str | None = None,
+        base_sha: str | None = None,
+    ) -> WorkItem:
         goal_id = _positive(goal_id, "Goal ID")
         expected_revision = _positive(expected_revision, "Goal revision")
         operator_id = _positive(operator_id, "Operator ID")
         brief = _text(brief, "Work brief")
-        if source_path is None and base_sha is not None:
-            raise WorkValidationError("A base SHA requires a source path.")
-        if source_path is not None:
-            if not isinstance(source_path, (str, Path)) or not str(source_path).strip():
-                raise WorkValidationError("A source path is required.")
-            if (
-                not isinstance(base_sha, str)
-                or re.fullmatch(r"[0-9a-f]{40}", base_sha) is None
-            ):
-                raise WorkValidationError(
-                    "A source checkout requires a full Git commit SHA."
-                )
-            source_path = os.path.abspath(source_path)
+        source = _workspace_input(source_path, base_sha)
+        source_path, base_sha = source["source_path"], source["base_sha"]
         if isinstance(skills, (str, bytes)) or not isinstance(skills, Sequence):
             raise WorkValidationError(
                 "Assigned skills must be exact revision references."
             )
-        with self._write() as db:
-            goal = db.execute(
-                """SELECT goal.status, max(revision.revision) AS revision
-                   FROM goals AS goal JOIN goal_revisions AS revision ON revision.goal_id = goal.id
-                   WHERE goal.id = ? AND goal.owner_user_id = ? AND goal.deleted_at IS NULL
-                   GROUP BY goal.id""",
-                (goal_id, ADMIN_USER_ID),
-            ).fetchone()
-            if goal is None:
-                raise WorkNotFoundError("Goal was not found.")
-            if goal["revision"] != expected_revision:
-                raise WorkConflictError(
-                    "The work item requires the current goal revision."
-                )
-            if goal["status"] not in ("draft", "active", "paused"):
-                raise WorkConflictError("The goal must be open for work.")
-            operator = db.execute(
-                "SELECT 1 FROM operators WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL",
-                (operator_id, ADMIN_USER_ID),
-            ).fetchone()
-            if operator is None:
+        self._validate_work_target(db, goal_id, expected_revision, operator_id)
+        snapshots = []
+        for reference in skills:
+            if (
+                not isinstance(reference, dict)
+                or set(reference) != {"id", "revision"}
+                or not is_skill_id(reference.get("id"))
+            ):
                 raise WorkValidationError(
-                    "A registered operator owned by this workspace is required."
+                    "Assigned skills require an ID and exact revision."
                 )
-            snapshots = []
-            for reference in skills:
-                if (
-                    not isinstance(reference, dict)
-                    or set(reference) != {"id", "revision"}
-                    or not is_skill_id(reference.get("id"))
-                ):
-                    raise WorkValidationError(
-                        "Assigned skills require an ID and exact revision."
-                    )
-                _positive(reference["revision"], "Skill revision")
-                snapshot = db.execute(
-                    "SELECT id FROM skill_revisions WHERE owner_user_id = ? AND skill_key = ? AND revision = ?",
-                    (ADMIN_USER_ID, reference["id"], reference["revision"]),
-                ).fetchone()
-                if snapshot is None or snapshot["id"] in snapshots:
-                    raise WorkValidationError(
-                        "Assigned skill revisions must exist and be unique."
-                    )
-                snapshots.append(snapshot["id"])
-            row = db.execute(
-                """INSERT INTO work_items
-                   (owner_user_id,goal_id,goal_revision,operator_id,brief,source_path,base_sha,created_at)
-                   VALUES (?,?,?,?,?,?,?,?) RETURNING id""",
-                (
-                    ADMIN_USER_ID,
-                    goal_id,
-                    expected_revision,
-                    operator_id,
-                    brief,
-                    source_path,
-                    base_sha,
-                    utc_timestamp(),
-                ),
+            _positive(reference["revision"], "Skill revision")
+            snapshot = db.execute(
+                "SELECT id FROM skill_revisions WHERE owner_user_id = ? AND skill_key = ? AND revision = ?",
+                (ADMIN_USER_ID, reference["id"], reference["revision"]),
             ).fetchone()
-            db.executemany(
-                "INSERT INTO work_item_skills(work_item_id,position,snapshot_id) VALUES (?,?,?)",
-                [
-                    (row["id"], position, snapshot)
-                    for position, snapshot in enumerate(snapshots)
-                ],
-            )
-            return self._item(db, row["id"])
+            if snapshot is None or snapshot["id"] in snapshots:
+                raise WorkValidationError(
+                    "Assigned skill revisions must exist and be unique."
+                )
+            snapshots.append(snapshot["id"])
+        row = db.execute(
+            """INSERT INTO work_items
+               (owner_user_id,goal_id,goal_revision,operator_id,brief,source_path,base_sha,created_at)
+               VALUES (?,?,?,?,?,?,?,?) RETURNING id""",
+            (
+                ADMIN_USER_ID,
+                goal_id,
+                expected_revision,
+                operator_id,
+                brief,
+                source_path,
+                base_sha,
+                utc_timestamp(),
+            ),
+        ).fetchone()
+        db.executemany(
+            "INSERT INTO work_item_skills(work_item_id,position,snapshot_id) VALUES (?,?,?)",
+            [
+                (row["id"], position, snapshot)
+                for position, snapshot in enumerate(snapshots)
+            ],
+        )
+        return self._item(db, row["id"])
 
     def get_work_item(self, work_item_id: int) -> WorkItem:
         with self._connection("ro") as db:
             db.execute("BEGIN")
             return self._item(db, work_item_id)
+
+    def grant_delegation(self, goal_id: int, operator_id: int) -> WorkDelegationGrant:
+        """Trusted owner grants delegation of work for this exact goal."""
+        goal_id = _positive(goal_id, "Goal ID")
+        operator_id = _positive(operator_id, "Operator ID")
+        with self._write() as db:
+            self._owner_goal(db, goal_id)
+            if (
+                db.execute(
+                    "SELECT 1 FROM operators WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL",
+                    (operator_id, ADMIN_USER_ID),
+                ).fetchone()
+                is None
+            ):
+                raise WorkValidationError(
+                    "A registered workspace operator is required."
+                )
+            row = db.execute(
+                """INSERT INTO work_delegation_grants(goal_id,operator_id,granted_at)
+                   VALUES (?,?,?) RETURNING *""",
+                (goal_id, operator_id, utc_timestamp()),
+            ).fetchone()
+            return cast(WorkDelegationGrant, dict(row))
+
+    @staticmethod
+    def _delegation_grant(db: sqlite3.Connection, grant_id: int) -> WorkDelegationGrant:
+        grant = active_delegation_grant(
+            db, _positive(grant_id, "Delegation grant ID"), ADMIN_USER_ID
+        )
+        if grant is None:
+            raise WorkAuthorizationError(
+                "The delegation grant is inactive or unavailable."
+            )
+        return grant
+
+    def get_delegation_grant(self, grant_id: int) -> WorkDelegationGrant:
+        """Resolve the exact active grant for a trusted session binding."""
+        with self._connection("ro") as db:
+            return self._delegation_grant(db, grant_id)
+
+    def withdraw_delegation(self, grant_id: int) -> WorkDelegationGrant:
+        """Trusted owner withdraws authority, retaining historical grant identity."""
+        with self._write() as db:
+            self._delegation_grant(db, grant_id)
+            row = db.execute(
+                "UPDATE work_delegation_grants SET withdrawn_at = ? WHERE id = ? RETURNING *",
+                (utc_timestamp(), grant_id),
+            ).fetchone()
+            return cast(WorkDelegationGrant, dict(row))
+
+    def delegate_work(
+        self,
+        goal_id: int,
+        expected_revision: int,
+        brief: str,
+        workspace_input: WorkspaceInput,
+        retry_key: str,
+        *,
+        call: CallReference,
+    ) -> WorkItem:
+        """Save one assignment under the recorded call's exact live authority.
+
+        Repository input is a request, never an authorization to access that path.
+        Every replay rechecks the current revision and requires a new call.
+        """
+        goal_id = _positive(goal_id, "Goal ID")
+        expected_revision = _positive(expected_revision, "Goal revision")
+        brief = _text(brief, "Work brief")
+        retry_key = _text(retry_key, "Retry key")
+        if not isinstance(workspace_input, dict) or set(workspace_input) != {
+            "source_path",
+            "base_sha",
+        }:
+            raise WorkValidationError(
+                "Workspace input requires source_path and base_sha."
+            )
+        source_path, base_sha = (
+            workspace_input["source_path"],
+            workspace_input["base_sha"],
+        )
+        if source_path is not None and (
+            not isinstance(source_path, str)
+            or "\x00" in source_path
+            or not os.path.isabs(source_path)
+        ):
+            raise WorkValidationError("Requested source path must be absolute.")
+        # Lexical normalization only; accepting an input grants no repository access.
+        source = _workspace_input(source_path, base_sha)
+        source_path, base_sha = source["source_path"], source["base_sha"]
+        if not isinstance(call, dict) or set(call) != {"run_id", "sequence"}:
+            raise WorkAuthorizationError("A recorded delegation call is required.")
+        _positive(call["run_id"], "Run ID")
+        _positive(call["sequence"], "Call sequence")
+        fingerprint = sha256(
+            json.dumps(
+                [goal_id, expected_revision, brief, source_path, base_sha],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        with self._write() as db:
+            attempt = db.execute(
+                """SELECT call.*, run.delegation_grant_id, run.outcome AS run_outcome
+                   FROM run_calls AS call JOIN operator_runs AS run ON run.id = call.run_id
+                   WHERE call.run_id = ? AND call.sequence = ? AND run.owner_user_id = ?""",
+                (call["run_id"], call["sequence"], ADMIN_USER_ID),
+            ).fetchone()
+            if (
+                attempt is None
+                or attempt["outcome"] != "unfinished"
+                or attempt["run_outcome"] != "unfinished"
+                or attempt["tool"] != "delegate_work"
+                or attempt["target_goal_id"] != goal_id
+                or attempt["target_revision"] != expected_revision
+                or attempt["target_run_id"] is not None
+                or attempt["delegation_grant_id"] is None
+            ):
+                raise WorkAuthorizationError(
+                    "The recorded call does not authorize this delegation."
+                )
+            grant = self._delegation_grant(db, attempt["delegation_grant_id"])
+            if grant["goal_id"] != goal_id:
+                raise WorkAuthorizationError(
+                    "The delegation grant does not cover this goal."
+                )
+            if (
+                db.execute(
+                    "SELECT 1 FROM run_call_work_items WHERE run_id = ? AND sequence = ?",
+                    (call["run_id"], call["sequence"]),
+                ).fetchone()
+                is not None
+            ):
+                raise WorkConflictError(
+                    "This call already saved a work result. Use a new call to retry."
+                )
+            prior = db.execute(
+                "SELECT work_item_id, fingerprint FROM work_delegations WHERE grant_id = ? AND retry_key = ?",
+                (grant["id"], retry_key),
+            ).fetchone()
+            if prior is not None:
+                self._validate_work_target(
+                    db, goal_id, expected_revision, grant["operator_id"]
+                )
+                if prior["fingerprint"] != fingerprint:
+                    raise WorkConflictError(
+                        "This retry key identifies different work inputs."
+                    )
+                item_id, kind = prior["work_item_id"], "retrieved"
+            else:
+                item = self._create_work_item(
+                    db,
+                    goal_id,
+                    expected_revision,
+                    grant["operator_id"],
+                    brief,
+                    source_path=source_path,
+                    base_sha=base_sha,
+                )
+                item_id, kind = item["id"], "committed"
+                db.execute(
+                    "INSERT INTO work_delegations(work_item_id,grant_id,retry_key,fingerprint) VALUES (?,?,?,?)",
+                    (item_id, grant["id"], retry_key, fingerprint),
+                )
+            db.execute(
+                "INSERT INTO run_call_work_items(run_id,sequence,work_item_id,kind) VALUES (?,?,?,?)",
+                (call["run_id"], call["sequence"], item_id, kind),
+            )
+            return self._item(db, item_id)
 
     def list_work_items(self, goal_id: int) -> list[WorkItem]:
         with self._connection("ro") as db:
