@@ -25,6 +25,7 @@ from jinja2 import Environment, StrictUndefined
 
 DIRECTORY = Path(__file__).resolve().parent
 PROVIDER_KEYS = {"codex": "CODEX_API_KEY", "kiro": "KIRO_API_KEY"}
+CODEX_NOMAD_VARIABLE = "harness/dev/providers/codex"
 MODEL_OR_EFFORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
 
 
@@ -219,6 +220,11 @@ def render(receipt, receipt_path, args):
     fixture = receipt["fixture"]
     worker = receipt["mode"] == "worker"
     launch = launch_settings(args, worker) or receipt.get("launch")
+    if getattr(args, "nomad_variable", False):
+        if not launch or (launch["worker"], launch["auth"]) != ("codex", "api-key"):
+            raise ValueError("--nomad-variable requires Codex API-key auth.")
+        launch = {**launch, "nomad_variable": CODEX_NOMAD_VARIABLE}
+    variable = (launch or {}).get("nomad_variable")
     image = args.image or (None if worker else fixture["image"])
     if not image or re.fullmatch(r"(?:[^\s]+@)?sha256:[0-9a-f]{64}", image) is None:
         raise ValueError("Supply a digest-pinned image.")
@@ -239,6 +245,7 @@ def render(receipt, receipt_path, args):
     }
     volumes = {}
     mounts = []
+    templates = []
     config = {
         "image": image,
         "entrypoint": argv[:1],
@@ -275,6 +282,22 @@ mkdir -p "$CODEX_HOME"
         if launch is None or launch["auth"] == "auth-json":
             bootstrap += """cp /runtime/auth.json "$CODEX_HOME/auth.json"
 chmod 0600 "$CODEX_HOME/auth.json"
+"""
+        elif variable:
+            templates.append(
+                {
+                    "DestPath": "secrets/provider-key",
+                    "EmbeddedTmpl": (
+                        "{{ with nomadVar " + json.dumps(variable) + " }}"
+                        "{{ .api_key }}{{ end }}"
+                    ),
+                    "Perms": "0600",
+                    "Once": True,
+                    "ErrMissingKey": True,
+                }
+            )
+            bootstrap += """CODEX_API_KEY="$(cat "$NOMAD_SECRETS_DIR/provider-key")"
+export CODEX_API_KEY
 """
         else:
             key_name = PROVIDER_KEYS[launch["worker"]]
@@ -318,6 +341,7 @@ chmod 0600 "$CODEX_HOME/auth.json"
             config=config,
             volumes=volumes,
             mounts=mounts,
+            templates=templates,
         )
     )
     job_path = receipt_path.parent / "job.json"
@@ -505,6 +529,10 @@ os.execv(sys.argv[2], sys.argv[2:])
 
 def worker_auth(receipt, auth_file, api_key_file=None):
     launch = receipt.get("launch") or {"auth": "auth-json"}
+    if launch.get("nomad_variable"):
+        if api_key_file is not None:
+            raise ValueError("This job reads its API key from a Nomad variable.")
+        return None
     if launch["auth"] == "auth-json":
         content = auth_file.read_bytes()
         if not content.strip():
@@ -553,7 +581,8 @@ def worker_runtime(client, receipt, receipt_path, credential):
     )
     info.update(grant_id=grant["id"], grant_pending=False)
     save_json(receipt_path, receipt)
-    stage_worker_auth(runtime, credential)
+    if credential is not None:
+        stage_worker_auth(runtime, credential)
     ready = [
         node
         for node in request(client, "GET", "nodes").json()
@@ -1163,6 +1192,11 @@ def main():
     render_parser.add_argument("--model")
     render_parser.add_argument("--effort")
     render_parser.add_argument("--auth", choices=("api-key", "auth-json"))
+    render_parser.add_argument(
+        "--nomad-variable",
+        action="store_true",
+        help="Read the Codex API key from the local dev Nomad variable.",
+    )
     render_parser.add_argument("--brief-only", action="store_true")
     render_parser.add_argument("--mcp-port", type=int, default=8001)
     render_parser.add_argument(

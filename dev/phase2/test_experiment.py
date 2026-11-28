@@ -193,6 +193,66 @@ def test_worker_launch_configurations(
     assert "harness-fixture" not in argv
 
 
+def test_nomad_variable_renders_codex_key_file_without_staging_provider_key(prepared):
+    workspace, invoke, _ = prepared
+    path = workspace / "phase2/receipt.json"
+    rendered = json.loads(
+        invoke(
+            "render",
+            "--receipt",
+            path,
+            "--image",
+            "sha256:" + "a" * 64,
+            "--worker",
+            "codex",
+            "--auth",
+            "api-key",
+            "--model",
+            "gpt-5.6-luna",
+            "--effort",
+            "low",
+            "--nomad-variable",
+        ).stdout
+    )
+    assert rendered["launch"]["nomad_variable"] == "harness/dev/providers/codex"
+    job = json.loads(Path(rendered["job_path"]).read_text())
+    task = job["Job"]["TaskGroups"][0]["Tasks"][0]
+    assert task["Templates"] == [
+        {
+            "DestPath": "secrets/provider-key",
+            "EmbeddedTmpl": '{{ with nomadVar "harness/dev/providers/codex" }}{{ .api_key }}{{ end }}',
+            "Perms": "0600",
+            "Once": True,
+            "ErrMissingKey": True,
+        }
+    ]
+    assert "CODEX_API_KEY" not in task["Env"]
+    bootstrap = task["Config"]["args"][1]
+    assert "$NOMAD_SECRETS_DIR/provider-key" in bootstrap
+    assert "/runtime/provider-key" not in bootstrap
+    assert "/runtime/credential" in bootstrap
+    assert experiment.worker_auth(rendered, workspace / "missing-auth.json") is None
+    unsupported = invoke(
+        "render",
+        "--receipt",
+        path,
+        "--worker",
+        "kiro",
+        "--auth",
+        "api-key",
+        "--model",
+        "claude-opus-4.8",
+        "--effort",
+        "low",
+        "--nomad-variable",
+        check=False,
+    )
+    assert (
+        unsupported.returncode == 1
+        and "requires Codex API-key auth" in unsupported.stderr
+    )
+
+
 def test_kiro_rejects_codex_saved_login(prepared):
     workspace, invoke, _ = prepared
     result = invoke(

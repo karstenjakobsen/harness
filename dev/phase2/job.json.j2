@@ -19,6 +19,7 @@
         "Env": {{ task_environment | tojson }},
         "Config": {{ config | tojson }},
         "VolumeMounts": {{ mounts | tojson }},
+        {% if templates %}"Templates": {{ templates | tojson }},{% endif %}
         "Resources": {"CPU": 100, "MemoryMB": 512}
       }]
     }]
