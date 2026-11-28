@@ -1,3 +1,40 @@
+# Slice 16 — Delegate a work item against a specific goal revision
+
+## Active Phase 3 decision
+
+Implement only `WorkAPI.delegate_work(...)`: an authorized operator saves one
+immutable work item against a specific goal revision. A later reader can follow
+the item to that revision, the operator, the exact grant and the committing call.
+Delegation creates zero attempts and leaves the goal unchanged.
+[Implementation checklist](SLICE16_TODO.md)
+
+Production code and tests for this slice belong in `packages/harness_api`.
+Existing CLI and MCP callers continue to work through their current contracts.
+Acceptance uses public Python operations and temporary SQLite; no MCP server,
+Nomad cluster or AI session is required. Launch, worker/model/effort selection,
+provider credentials and new transport operations remain future work.
+
+Each recorded call can commit at most one work item, enforced by a uniqueness
+constraint on the committing call. A call that already committed an item cannot
+commit another, even with a different retry key while its reply is unfinished.
+A genuine retry uses a new call and records retrieval of the original item.
+
+Repository input requires an absolute source path and a full commit SHA. These
+describe the requested input; accepting them authorizes no repository access.
+Delegation does not read the repository or create a checkout. Repository access
+authorization belongs to a future launch operation; no repository catalog is
+needed here.
+
+Recheck authority and the current goal revision before returning any replay.
+A goal revision change rejects even an identical replay. The committed item
+remains discoverable through history, which may be needed to recover after a
+lost reply.
+
+## Earlier discussion and future capabilities
+
+The discussion below supplies context. The active decision above and its
+checklist define Slice 16's implementation scope.
+
 I’d separate what the operator requests, what the owner authorizes, and how the launcher supplies the credential. The operator should be able to say “use my work account for this attempt” using a credential reference. A Nomad Variable path, a host file path, and the secret itself can all stay outside the operator’s interface.
 
 1. Give the operator two work operations
