@@ -41,3 +41,26 @@ def test_truncated_last_line_keeps_earlier_events_and_labels_capture(tmp_path):
     assert result["capture_status"] == "incomplete"
     assert result["live_event_located"] == {"line": 2, "sha256": events[1][2]}
     assert "secret-token" not in watch.summary(command)["command"]
+
+
+def test_kiro_tool_event_keeps_status_and_redacts_the_title():
+    event = {
+        "method": "session/update",
+        "params": {
+            "sessionId": "kiro-session",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "Read assignment using fixture-token",
+                "status": "in_progress",
+                "rawInput": {"credential": "fixture-token"},
+            },
+        },
+    }
+    assert watch.summary(event, ("fixture-token",)) == {
+        "event": "tool_call",
+        "kind": "tool_call",
+        "item_id": "call-1",
+        "title": "Read assignment using [redacted]",
+        "status": "in_progress",
+    }

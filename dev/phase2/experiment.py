@@ -24,6 +24,8 @@ import httpx
 from jinja2 import Environment, StrictUndefined
 
 DIRECTORY = Path(__file__).resolve().parent
+PROVIDER_KEYS = {"codex": "CODEX_API_KEY", "kiro": "KIRO_API_KEY"}
+MODEL_OR_EFFORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
 
 
 def save_json(path, value):
@@ -124,6 +126,91 @@ def seed(args):
     return receipt
 
 
+def prepare_next(original, attempt_id):
+    if original["mode"] != "worker":
+        raise ValueError("Prepare another attempt from a worker receipt.")
+    attempt_id = attempt_id or f"phase2-{uuid4().hex}"
+    phase_directory = Path(original["workspace"]) / "phase2"
+    first = json.loads((phase_directory / "receipt.json").read_text())
+    if (
+        attempt_id in ("", ".", "..", original["attempt_id"], first["attempt_id"])
+        or Path(attempt_id).name != attempt_id
+    ):
+        raise ValueError("Supply a fresh attempt ID with a single path component.")
+    receipt = {
+        key: original[key]
+        for key in (
+            "workspace",
+            "operator_cli",
+            "fixture",
+            "mode",
+            "operator_id",
+            "parent_goal_id",
+            "goal_id",
+            "goal_revision",
+            "work_item_id",
+        )
+    }
+    receipt.update(
+        attempt_id=attempt_id,
+        job_id=f"phase2-{uuid4().hex}",
+        phase="seeded",
+        execution=None,
+        volume_ids={},
+    )
+    directory = phase_directory / "attempts" / attempt_id
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = directory / "receipt.json"
+    with path.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if path.exists():
+            saved = json.loads(path.read_text())
+            if saved["work_item_id"] != receipt["work_item_id"]:
+                raise ValueError("The attempt receipt belongs to another work item.")
+            return saved
+        receipt["prepared_attempt"] = owner_cli(
+            receipt,
+            "work",
+            "prepare",
+            receipt["work_item_id"],
+            "--attempt-id",
+            attempt_id,
+        )
+        receipt["receipt_path"] = str(path)
+        save_json(path, receipt)
+    return receipt
+
+
+def launch_settings(args, worker):
+    engine, model, effort, auth = (
+        getattr(args, name, None) for name in ("worker", "model", "effort", "auth")
+    )
+    brief_only = getattr(args, "brief_only", False)
+    if not (engine or model or effort or auth or brief_only):
+        return None
+    if not worker:
+        raise ValueError("Worker configuration requires a worker attempt.")
+    engine = engine or "codex"
+    auth = auth or "auth-json"
+    if (engine, auth) not in {
+        ("codex", "auth-json"),
+        ("codex", "api-key"),
+        ("kiro", "api-key"),
+    }:
+        raise ValueError("Select Codex api-key or auth-json, or Kiro api-key.")
+    if not all(value and MODEL_OR_EFFORT.fullmatch(value) for value in (model, effort)):
+        raise ValueError("Supply an explicit model and reasoning effort.")
+    if brief_only and engine != "kiro":
+        raise ValueError("The brief-only probe requires Kiro.")
+    return {
+        "worker": engine,
+        "requested_model": model,
+        "requested_effort": effort,
+        "auth": auth,
+        "brief_only": brief_only,
+    }
+
+
 def render(receipt, receipt_path, args):
     if receipt["phase"] not in ("seeded", "rendered"):
         raise ValueError(
@@ -131,6 +218,7 @@ def render(receipt, receipt_path, args):
         )
     fixture = receipt["fixture"]
     worker = receipt["mode"] == "worker"
+    launch = launch_settings(args, worker) or receipt.get("launch")
     image = args.image or (None if worker else fixture["image"])
     if not image or re.fullmatch(r"(?:[^\s]+@)?sha256:[0-9a-f]{64}", image) is None:
         raise ValueError("Supply a digest-pinned image.")
@@ -179,12 +267,21 @@ def render(receipt, receipt_path, args):
             )
         bootstrap = """set -eu
 export HARNESS_WORKER_TOKEN="$(cat /runtime/credential)"
-export CODEX_HOME=/local/codex-home
-mkdir -p "$CODEX_HOME"
-cp /runtime/auth.json "$CODEX_HOME/auth.json"
-chmod 0600 "$CODEX_HOME/auth.json"
-exec harness-worker run --attempt-id "$HARNESS_WORKER_ATTEMPT_ID"
 """
+        if launch is None or launch["worker"] == "codex":
+            bootstrap += """export CODEX_HOME=/local/codex-home
+mkdir -p "$CODEX_HOME"
+"""
+        if launch is None or launch["auth"] == "auth-json":
+            bootstrap += """cp /runtime/auth.json "$CODEX_HOME/auth.json"
+chmod 0600 "$CODEX_HOME/auth.json"
+"""
+        else:
+            key_name = PROVIDER_KEYS[launch["worker"]]
+            bootstrap += f'export {key_name}="$(cat /runtime/provider-key)"\n'
+        bootstrap += (
+            'exec harness-worker run --attempt-id "$HARNESS_WORKER_ATTEMPT_ID"\n'
+        )
         config = {
             "image": image,
             "entrypoint": ["sh"],
@@ -197,6 +294,17 @@ exec harness-worker run --attempt-id "$HARNESS_WORKER_ATTEMPT_ID"
             "HARNESS_WORKER_MCP_URL": args.mcp_url
             or f"http://127.0.0.1:{args.mcp_port}/mcp",
         }
+        if launch is not None:
+            task_environment.update(
+                HARNESS_WORKER_ENGINE=launch["worker"],
+                HARNESS_WORKER_MODEL=launch["requested_model"],
+                HARNESS_WORKER_EFFORT=launch["requested_effort"],
+                HARNESS_WORKER_AUTH=launch["auth"],
+            )
+            if launch["worker"] == "kiro":
+                task_environment["KIRO_HOME"] = "/local/kiro-home"
+            if launch["brief_only"]:
+                task_environment["HARNESS_WORKER_BRIEF_ONLY"] = "1"
     environment = Environment(undefined=StrictUndefined)
     template = environment.from_string((DIRECTORY / "job.json.j2").read_text())
     job = json.loads(
@@ -226,6 +334,10 @@ exec harness-worker run --attempt-id "$HARNESS_WORKER_ATTEMPT_ID"
         mcp_port=args.mcp_port,
         mcp_url=args.mcp_url or f"http://127.0.0.1:{args.mcp_port}/mcp",
     )
+    if launch is None:
+        receipt.pop("launch", None)
+    else:
+        receipt["launch"] = launch
     save_json(receipt_path, receipt)
     return receipt
 
@@ -391,7 +503,29 @@ os.execv(sys.argv[2], sys.argv[2:])
 """
 
 
-def worker_runtime(client, receipt, receipt_path, auth_file):
+def worker_auth(receipt, auth_file, api_key_file=None):
+    launch = receipt.get("launch") or {"auth": "auth-json"}
+    if launch["auth"] == "auth-json":
+        content = auth_file.read_bytes()
+        if not content.strip():
+            raise ValueError("The saved Codex auth file is empty.")
+        return "auth.json", content
+    key_name = PROVIDER_KEYS[launch["worker"]]
+    key = api_key_file.read_text() if api_key_file else os.environ.get(key_name, "")
+    key = key.strip()
+    if not key or any(char.isspace() for char in key):
+        raise ValueError(f"Supply {key_name} or a private --api-key-file.")
+    return "provider-key", key.encode()
+
+
+def stage_worker_auth(runtime, credential):
+    name, content = credential
+    fd = os.open(runtime / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as output:
+        output.write(content)
+
+
+def worker_runtime(client, receipt, receipt_path, credential):
     directory = receipt_path.parent
     scratch = directory / "scratch"
     runtime = directory / "runtime"
@@ -419,8 +553,7 @@ def worker_runtime(client, receipt, receipt_path, auth_file):
     )
     info.update(grant_id=grant["id"], grant_pending=False)
     save_json(receipt_path, receipt)
-    shutil.copyfile(auth_file, runtime / "auth.json")
-    (runtime / "auth.json").chmod(0o600)
+    stage_worker_auth(runtime, credential)
     ready = [
         node
         for node in request(client, "GET", "nodes").json()
@@ -473,7 +606,12 @@ def worker_runtime(client, receipt, receipt_path, auth_file):
             [sys.executable, "-c", PARENT_GUARD, str(os.getpid()), *command],
             stdout=log,
             stderr=log,
-            env={**os.environ, "HARNESS_PHASE2_RUNTIME_OWNER": info["owner"]},
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if key not in (*PROVIDER_KEYS.values(), "OPENAI_API_KEY")
+            }
+            | {"HARNESS_PHASE2_RUNTIME_OWNER": info["owner"]},
         )
     info["servers"].append(
         {"pid": server.pid, "start_time": process_start_time(server.pid)}
@@ -521,26 +659,58 @@ def export_artifact(
 def verify_worker(receipt, evidence):
     inspection = owner_cli(receipt, "work", "show", receipt["attempt_id"])
     save_json(evidence / "harness-after.json", inspection)
-    for tool in ("get_work_brief", "read_skill", "submit_work_result"):
-        if not any(
-            call["tool"] == tool and call["outcome"] == "returned"
-            for call in inspection["calls"]
-        ):
+    grant_id = receipt["runtime"]["grant_id"]
+    calls = {
+        call["tool"]: call
+        for call in inspection["calls"]
+        if call["outcome"] == "returned"
+        and call["grant_id"] == grant_id
+        and call["attempt_id"] == receipt["attempt_id"]
+    }
+    brief_only = (receipt.get("launch") or {}).get("brief_only")
+    required = (
+        ("get_work_brief",)
+        if brief_only
+        else ("get_work_brief", "read_skill", "submit_work_result")
+    )
+    for tool in required:
+        if tool not in calls:
             raise RuntimeError(f"The real worker has no successful {tool} call.")
-    events = [
-        json.loads(line)
-        for line in (evidence / "stdout.log").read_text().splitlines()
-        if line.startswith("{")
-    ]
-    sessions = sum(event.get("type") == "thread.started" for event in events)
-    if sessions != 1:
-        raise RuntimeError(f"Expected one real worker session, observed {sessions}.")
+    if brief_only:
+        if inspection["artifact"] is not None:
+            raise RuntimeError(
+                "The brief-only probe unexpectedly submitted an artifact."
+            )
+        return {"grant_id": grant_id, "brief_read": True}
+    if not any(
+        call["tool"] == "read_skill"
+        and call["outcome"] == "returned"
+        and call["grant_id"] == grant_id
+        and call["arguments"] == {"id": "worker-handoff", "revision": 1}
+        for call in inspection["calls"]
+    ):
+        raise RuntimeError(
+            "The worker did not read the assigned handoff skill revision."
+        )
     artifact = inspection["artifact"]
-    if artifact is None or (
-        artifact["operator_id"],
-        artifact["goal_revision"],
-        artifact["work_item_id"],
-    ) != (receipt["operator_id"], receipt["goal_revision"], receipt["work_item_id"]):
+    if (
+        artifact is None
+        or calls["submit_work_result"]["artifact_id"] != artifact["id"]
+        or (
+            artifact["attempt_id"],
+            artifact["grant_id"],
+            artifact["operator_id"],
+            artifact["goal_revision"],
+            artifact["work_item_id"],
+        )
+        != (
+            receipt["attempt_id"],
+            grant_id,
+            receipt["operator_id"],
+            receipt["goal_revision"],
+            receipt["work_item_id"],
+        )
+    ):
         raise RuntimeError("The saved worker artifact has unexpected attribution.")
     export_artifact(
         receipt,
@@ -549,10 +719,40 @@ def verify_worker(receipt, evidence):
         artifact["id"],
     )
     return {
-        "worker_sessions": sessions,
         "artifact_id": artifact["id"],
         "grant_id": artifact["grant_id"],
     }
+
+
+def worker_events(stdout, launch):
+    events = []
+    partial = bool(stdout and not stdout.endswith(b"\n"))
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            partial = True
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    versions = [
+        event["version"]
+        for event in events
+        if event.get("type") == "harness.worker_cli"
+        and isinstance(event.get("version"), str)
+    ]
+    if launch.get("worker") == "kiro":
+        sessions = {
+            event["params"]["sessionId"]
+            for event in events
+            if event.get("method") == "session/update"
+            and isinstance(event.get("params"), dict)
+            and isinstance(event["params"].get("sessionId"), str)
+        }
+        count = len(sessions) or None
+    else:
+        count = sum(event.get("type") == "thread.started" for event in events)
+    return count, versions[-1] if versions else None, partial
 
 
 def cleanup(client, receipt):
@@ -603,24 +803,40 @@ def check_result(client, receipt, receipt_path):
     evidence = receipt_path.parent / "evidence"
     outcome = receipt["execution"]
     allocation = json.loads((evidence / "allocation.json").read_text())
+    launch = receipt.get("launch") or {}
+    capture = {}
     for stream in ("stdout", "stderr"):
-        logs = request(
-            client,
-            "GET",
-            f"client/fs/logs/{allocation['ID']}",
-            params={"task": "workload", "type": stream, "plain": "true"},
-        )
-        (evidence / f"{stream}.log").write_bytes(logs.content)
+        path = evidence / f"{stream}.log"
+        try:
+            logs = request(
+                client,
+                "GET",
+                f"client/fs/logs/{allocation['ID']}",
+                params={"task": "workload", "type": stream, "plain": "true"},
+            )
+            with os.fdopen(
+                os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb"
+            ) as output:
+                output.write(logs.content)
+            capture[stream] = "complete"
+        except httpx.HTTPError, OSError:
+            if not launch:
+                raise
+            capture[stream] = "incomplete"
     filename = receipt["fixture"]["filename"]
     if receipt["mode"] == "worker":
-        events = [
-            json.loads(line)
-            for line in (evidence / "stdout.log").read_text().splitlines()
-            if line.startswith("{")
-        ]
-        outcome["worker_sessions"] = sum(
-            event.get("type") == "thread.started" for event in events
+        stdout = evidence / "stdout.log"
+        count, version, partial = worker_events(
+            stdout.read_bytes() if capture["stdout"] == "complete" else b"", launch
         )
+        outcome["worker_sessions"] = count
+        if launch:
+            if partial or not count:
+                capture["stdout"] = "incomplete"
+            outcome["activity_capture"] = capture
+            outcome["cli_version"] = version
+        elif count != 1:
+            raise RuntimeError(f"Expected one real worker session, observed {count}.")
         outcome["ai_operator_sessions"] = sum(
             command[0] == "ask"
             or (command[:2] == ["goal", "create"] and "--title" not in command)
@@ -629,8 +845,10 @@ def check_result(client, receipt, receipt_path):
         if outcome["ai_operator_sessions"] != 0:
             raise RuntimeError("The experiment started an AI operator session.")
         outcome.update(verify_worker(receipt, evidence))
-        content = (evidence / filename).read_bytes()
-        outcome["file_sha256"] = hashlib.sha256(content).hexdigest()
+        content = None
+        if not launch.get("brief_only"):
+            content = (evidence / filename).read_bytes()
+            outcome["file_sha256"] = hashlib.sha256(content).hexdigest()
     else:
         source = f"{receipt['scratch']}/{filename}"
         stat = client.get(f"client/fs/stat/{allocation['ID']}", params={"path": source})
@@ -654,7 +872,11 @@ def check_result(client, receipt, receipt_path):
         or outcome["task_restarts"] != 0
     ):
         raise RuntimeError(f"Unexpected task outcome {outcome}")
-    if outcome["exit_code"] == 0 and "cities" in receipt["fixture"]:
+    if (
+        content is not None
+        and outcome["exit_code"] == 0
+        and "cities" in receipt["fixture"]
+    ):
         expected = ("\n".join(receipt["fixture"]["cities"]) + "\n").encode()
         if content != expected:
             raise RuntimeError(
@@ -680,7 +902,9 @@ def verify_after_cleanup(receipt, receipt_path):
     outcome["verified"] = False
     save_json(receipt_path, receipt)
     try:
-        if receipt["mode"] == "worker":
+        if receipt["mode"] == "worker" and not (receipt.get("launch") or {}).get(
+            "brief_only"
+        ):
             destination = (
                 receipt_path.parent
                 / "evidence"
@@ -723,11 +947,16 @@ def run(receipt, receipt_path, args, before_cleanup=None):
         raise ValueError("Render the job before running it.")
     fresh = receipt["phase"] == "rendered"
     payload = None
+    credential = None
     if fresh:
         payload = Path(receipt["job_path"]).read_bytes()
         if hashlib.sha256(payload).hexdigest() != receipt["job_sha256"]:
             raise ValueError(
                 "The rendered job changed. Render again before submitting."
+            )
+        if receipt["mode"] == "worker":
+            credential = worker_auth(
+                receipt, args.auth_file, getattr(args, "api_key_file", None)
             )
         outcome = {
             "allocation_id": None,
@@ -740,7 +969,7 @@ def run(receipt, receipt_path, args, before_cleanup=None):
         )
         save_json(receipt_path, receipt)
     evidence = receipt_path.parent / "evidence"
-    evidence.mkdir(exist_ok=True)
+    evidence.mkdir(mode=0o700, exist_ok=True)
     headers = (
         {"X-Nomad-Token": os.environ["NOMAD_TOKEN"]}
         if os.environ.get("NOMAD_TOKEN")
@@ -757,9 +986,7 @@ def run(receipt, receipt_path, args, before_cleanup=None):
         try:
             if fresh:
                 if receipt["mode"] == "worker":
-                    server = worker_runtime(
-                        client, receipt, receipt_path, args.auth_file
-                    )
+                    server = worker_runtime(client, receipt, receipt_path, credential)
                 if retained_job(client, receipt) is None:
                     receipt["submission_started"] = True
                     save_json(receipt_path, receipt)
@@ -893,6 +1120,11 @@ def main():
     render_parser = commands.add_parser("render")
     render_parser.add_argument("--receipt", type=Path, required=True)
     render_parser.add_argument("--image")
+    render_parser.add_argument("--worker", choices=PROVIDER_KEYS)
+    render_parser.add_argument("--model")
+    render_parser.add_argument("--effort")
+    render_parser.add_argument("--auth", choices=("api-key", "auth-json"))
+    render_parser.add_argument("--brief-only", action="store_true")
     render_parser.add_argument("--mcp-port", type=int, default=8001)
     render_parser.add_argument(
         "--mcp-url",
@@ -908,10 +1140,18 @@ def main():
         / "auth.json",
     )
     run_parser.add_argument("--timeout", type=float, default=300)
+    run_parser.add_argument("--api-key-file", type=Path)
+    prepare_parser = commands.add_parser("prepare")
+    prepare_parser.add_argument("--receipt", type=Path, required=True)
+    prepare_parser.add_argument("--attempt-id")
     args = parser.parse_args()
     try:
         if args.step == "seed":
             receipt = seed(args)
+        elif args.step == "prepare":
+            receipt = prepare_next(
+                json.loads(args.receipt.read_text()), args.attempt_id
+            )
         else:
             receipt_path = args.receipt.resolve()
             with receipt_path.with_suffix(".lock").open("a") as lock:

@@ -16,12 +16,13 @@ import experiment
 import httpx
 
 TASK = "workload"
-SUBSTANTIVE = ("command_execution", "mcp_tool_call")
+SUBSTANTIVE = ("command_execution", "mcp_tool_call", "tool_call")
 SHOWN = SUBSTANTIVE + ("agent_message", "reasoning")
 SECRET_PATTERNS = (
     re.compile(r"(?i)bearer\s+\S+"),
     re.compile(r"eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}"),
     re.compile(r"sk-[\w-]{20,}"),
+    re.compile(r"ksk_[\w-]{12,}"),
 )
 
 
@@ -63,6 +64,18 @@ def redact(text, secrets=()):
 
 def summary(event, secrets=()):
     """Select credential-free fields for display; return None for other events."""
+    if event.get("method") == "session/update":
+        update = (event.get("params") or {}).get("update") or {}
+        update_type = update.get("sessionUpdate")
+        if update_type not in ("tool_call", "tool_call_update"):
+            return None
+        return {
+            "event": update_type,
+            "kind": "tool_call",
+            "item_id": redact(update.get("toolCallId"), secrets),
+            "title": redact(update.get("title", ""), secrets),
+            "status": redact(update.get("status", ""), secrets),
+        }
     item = event.get("item") or {}
     kind = item.get("type")
     if not event.get("type", "").startswith("item.") or kind not in SHOWN:
@@ -230,10 +243,13 @@ class Watcher:
             experiment.save_json(self.directory / "capture.json", self.capture)
 
     def secrets(self):
-        try:
-            return ((self.runtime / "credential").read_text().strip(),)
-        except OSError:
-            return ()
+        secrets = []
+        for name in ("credential", "provider-key"):
+            try:
+                secrets.append((self.runtime / name).read_text().strip())
+            except OSError:
+                pass
+        return tuple(secrets)
 
     def task_state(self, client):
         allocation = client.get(f"allocation/{self.allocation_id}")
@@ -379,8 +395,14 @@ def submission_check(receipt, events):
         call for call in inspection["calls"] if call["tool"] == "submit_work_result"
     ]
     artifact = inspection["artifact"]
-    claimed_success = any(
-        item.get("status") == "completed" and not item.get("error") for item in claimed
+    is_kiro = (receipt.get("launch") or {}).get("worker") == "kiro"
+    claimed_success = (
+        None
+        if is_kiro
+        else any(
+            item.get("status") == "completed" and not item.get("error")
+            for item in claimed
+        )
     )
     returned = any(
         call["outcome"] == "returned"
@@ -389,7 +411,7 @@ def submission_check(receipt, events):
         for call in audited
     )
     return {
-        "claimed_calls": len(claimed),
+        "claimed_calls": None if is_kiro else len(claimed),
         "claimed_success": claimed_success,
         "audited_calls": [
             {
@@ -404,7 +426,7 @@ def submission_check(receipt, events):
             key: artifact.get(key)
             for key in ("id", "sha256", "attempt_id", "goal_revision", "grant_id")
         },
-        "consistent": claimed_success == returned,
+        "consistent": None if is_kiro else claimed_success == returned,
     }
 
 
@@ -487,6 +509,7 @@ def main():
         / "auth.json",
     )
     run_parser.add_argument("--timeout", type=float, default=600)
+    run_parser.add_argument("--api-key-file", type=Path)
     replay_parser = commands.add_parser("replay")
     replay_parser.add_argument("--workspace", type=Path, required=True)
     replay_parser.add_argument("--attempt-id", required=True)

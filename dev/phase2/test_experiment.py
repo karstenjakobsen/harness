@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import runpy
 import shutil
 import signal
 import socket
@@ -74,6 +75,150 @@ def test_seed_and_render_are_offline_checkpoint_with_no_sessions(prepared):
     repeated = invoke("seed", "--workspace", workspace, check=False)
     assert repeated.returncode == 1 and "empty workspace" in repeated.stderr
     assert json.loads(path.read_text()) == rendered
+
+
+@pytest.mark.parametrize(
+    ("engine", "auth", "model", "effort"),
+    [
+        ("codex", "api-key", "gpt-5.6-luna", "low"),
+        ("codex", "auth-json", "gpt-5.5", "medium"),
+        ("kiro", "api-key", "claude-sonnet-4.6", "low"),
+        ("kiro", "api-key", "claude-opus-4.8", "xhigh"),
+    ],
+)
+def test_worker_launch_configurations(
+    prepared, tmp_path, monkeypatch, engine, auth, model, effort
+):
+    workspace, invoke, seeded = prepared
+    first = workspace / "phase2/receipt.json"
+    attempt = json.loads(
+        invoke("prepare", "--receipt", first, "--attempt-id", "other-attempt").stdout
+    )
+    assert attempt["work_item_id"] == seeded["work_item_id"]
+    assert attempt["goal_revision"] == seeded["goal_revision"]
+    assert attempt["job_id"] != seeded["job_id"]
+    assert attempt["prepared_attempt"]["id"] != seeded["prepared_attempt"]["id"]
+    path = Path(attempt["receipt_path"])
+    image = "sha256:" + "a" * 64
+    rendered = json.loads(
+        invoke(
+            "render",
+            "--receipt",
+            path,
+            "--image",
+            image,
+            "--worker",
+            engine,
+            "--auth",
+            auth,
+            "--model",
+            model,
+            "--effort",
+            effort,
+        ).stdout
+    )
+    assert rendered["launch"] == {
+        "worker": engine,
+        "auth": auth,
+        "requested_model": model,
+        "requested_effort": effort,
+        "brief_only": False,
+    }
+    job = json.loads(Path(rendered["job_path"]).read_text())
+    task = job["Job"]["TaskGroups"][0]["Tasks"][0]
+    environment = task["Env"] | {"HARNESS_WORKER_TOKEN": "harness-fixture"}
+    keys = {
+        "OPENAI_API_KEY": "unused-fixture",
+        "CODEX_API_KEY": "codex-fixture",
+        "KIRO_API_KEY": "kiro-fixture",
+    }
+    for name, key in keys.items():
+        monkeypatch.setenv(name, key)
+    saved = tmp_path / "auth.json"
+    saved.write_text('{"fixture": "saved-login"}')
+    credential = experiment.worker_auth(rendered, saved)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    experiment.stage_worker_auth(runtime, credential)
+    (staged,) = runtime.iterdir()
+    assert staged.stat().st_mode & 0o777 == 0o600
+    assert not any(
+        value in json.dumps(job) + json.dumps(rendered) for value in keys.values()
+    )
+    worker = runpy.run_path(
+        str(experiment.DIRECTORY.parent / "worker/harness-worker.py")
+    )
+    if auth == "api-key":
+        key_name = experiment.PROVIDER_KEYS[engine]
+        assert staged.name == "provider-key" and staged.read_text() == keys[key_name]
+        assert (
+            key_name in task["Config"]["args"][1]
+            and "auth.json" not in task["Config"]["args"][1]
+        )
+        monkeypatch.delenv(key_name)
+        with pytest.raises(ValueError, match=key_name):
+            experiment.worker_auth(rendered, saved)
+        with pytest.raises(ValueError, match=key_name):
+            worker["cli_environment"](environment)
+        assert worker["cli_environment"](environment | keys)[key_name] == keys[key_name]
+    else:
+        assert staged.name == "auth.json" and staged.read_bytes() == saved.read_bytes()
+        assert "auth.json" in task["Config"]["args"][1]
+        assert not keys.keys() & worker["cli_environment"](environment | keys).keys()
+        with pytest.raises(FileNotFoundError):
+            experiment.worker_auth(rendered, tmp_path / "missing.json")
+    argv = worker["command"](attempt["attempt_id"], environment)
+    assert argv[argv.index("--model") + 1] == model
+    if engine == "kiro":
+        assert argv[argv.index("--effort") + 1] == effort
+        assert "--require-mcp-startup" in argv
+        environment["KIRO_HOME"] = str(tmp_path / "kiro")
+        worker["prepare_kiro"](environment)
+        config = tmp_path / "kiro/settings/mcp.json"
+        assert config.stat().st_mode & 0o777 == 0o600
+        assert json.loads(config.read_text())["mcpServers"]["worker"]["headers"] == {
+            "Authorization": "Bearer harness-fixture"
+        }
+        with pytest.raises(ValueError, match="effort"):
+            worker["command"](
+                attempt["attempt_id"], environment | {"HARNESS_WORKER_EFFORT": "ultra"}
+            )
+    else:
+        assert f'model_reasoning_effort="{effort}"' in argv
+    assert "harness-fixture" not in argv
+
+
+def test_kiro_rejects_codex_saved_login(prepared):
+    workspace, invoke, _ = prepared
+    result = invoke(
+        "render",
+        "--receipt",
+        workspace / "phase2/receipt.json",
+        "--worker",
+        "kiro",
+        "--auth",
+        "auth-json",
+        "--model",
+        "claude-sonnet-4.6",
+        "--effort",
+        "low",
+        check=False,
+    )
+    assert result.returncode == 1 and "Kiro api-key" in result.stderr
+
+
+def test_worker_events_keep_complete_kiro_events_from_partial_capture():
+    stdout = (
+        b'{"type":"harness.worker_cli","version":"kiro-cli 3.7.0"}\n'
+        b'{"method":"session/update","params":{"sessionId":"one"}}\n'
+        b'{"method":"session/update","params":{"sessionId":"one"}}\n'
+        b'{"method":"session/update"'
+    )
+    assert experiment.worker_events(stdout, {"worker": "kiro"}) == (
+        1,
+        "kiro-cli 3.7.0",
+        True,
+    )
 
 
 def test_render_json_encodes_arguments_and_blocks_changed_job(prepared):
@@ -397,6 +542,37 @@ def test_failed_final_export_retries_without_another_submission(
     assert retried["execution"]["verified"]
     assert state["posts"] == 1
     assert state["requests"] == requests
+
+
+def test_api_key_delivery_survives_unparseable_native_activity(
+    worker_experiment, tmp_path
+):
+    path, receipt, args, state, _, _ = worker_experiment
+    receipt = experiment.render(
+        receipt,
+        path,
+        argparse.Namespace(
+            image=receipt["image"],
+            mcp_port=receipt["mcp_port"],
+            mcp_url=receipt["mcp_url"],
+            worker="kiro",
+            model="claude-sonnet-4.6",
+            effort="low",
+            auth="api-key",
+        ),
+    )
+    args.api_key_file = tmp_path / "kiro-key"
+    args.api_key_file.write_text("kiro-provider-fixture\n")
+    finished = experiment.run(receipt, path, args)
+    outcome = finished["execution"]
+    assert outcome["verified"], outcome.get("error")
+    assert outcome["activity_capture"]["stdout"] == "incomplete"
+    assert outcome["worker_sessions"] is None and outcome["exit_code"] == 0
+    assert outcome["artifact_id"] and outcome["grant_id"]
+    assert not (path.parent / "runtime").exists()
+    assert not (path.parent / "scratch").exists()
+    assert state["posts"] == 1
+    assert "kiro-provider-fixture" not in path.read_text()
 
 
 def test_killed_runner_recovers_its_credential_server_and_runtime(worker_experiment):

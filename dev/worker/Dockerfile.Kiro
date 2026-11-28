@@ -1,11 +1,7 @@
-FROM ghcr.io/icoretech/codex-docker:0.166.0@sha256:c0568397f66fb8cc22c541fbafe26948da5000d24770b0ac2e918517dfc02615
+FROM docker.io/sbx/kiro-image@sha256:5f6b354c985a032743ee995b58dad0dae5971b20bc73c4dd6402d39d8426fa18
 
-USER root
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends python3 \
-    && rm -rf /var/lib/apt/lists/*
-COPY dev/worker/harness-worker.py /usr/local/bin/harness-worker
-RUN chmod 0755 /usr/local/bin/harness-worker
-USER codex
+COPY --chmod=0755 dev/worker/harness-worker.py /usr/local/bin/harness-worker
+ENV HARNESS_WORKER_ENGINE=kiro
+USER agent
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/harness-worker"]
