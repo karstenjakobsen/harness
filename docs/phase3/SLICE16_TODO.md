@@ -92,3 +92,18 @@ validation and removed repeated target validation. Added authority-query
 regressions and tightened lifecycle error assertions. The full offline suite and
 evidence script pass with warnings treated as errors; supplemental `ty 0.0.112`
 checks pass for all three production packages.
+
+## Accepted handoff fixes
+
+- [x] Let delegated workers discover the owner's current catalog, choose skills without a required delegation argument, and retain exact skill revisions in successful worker-read audit. Keep explicit owner-created work-item revision restrictions and recheck live scope on every call. Cover existing saved items, optional hints, catalog updates/removal, foreign skills and withdrawn credentials.
+- [x] Carry nullable `delegation_grant_id` in the shared `OperatorRun` response through Python, HTTP and MCP. Verify parity for delegated and advisory runs and retained attribution after withdrawal. Keep `WorkDelegationRun` as a compatibility name.
+- [x] Update worker tool descriptions and user-facing documentation. Repair the live acceptance reply matcher for the two observed conditional-confirmation phrasings, with positive and negative unit regressions; leave production operator behavior unchanged.
+
+Follow-up verification on 2026-11-28: `make check` and supplemental type checks
+for all three production packages passed. `make test` passed 347 offline tests
+with 14 live/Nomad tests deselected; `make test-live` passed all eight signed-in
+scenarios after correcting the test-only reply matcher. Both suites treated
+warnings as errors. The updated evidence script passed 55 focused model, HTTP
+and MCP tests and recovered the original committing call after reopening, with
+zero attempts created by delegation. Initial matcher failures and final results
+are retained in [the evidence report](SLICE16_EVIDENCE.md).

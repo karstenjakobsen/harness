@@ -6,11 +6,15 @@ from contextlib import closing
 from threading import Barrier
 
 import pytest
+from fastapi.testclient import TestClient
 
 from harness_api import (
     GoalAPI,
     GoalValidationError,
     OperatorAPI,
+    SkillAPI,
+    SkillCatalog,
+    SkillSource,
     UserAPI,
     WorkAPI,
     WorkAuthorizationError,
@@ -20,6 +24,7 @@ from harness_api import (
     WorkStorageError,
     WorkValidationError,
 )
+from harness_api.app import create_app
 
 EMPTY = WorkspaceInput(source_path=None, base_sha=None)
 
@@ -426,3 +431,106 @@ def test_history_snapshot_retains_work_result_after_reply_finishes(workspace):
         goals.finish_tool_call(
             start_call(goals, run, goal), "returned", returned_work_item_id=item["id"]
         )
+
+
+def skill_source(key, revision=1):
+    return SkillSource(
+        f"skills/{key}",
+        f"kind: skill\nid: {key}\nrevision: {revision}\nname: {key}\n"
+        "description: Optional guidance\nauthor: Owner\n",
+        f"Instructions for {key} revision {revision}.",
+    )
+
+
+@pytest.mark.parametrize("brief", ["Write a report.", "Consider handoff if helpful."])
+def test_delegated_worker_discovers_current_catalog_and_chooses_skill(workspace, brief):
+    path, goals, work, goal, _grant, run = workspace
+    # The fix also covers already-saved delegations without any assigned skills.
+    item = delegate(work, goal, start_call(goals, run, goal), brief=brief)
+    assert item["skills"] == []
+    attempt = work.create_attempt("discover-skills", item["id"])
+    credential = "worker-credential"
+    attempt_grant = work.grant_attempt(attempt["id"], credential)
+    skills = SkillAPI(path)
+    skills.import_catalog(
+        SkillCatalog(
+            "a" * 40,
+            tuple(skill_source(key) for key in ("handoff", "notes", "reference")),
+        )
+    )
+    foreign = UserAPI(path).create_user("other-owner")
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute(
+            """INSERT INTO skill_revisions
+               (owner_user_id,skill_key,revision,name,description,manifest,instructions,
+                source_path,commit_sha,content_hash,discoverable)
+               SELECT ?, 'private', revision, name, description,
+                      replace(manifest,'id: notes','id: private'), 'Foreign instructions',
+                      source_path,commit_sha,content_hash,1
+               FROM skill_revisions WHERE owner_user_id = 1 AND skill_key = 'notes'""",
+            (foreign["id"],),
+        )
+    listed = work.list_skills(attempt["id"], credential)
+    assert [(s["id"], s["revision"]) for s in listed] == [
+        ("handoff", 1),
+        ("notes", 1),
+        ("reference", 1),
+    ]
+    # A brief hint does not restrict the worker's choice.
+    selected = work.read_skill(attempt["id"], credential, "notes", 1)
+    assert selected == skills.read_skill("notes", 1)
+    skills.import_catalog(SkillCatalog("b" * 40, (skill_source("notes", 2),)))
+    assert [
+        (s["id"], s["revision"]) for s in work.list_skills(attempt["id"], credential)
+    ] == [("notes", 2)]
+    for key, revision in (
+        ("notes", 1),
+        ("reference", 1),
+        ("missing", 1),
+        ("private", 1),
+    ):
+        with pytest.raises(WorkAuthorizationError):
+            work.read_skill(attempt["id"], credential, key, revision)
+    assert work.read_skill(attempt["id"], credential, "notes", 2) == skills.read_skill(
+        "notes", 2
+    )
+    calls = WorkAPI(path).list_worker_calls(attempt["id"])
+    reads = [
+        c for c in calls if c["tool"] == "read_skill" and c["outcome"] == "returned"
+    ]
+    assert [c["arguments"] for c in reads] == [
+        {"id": "notes", "revision": 1},
+        {"id": "notes", "revision": 2},
+    ]
+    assert all(c["grant_id"] == attempt_grant["id"] for c in reads)
+    assert skills.read_skill("notes", 1) == selected
+    assert work.get_work_item(item["id"]) == item
+    work.revoke_attempt_grant(attempt["id"])
+    work.grant_attempt(attempt["id"], "replacement")
+    for operation in (
+        lambda: work.list_skills(attempt["id"], credential),
+        lambda: work.read_skill(attempt["id"], credential, "notes", 2),
+    ):
+        with pytest.raises(WorkAuthorizationError):
+            operation()
+
+
+def test_delegation_grant_and_committing_item_match_http_run_response(workspace):
+    path, goals, work, goal, grant, run = workspace
+    call = start_call(goals, run, goal)
+    item = delegate(work, goal, call)
+    saved = GoalAPI(path).get_run(run["id"])
+    with TestClient(create_app(path)) as http:
+        response = http.get(f"/runs/{run['id']}").raise_for_status().json()
+        advisory = goals.start_run()
+        advisory_response = (
+            http.get(f"/runs/{advisory['id']}").raise_for_status().json()
+        )
+        assert advisory_response == goals.get_run(advisory["id"])
+        assert advisory_response["delegation_grant_id"] is None
+        work.withdraw_delegation(grant["id"])
+        assert http.get(f"/runs/{run['id']}").raise_for_status().json() == response
+    assert response == saved
+    assert response["delegation_grant_id"] == grant["id"]
+    assert response["calls"][0]["committed_work_item_id"] == item["id"]
+    assert response["calls"][0]["outcome"] == "unfinished"

@@ -8,8 +8,8 @@ the item to that revision, the operator, the exact grant and the committing call
 Delegation creates zero attempts and leaves the goal unchanged.
 [Implementation checklist](SLICE16_TODO.md)
 
-Production code and tests for this slice belong in `packages/harness_api`.
-Existing CLI and MCP callers continue to work through their current contracts.
+The initial model-only implementation belongs in `packages/harness_api`.
+The accepted follow-up below extends worker discovery and the shared run response.
 Acceptance uses public Python operations and temporary SQLite; no MCP server,
 Nomad cluster or AI session is required. Launch, worker/model/effort selection,
 provider credentials and new transport operations remain future work.
@@ -29,6 +29,20 @@ Recheck authority and the current goal revision before returning any replay.
 A goal revision change rejects even an identical replay. The committed item
 remains discoverable through history, which may be needed to recover after a
 lost reply.
+
+## Accepted follow-up
+
+The accepted follow-up on 2026-11-28 addresses two handoff gaps. Delegated workers
+can discover the workspace owner's current catalog and choose exact revisions
+to read, without a required skill-selection argument on delegation. Brief hints
+remain optional, and each successful read retains its exact revision in worker
+audit. Owner-created items retain their explicit skill restrictions. Catalog
+removal or replacement changes delegated workers' permission on the next call;
+past reads retain their original audit.
+
+Run inspection now shares a nullable `delegation_grant_id` through Python, HTTP
+and MCP. Worker protocol descriptions and tests are included in this follow-up;
+launch and provider credentials remain future work.
 
 ## Earlier discussion and future capabilities
 

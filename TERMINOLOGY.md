@@ -94,7 +94,7 @@ Historical progress applies the selected revision’s criteria to the evidence a
 
 | Term | Meaning in Harness |
 | --- | --- |
-| Work item | An immutable assignment with a generated integer ID: one goal ID and revision, registered operator, brief, exact skill revisions and workspace input. A changed brief creates a new work item. |
+| Work item | An immutable assignment with a generated integer ID: one goal ID and revision, registered operator, brief, explicit skill revision pins and workspace input. A changed brief creates a new work item. |
 | Work attempt | A prepared execution of a work item, identified by a caller-selected string ID within its workspace database. Preparation persists the ID before any execution. Repeating preparation for that work item returns the same attempt. An intentional execution retry uses a fresh attempt ID under the same work item. |
 | Attempt grant | Authority bound to one attempt and its credential. It permits the four worker MCP operations while the registered operator, open goal and bound revision remain valid. A withdrawn or replaced grant does not authorize an old credential. |
 | Work delegation grant | The trusted owner's permission for one registered operator to save work items for one exact goal. It is distinct from an assignment, definition grant, completion grant and attempt grant. A recorded run binds the exact grant; withdrawal or unregistration invalidates that run's delegation authority. |
@@ -103,8 +103,15 @@ Historical progress applies the selected revision’s criteria to the evidence a
 | Worker call | An audited worker MCP operation with its attempt, grant, arguments, timestamps and `returned`, `denied` or `failed` outcome. A successful submission links the saved artifact. |
 
 Worker MCP exposes `get_work_brief()`, `list_skills()`,
-`read_skill(id, revision)` and `submit_work_result(relative_path)`. Skill reads
-are limited to the exact revisions assigned to that work item. The trusted host
+`read_skill(id, revision)` and `submit_work_result(relative_path)`. Owner-created
+work items permit their explicitly assigned revisions. Delegated work items
+also permit the workspace owner's current discoverable catalog. The worker
+chooses what to read; brief hints are optional. The item's `skills` field records
+explicit pins, so an empty list on a delegated item does not restrict catalog
+discovery. Each read rechecks scope and
+records its exact skill ID and revision with the attempt and credential grant.
+Catalog removal or replacement ends permission for that revision unless it is
+explicitly assigned; earlier successful audit entries remain unchanged. The trusted host
 reads a regular file inside that attempt's mounted workspace and commits its
 independent copy before acknowledging a submission.
 
@@ -142,8 +149,10 @@ For delegation, `WorkspaceInput` contains `source_path` and `base_sha`, both nul
 for an empty workspace or an absolute path and full commit SHA for a requested
 repository. Paths are normalized lexically without reading the repository or
 resolving symlinks. Accepting this requested input authorizes no repository
-access. Access authorization belongs to a future launch operation. Slice 16
-adds only public Python model operations; CLI and MCP contracts stay unchanged.
+access. Access authorization belongs to a future launch operation. Delegation
+creation remains a public Python operation. Run inspection uses the same
+`OperatorRun` response through Python, HTTP and MCP, with a nullable
+`delegation_grant_id`. `WorkDelegationRun` is a compatibility name for that type.
 
 Container exit code and artifact submission are separate recorded outcomes.
 Neither completes or revises the goal. The operator reviews the retained result

@@ -199,15 +199,25 @@ grant requires a new run.
 
 Record a returned reply separately with `GoalAPI.finish_tool_call(call,
 "returned", returned_work_item_id=item["id"])`. The work item's commit link
-survives even if that step is interrupted. Python run reads use
-`WorkDelegationRun` for delegation-bound runs; existing transport run schemas
-retain their current contracts.
+survives even if that step is interrupted. Python, HTTP and MCP run reads share
+the `OperatorRun` response, including `delegation_grant_id` (null for other
+runs). `WorkDelegationRun` remains a compatibility name for that shared type.
+
+Delegated workers can discover the workspace owner's current skill catalog and
+choose which exact revisions to read. Brief hints are optional; delegation takes
+no skill-selection argument. Catalog imports update that permission, including
+for items saved before import: a removed or superseded revision is no longer
+readable unless explicitly assigned. Owner-created work items keep their pinned
+skill restrictions. Successful worker reads record the skill ID and revision
+with the attempt and credential grant, preserving earlier audit after updates.
 
 `GoalAPI.get_run_write_action` reports `delegate_work` while the run's exact
 grant remains active, and returns `None` after authority ends or the run finishes.
 
-This changes the unversioned SQLite schema. Use a fresh workspace for Slice 16;
-populated databases are reopened without migration. The
+The initial Slice 16 implementation changed the unversioned SQLite schema; use
+a fresh workspace when upgrading from earlier slices. The skill-discovery and
+run-response follow-up uses the same schema and covers existing delegated items.
+Populated databases are reopened without migration. The
 [acceptance script](docs/phase3/SLICE16_EVIDENCE.sh) runs the focused tests and a
 delegate-and-reopen example without a worker, scheduler or AI session.
 
@@ -333,8 +343,8 @@ checkout, mounts scratch at `/workspace` and provides model access when needed.
 `serve-mcp --host ADDRESS --allowed-host HOST` supports an explicitly reachable
 endpoint. Every worker request requires its attempt credential. Worker tools are
 `get_work_brief`, `list_skills`, `read_skill` and `submit_work_result(relative_path)`.
-The public model rechecks the exact grant, operator, goal revision and assigned
-skills. Artifact bytes, metadata and attribution are saved together. The first
+The public model rechecks the exact grant, operator, goal revision and permitted
+skill revisions. Artifact bytes, metadata and attribution are saved together. The first
 successful save stays authoritative on an authorized same-path retry after
 scratch changes or cleanup. Another path conflicts. Files are limited to 16 MiB,
 and submission validates regular files and path containment.
@@ -706,7 +716,8 @@ The revision list remains available at `/goals/{goal_id}/history`.
 
 Follow a `run_id` to `GET /runs/{run_id}`. An advisory run has null operator and
 grant fields. A delegated run identifies the registered operator and exact grant.
-Completion runs retain `completion_grant_id` and `granted_goal_id`. A run with
+Work delegation runs retain `delegation_grant_id` in Python, HTTP and MCP;
+that field is null on other runs. Completion runs retain `completion_grant_id` and `granted_goal_id`. A run with
 a creation or revision grant includes `definition_grant` with `id`, `operator_id`,
 `action`, and `goal_id`. The action is `create_goal` for top-level creation with
 `goal_id: null`, `create_subgoal` with the parent’s ID, or `revise_goal` for a single goal. The run outcome is

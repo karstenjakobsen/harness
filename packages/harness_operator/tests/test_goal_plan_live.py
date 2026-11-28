@@ -314,8 +314,9 @@ def test_ask_explains_monday_progress_before_and_after_revision(
 def assert_day_pass_answer(reply):
     text = " ".join(reply.casefold().replace("’", "'").replace("*", "").split())
     if re.search(
-        r"\bif (?:your |the )?(?:gym )?membership is (?:currently )?active,? "
-        r"(?:please )?confirm (?:it|that)(?: directly)?(?=[,.!?;]|$| and (?:i|we)\b)",
+        r"\bif (?:your |the )?(?:gym )?membership is (?:(?:currently|already) )?active,? "
+        r"(?:(?:please )?confirm (?:it|that)(?: directly)?(?=[,.!?;]|$| and (?:i|we)\b)|"
+        r"(?:confirming that|a direct confirmation from you) is enough to complete subgoal \d+\b)",
         text,
     ):
         return
@@ -364,6 +365,8 @@ def assert_day_pass_answer(reply):
         "You toured the gym. Did you end up joining?",
         "I left it open. If your membership is active, confirm that directly.",
         "If your membership is active, confirm that and I can complete subgoal 2.",
+        "If your membership is active, confirming that is enough to complete subgoal 2.",
+        "If your membership is already active, a direct confirmation from you is enough to complete subgoal 2.",
         "The next step is for the owner to confirm that the gym membership is active.",
     ],
 )
@@ -381,6 +384,7 @@ def test_day_pass_answer_accepts_a_missing_fact_or_a_question(reply):
         "Your membership is active. Do you have your membership card?",
         "The goal is still open. I need a copy of the day pass.",
         "If your membership is active, confirm that your day-pass receipt is valid.",
+        "If your membership is active, confirming the day-pass receipt is enough to complete subgoal 2.",
     ],
 )
 def test_day_pass_answer_rejects_replies_that_miss_the_gap(reply):

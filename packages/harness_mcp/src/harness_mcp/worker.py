@@ -165,13 +165,17 @@ def create_worker_app(
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def list_skills() -> SkillList:
-        """List only the exact skill revisions assigned to this attempt."""
+        """Discover permitted skills and choose which guidance is useful.
+
+        Delegated work can use the owner's current catalog. Explicit owner
+        assignments expose only their pinned revisions. Brief hints are optional.
+        """
         session = server.authenticated_session()
         return {"skills": api.list_skills(session.attempt_id, session.credential)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def read_skill(id: StrictString, revision: PositiveInteger) -> SkillRevision:
-        """Read the instructions for one assigned skill revision."""
+        """Read one permitted skill revision you choose to use."""
         session = server.authenticated_session()
         return api.read_skill(session.attempt_id, session.credential, id, revision)
 

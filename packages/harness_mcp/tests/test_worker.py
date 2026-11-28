@@ -16,6 +16,7 @@ from harness_api import (
     SkillReference,
     SkillSource,
     WorkAPI,
+    WorkspaceInput,
 )
 from harness_mcp.server import create_server
 from harness_mcp.worker import create_worker_app
@@ -299,3 +300,62 @@ async def test_advisory_mcp_cannot_discover_or_invoke_worker_tools(worker):
             assert (await session.call_tool(name, arguments)).isError
     assert work.list_worker_calls(attempt["id"]) == []
     assert work.get_attempt(attempt["id"])["artifact_id"] is None
+
+
+@pytest.mark.anyio
+async def test_delegated_worker_discovers_catalog_and_audits_selected_revision(worker):
+    path, work, original, _, _ = worker
+    goals = GoalAPI(path)
+    grant = work.grant_delegation(original["goal_id"], original["operator_id"])
+    run = goals.start_run(delegation_grant_id=grant["id"])
+    call = goals.start_tool_call(
+        run["id"],
+        "delegate_work",
+        target_goal_id=original["goal_id"],
+        target_revision=1,
+    )
+    item = work.delegate_work(
+        original["goal_id"],
+        1,
+        "Consider handoff if helpful.",
+        WorkspaceInput(source_path=None, base_sha=None),
+        "choose-guidance",
+        call=call,
+    )
+    work.create_attempt("delegated-worker", item["id"])
+    attempt_grant = work.grant_attempt("delegated-worker", "delegated-credential")
+    async with worker_session(work, "delegated-credential") as (session, _, _):
+        listed = await session.call_tool("list_skills", {})
+        assert not listed.isError, listed.content
+        assert [
+            (s["id"], s["revision"]) for s in listed.structuredContent["skills"]
+        ] == [("handoff", 2)]
+        selected = await session.call_tool(
+            "read_skill", {"id": "handoff", "revision": 2}
+        )
+        assert selected.structuredContent == SkillAPI(path).read_skill("handoff", 2)
+        # The older owner assignment's revision is outside this worker's scope.
+        assert (
+            await session.call_tool("read_skill", {"id": "handoff", "revision": 1})
+        ).isError
+    calls = WorkAPI(path).list_worker_calls("delegated-worker")
+    read = next(
+        c for c in calls if c["tool"] == "read_skill" and c["outcome"] == "returned"
+    )
+    assert read["arguments"] == {"id": "handoff", "revision": 2}
+    assert read["grant_id"] == attempt_grant["id"]
+
+
+@pytest.mark.anyio
+async def test_operator_run_tool_preserves_delegation_grant(worker):
+    path, work, item, _, _ = worker
+    goals = GoalAPI(path)
+    grant = work.grant_delegation(item["goal_id"], item["operator_id"])
+    run = goals.start_run(delegation_grant_id=grant["id"])
+    reader = goals.start_run()
+    server = create_server(goals, run_id=reader["id"])
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool("get_run", {"run_id": run["id"]})
+    assert not result.isError, result.content
+    assert result.structuredContent == goals.get_run(run["id"])
+    assert result.structuredContent["delegation_grant_id"] == grant["id"]

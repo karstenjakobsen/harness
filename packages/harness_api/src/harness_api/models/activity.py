@@ -145,6 +145,7 @@ class OperatorRun(TypedDict):
     mode: Literal["advisory", "delegated"]
     operator_id: int | None
     completion_grant_id: int | None
+    delegation_grant_id: int | None
     granted_goal_id: int | None
     definition_grant: DefinitionGrant | None
     started_at: str
@@ -153,8 +154,8 @@ class OperatorRun(TypedDict):
     calls: list[RunCall]
 
 
-class WorkDelegationRun(OperatorRun):
-    delegation_grant_id: int
+# Compatibility name: every run now carries the same nullable grant field.
+WorkDelegationRun = OperatorRun
 
 
 def run_read_reference(run: OperatorRun) -> RunReadReference:
@@ -209,9 +210,7 @@ def run_row(connection: sqlite3.Connection, run_id: int, owner_id: int) -> sqlit
     return row
 
 
-def run_record(
-    row: sqlite3.Row, calls: list[RunCall]
-) -> OperatorRun | WorkDelegationRun:
+def run_record(row: sqlite3.Row, calls: list[RunCall]) -> OperatorRun:
     definition_grant = None
     if row["definition_grant_id"] is not None:
         definition_grant = DefinitionGrant(
@@ -220,12 +219,13 @@ def run_record(
             action=row["definition_action"],
             goal_id=row["definition_goal_id"],
         )
-    record = OperatorRun(
+    return OperatorRun(
         id=row["id"],
         owner_user_id=row["owner_user_id"],
         mode="advisory" if row["operator_id"] is None else "delegated",
         operator_id=row["operator_id"],
         completion_grant_id=row["completion_grant_id"],
+        delegation_grant_id=row["delegation_grant_id"],
         granted_goal_id=row["granted_goal_id"],
         definition_grant=definition_grant,
         started_at=row["started_at"],
@@ -233,11 +233,6 @@ def run_record(
         outcome=row["outcome"],
         calls=calls,
     )
-    if row["delegation_grant_id"] is not None:
-        return WorkDelegationRun(
-            **record, delegation_grant_id=row["delegation_grant_id"]
-        )
-    return record
 
 
 def revision_reference(row: sqlite3.Row) -> RevisionReference | None:

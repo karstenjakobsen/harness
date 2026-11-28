@@ -1,7 +1,7 @@
 # Harness engineering guidelines
 
 - Read the [terminology and attribution rules](TERMINOLOGY.md) and the [command catalog](CATALOG.md). And update accordingly if you make changes to source. 
-- Follow the active [Phase 3 Slice 16 decision](docs/phase3/SLICE16.md) and its [implementation checklist](docs/phase3/SLICE16_TODO.md). Slice 16 production code and tests belong in `packages/harness_api`; existing CLI and MCP callers continue to work through their current contracts. Delegation saves a work item and creates zero attempts. Launch and provider credential capabilities remain future work.
+- Follow the active [Phase 3 Slice 16 decision](docs/phase3/SLICE16.md) and its [implementation checklist](docs/phase3/SLICE16_TODO.md). Domain operations and authority checks belong in `packages/harness_api`. The accepted follow-up also covers worker MCP descriptions and protocol tests in `packages/harness_mcp`, current-catalog discovery for delegated workers, and a shared run response carrying the delegation grant ID. Delegation saves a work item and creates zero attempts. Launch and provider credential capabilities remain future work.
 - Phase 1 and Phase 2 plans and evidence are retained in `docs/phase1/` and `docs/phase2/`. The [Phase 2 plan](docs/phase2/phase2.md) and [prerequisite checklist](docs/phase2/PHASE2_DECOUPLING_TODO.md) document the preparation/execution boundary: Harness prepares attempts and serves worker MCP. We launch workloads ourselves by rendering Jinja and submitting the job directly to Nomad.
 
 ## API and adapter boundaries

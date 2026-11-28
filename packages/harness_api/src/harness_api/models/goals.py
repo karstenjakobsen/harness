@@ -33,7 +33,6 @@ from .activity import (
     RevisionReadReference,
     RevisionReference,
     SkillReference,
-    WorkDelegationRun,
     related_calls,
     revision_reference,
     run_calls,
@@ -665,7 +664,7 @@ class GoalAPI(WorkspaceDatabase):
         *,
         definition_grant_id: int | None = None,
         delegation_grant_id: int | None = None,
-    ) -> OperatorRun | WorkDelegationRun:
+    ) -> OperatorRun:
         """Bind a run to the exact grant checked at launch, or start an advisory run."""
         if (
             sum(
@@ -756,9 +755,7 @@ class GoalAPI(WorkspaceDatabase):
                 return None
             return None
 
-    def get_run(
-        self, run_id: int, *, call: CallReference | None = None
-    ) -> OperatorRun | WorkDelegationRun:
+    def get_run(self, run_id: int, *, call: CallReference | None = None) -> OperatorRun:
         _validate_positive_integer(run_id, "Run ID")
         exclude_sequence = (
             call["sequence"] if call is not None and call["run_id"] == run_id else None

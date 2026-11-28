@@ -2,7 +2,9 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 
-uv run --locked --all-packages pytest -q packages/harness_api/tests/test_work_delegation.py
+uv run --locked --all-packages pytest -q \
+    packages/harness_api/tests/test_work_delegation.py \
+    packages/harness_mcp/tests/test_worker.py
 uv run --locked --package harness-api python - <<'PY'
 import json
 from pathlib import Path
@@ -43,5 +45,5 @@ with TemporaryDirectory(prefix="harness-slice16-") as directory:
         "call_outcome": history["calls"][0]["outcome"],
         "reopened": True, "attempt_count": len(attempts), "goal_status": "active",
     }, indent=2))
-print("Live checks: not required; Slice 16 adds Python model operations only.")
+print("Signed-in operator checks run separately with make test-live.")
 PY

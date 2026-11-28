@@ -29,6 +29,21 @@ from .work_delegation import WorkDelegationGrant, active_delegation_grant
 
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 
+# A delegated worker chooses from the owner's current catalog. Explicit owner
+# assignments retain their pinned revisions, including historical revisions.
+WORKER_SKILL_SCOPE = """
+FROM skill_revisions AS snapshot
+LEFT JOIN work_item_skills AS assigned
+    ON assigned.snapshot_id = snapshot.id AND assigned.work_item_id = :work_item_id
+WHERE snapshot.owner_user_id = :owner AND (
+    assigned.work_item_id IS NOT NULL OR (
+        snapshot.discoverable = 1 AND EXISTS (
+            SELECT 1 FROM work_delegations WHERE work_item_id = :work_item_id
+        )
+    )
+)
+"""
+
 
 class WorkspaceInput(TypedDict):
     """Requested input only; accepting it authorizes no repository access."""
@@ -985,10 +1000,13 @@ class WorkAPI(WorkspaceDatabase):
             return [
                 SkillSummary(**row)
                 for row in call.db.execute(
-                    """SELECT snapshot.skill_key AS id,snapshot.revision,snapshot.name,snapshot.description
-                   FROM work_item_skills AS assigned JOIN skill_revisions AS snapshot ON snapshot.id = assigned.snapshot_id
-                   WHERE assigned.work_item_id = ? AND snapshot.owner_user_id = ? ORDER BY assigned.position""",
-                    (call.attempt["work_item_id"], ADMIN_USER_ID),
+                    "SELECT snapshot.skill_key AS id,snapshot.revision,snapshot.name,snapshot.description "
+                    + WORKER_SKILL_SCOPE
+                    + " ORDER BY assigned.position,snapshot.skill_key,snapshot.revision",
+                    {
+                        "work_item_id": call.attempt["work_item_id"],
+                        "owner": ADMIN_USER_ID,
+                    },
                 )
             ]
 
@@ -1002,14 +1020,19 @@ class WorkAPI(WorkspaceDatabase):
             _positive(revision, "Skill revision")
             row = call.db.execute(
                 """SELECT snapshot.skill_key AS id,snapshot.revision,snapshot.name,snapshot.description,
-                          snapshot.manifest,snapshot.instructions,snapshot.source_path,snapshot.commit_sha,snapshot.content_hash
-                   FROM work_item_skills AS assigned JOIN skill_revisions AS snapshot ON snapshot.id = assigned.snapshot_id
-                   WHERE assigned.work_item_id = ? AND snapshot.owner_user_id = ? AND snapshot.skill_key = ? AND snapshot.revision = ?""",
-                (call.attempt["work_item_id"], ADMIN_USER_ID, skill_id, revision),
+                          snapshot.manifest,snapshot.instructions,snapshot.source_path,snapshot.commit_sha,snapshot.content_hash """
+                + WORKER_SKILL_SCOPE
+                + " AND snapshot.skill_key = :skill_id AND snapshot.revision = :revision",
+                {
+                    "work_item_id": call.attempt["work_item_id"],
+                    "owner": ADMIN_USER_ID,
+                    "skill_id": skill_id,
+                    "revision": revision,
+                },
             ).fetchone()
             if row is None:
                 raise WorkAuthorizationError(
-                    "Only the exact assigned skill revisions may be read."
+                    "Only assigned or permitted catalog skill revisions may be read."
                 )
             return cast(SkillRevision, dict(row))
 

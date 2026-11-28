@@ -128,7 +128,9 @@ Slice 16 adds `WorkAPI.delegate_work` through the public Python model only.
 The trusted owner grants delegation for one goal with `grant_delegation`;
 `GoalAPI.start_run(delegation_grant_id=...)` binds that exact authority. There is
 no delegation CLI command or operator MCP tool yet. Existing commands below
-retain their contracts. [Model delegation](README.md#delegate-a-work-item-through-python)
+retain their command arguments. Run inspection now includes the exact
+`delegation_grant_id`, null on other run types, consistently through Python,
+HTTP and MCP. [Model delegation](README.md#delegate-a-work-item-through-python)
 
 These owner commands use `WorkAPI` and print JSON, except `serve-mcp`, which
 runs until interrupted. All accept `operator work --workspace PATH COMMAND`.
@@ -155,8 +157,11 @@ the documented shell sequence. Slice 11 can reuse these installed CLI commands.
 
 Worker MCP exposes `get_work_brief()`, `list_skills()`,
 `read_skill(id, revision)` and `submit_work_result(relative_path)`. Each request
-uses its Bearer credential to establish the attempt and exact grant. Skills are
-scoped to assigned revisions. The first successful submission saves independent
+uses its Bearer credential to establish the attempt and exact grant. Delegated
+workers can discover the owner's current skill catalog and choose which exact
+revisions to read; brief hints remain optional. Owner-created work items retain
+their explicit revision restrictions. Every skill read is scoped and audited
+with its ID and revision. The first successful submission saves independent
 bytes with the attempt, goal revision, operator and grant. An authorized retry
 of that path returns the original artifact after scratch changes or cleanup.
 Another path conflicts. Goal completion remains a separate decision.
